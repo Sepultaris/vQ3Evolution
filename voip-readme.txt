@@ -1,4 +1,7 @@
-ioquake3 VoIP support documentation.
+VQ3 Evolution VoIP support documentation.
+
+This document is inherited from ioquake3. Upstream names below are retained
+where they describe the original implementation and community resources.
 Last updated 6/25/2008 by Ryan C. Gordon.
 
 There are two ways to use VoIP in ioquake3. You can either use Mumble as an
@@ -197,6 +200,5 @@ The initial VoIP work was done by Ryan C. Gordon <icculus@icculus.org>, and
  forums aren't helpful.
 
 // end of voip-README.txt ...
-
 
 

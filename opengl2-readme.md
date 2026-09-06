@@ -1,5 +1,9 @@
 # OpenGL2
-<insert ascii art here>
+
+> This is inherited upstream renderer documentation. References to ioquake3
+> and its historical executable names describe the original implementation.
+> VQ3 Evolution builds this renderer as an optional backend and uses
+> `vQ3Evolution.exe` on Windows.
 
 OpenGL2 is an alternate renderer for ioquake3.  It aims to implement modern
 features and technologies into the id tech 3 engine, but without sacrificing

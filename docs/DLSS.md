@@ -1,4 +1,4 @@
-# NVIDIA DLSS support
+# VQ3 Evolution NVIDIA DLSS support
 
 The Windows x64 Vulkan renderer integrates NVIDIA Streamline 2.12.0 directly
 in native engine code. Nothing is supplied through a PK3. The integration
@@ -81,8 +81,8 @@ make BUILD_DIR=build-widescreen PLATFORM=mingw64 ARCH=x86_64 \
   USE_NVIDIA_DLSS=1 -j4 release
 ```
 
-The resulting executable is under
-`build-widescreen/release-mingw64-x86_64`.
+The resulting executable is
+`build-widescreen/release-mingw64-x86_64/vQ3Evolution.exe`.
 
 ## Settings
 

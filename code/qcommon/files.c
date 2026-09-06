@@ -3651,7 +3651,7 @@ static void FS_CheckPak0( void )
 		}
 
 		Q_strcat(errorText, sizeof(errorText),
-				va("Also check that your ioq3 executable is in "
+				va("Also check that your VQ3 Evolution executable is in "
 					"the correct place and that every file "
 					"in the \"%s\" directory is present and readable", BASEGAME));
 

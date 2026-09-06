@@ -1,7 +1,14 @@
-## ioquake3 Security
-We take security very seriously at ioquake3. We welcome any peer review of our 100% free software source code to ensure nobody's ioquake3 clients or servers are ever compromised or hacked.
+# VQ3 Evolution security policy
 
-### Where should I report security issues?
+Security issues affecting the engine, renderer, networking, file loading, or
+third-party integration should be disclosed privately to the project maintainer
+before public technical details are posted.
 
-In order to give the community time to respond and upgrade we strongly urge you report all security issues privately.
-Please contact zachary@ioquake.org directly to provide details and repro steps and we will respond ASAP.
+This repository does not yet publish a dedicated security contact or hosted
+advisory channel. Until one is configured, contact the repository owner through
+a private channel and include the affected revision, reproduction steps, impact,
+and any proposed fix. Do not attach proprietary game data, credentials, or
+NVIDIA runtime DLLs.
+
+Issues proven to originate entirely in an upstream component should also be
+reported to that upstream project using its security process.

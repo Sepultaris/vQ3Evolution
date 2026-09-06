@@ -1,3 +1,10 @@
+VQ3 Evolution legacy autoupdater notes
+======================================
+
+This is inherited ioquake3 design documentation. The upstream updater service
+and package names below do not represent a VQ3 Evolution update channel, and
+automatic updater builds remain disabled by default.
+
 The updater program's code is public domain. The rest of ioquake3 is not.
 
 The source code to the autoupdater is in the code/autoupdater directory.
@@ -162,4 +169,3 @@ Items to consider for future revisions:
 Questions? Ask Ryan: icculus@icculus.org
 
 --ryan.
-
