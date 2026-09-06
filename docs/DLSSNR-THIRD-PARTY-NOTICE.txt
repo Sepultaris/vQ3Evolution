@@ -1,0 +1,14 @@
+DLSS Neural Rendering integration contract notice
+=================================================
+
+The feature-18 parameter contract and the nvngx.dll caller-boundary technique
+were informed by DLSS5-Reshade-AIO:
+
+  https://github.com/kibblerz/DLSS5-Reshade-AIO
+
+Copyright 2026 kibblerz
+Licensed under the Apache License, Version 2.0.
+
+This notice covers the open-source integration technique only. NVIDIA's
+nvngx_dlssnr.dll is proprietary software and is not distributed by this
+project.

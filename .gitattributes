@@ -1,0 +1,60 @@
+# Keep source and build scripts consistent across Windows, Linux, and macOS.
+* text=auto
+.gitattributes text eol=lf
+.gitignore text eol=lf
+
+*.c text eol=lf
+*.cc text eol=lf
+*.cpp text eol=lf
+*.h text eol=lf
+*.hpp text eol=lf
+*.m text eol=lf
+*.s text eol=lf
+*.asm text eol=lf
+*.glsl text eol=lf
+*.vert text eol=lf
+*.frag text eol=lf
+*.comp text eol=lf
+*.sh text eol=lf
+Makefile text eol=lf
+*.mk text eol=lf
+*.md text eol=lf
+*.txt text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
+*.xml text eol=lf
+*.plist text eol=lf
+*.pbxproj text eol=lf
+*.xcworkspacedata text eol=lf
+*.nsi text eol=lf
+*.ps1 text eol=crlf
+*.bat text eol=crlf
+*.cmd text eol=crlf
+*.sln text eol=crlf
+*.vcproj text eol=crlf
+*.vcxproj text eol=crlf
+*.vcxproj.filters text eol=crlf
+
+# Bundled libraries, images, and generated shader bytecode are binary.
+*.a binary
+*.dll binary
+*.dylib binary
+*.lib binary
+*.exe binary
+*.ico binary
+*.icns binary
+*.bmp binary
+*.gif binary
+*.jpg binary
+*.jpeg binary
+*.png binary
+*.tga binary
+*.xcf binary
+*.wav binary
+*.ogg binary
+*.spv binary
+*.cspv binary
+*.zip binary
+*.7z binary
+*.gz binary
+*.bz2 binary

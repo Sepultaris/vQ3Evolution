@@ -1,0 +1,103 @@
+# -----------------------------------------------------------------------------
+# VQ3 Evolution: generated build trees and local build configuration
+# -----------------------------------------------------------------------------
+/build/
+/build-*/
+/Makefile.local
+/compile_commands.json
+/.cache/
+
+# Build archives created at the repository root
+/debug-*.zip
+/release-*.zip
+/build-*.zip
+
+# -----------------------------------------------------------------------------
+# Local game data and runtime output
+# -----------------------------------------------------------------------------
+# Do not commit proprietary Quake III data or locally assembled packages.
+*.pk3
+*.pk3dir/
+
+# Per-user engine state and output. Source-controlled example configs should use
+# a more specific filename instead of q3config.cfg or autoexec.cfg.
+q3config.cfg
+autoexec.cfg
+games.log
+crashlog.txt
+stdout.log
+stderr.log
+condump*.txt
+*.dmp
+*.dm_*
+screenshots/
+videos/
+demos/
+
+# -----------------------------------------------------------------------------
+# Temporary and editor files
+# -----------------------------------------------------------------------------
+*.swp
+*.swo
+*~
+*.tmp
+*.temp
+*.bak
+*.orig
+*.rej
+*.patch~
+*tags
+
+# Windows
+Thumbs.db
+Thumbs.db:encryptable
+Desktop.ini
+$RECYCLE.BIN/
+
+# macOS
+.Spotlight-V100/
+.Trashes/
+._*
+.AppleDouble
+.DS_Store
+.LSOverride
+Icon?
+
+# -----------------------------------------------------------------------------
+# Visual Studio / VS Code / JetBrains
+# -----------------------------------------------------------------------------
+/.vs/
+/.vscode/
+.idea/
+*.sdf
+*.opensdf
+*.suo
+*.user
+*.VC.db
+*.VC.opendb
+*.opendb
+*.ipch
+*.aps
+*.ncb
+*.sbr
+*.tlog
+*.lastbuildstate
+
+# -----------------------------------------------------------------------------
+# Xcode
+# -----------------------------------------------------------------------------
+*.mode1v3
+*.mode2v3
+*.pbxuser
+*.perspectivev3
+*.xcuserstate
+*.moved-aside
+*~.nib
+DerivedData/
+project.xcworkspace/
+xcuserdata/
+profile
+!default.pbxuser
+!default.mode1v3
+!default.mode2v3
+!default.perspectivev3
