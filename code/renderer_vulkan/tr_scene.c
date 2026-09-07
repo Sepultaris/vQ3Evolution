@@ -250,9 +250,21 @@ void RE_AddRefEntityToScene( const refEntity_t *ent ) {
 	}
 
 	backEndData->entities[r_numentities].e = *ent;
+    backEndData->entities[r_numentities].motionId = 0;
+    backEndData->entities[r_numentities].motionGeneration = 0;
 	backEndData->entities[r_numentities].lightingCalculated = qfalse;
 
 	r_numentities++;
+}
+
+void RE_AddRefEntityTracked(const refEntity_t *ent, int motionId, int generation)
+{
+    int slot = r_numentities;
+    RE_AddRefEntityToScene(ent);
+    if (r_numentities == slot + 1 && motionId > 0 && motionId < 65535) {
+        backEndData->entities[slot].motionId = motionId;
+        backEndData->entities[slot].motionGeneration = generation;
+    }
 }
 
 

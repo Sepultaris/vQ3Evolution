@@ -276,7 +276,7 @@ static void RB_RenderDrawSurfList( drawSurf_t* drawSurfs, int numDrawSurfs )
 		// a "entityMergable" shader is a shader that can have surfaces from seperate
 		// entities merged into a single batch, like smoke and blood puff sprites
 		if (shader != oldShader || fogNum != oldFogNum || dlighted != oldDlighted 
-			|| ( entityNum != oldEntityNum && !shader->entityMergable ) ) {
+			|| ( entityNum != oldEntityNum && (!shader->entityMergable || r_rayTracing->integer == 2) ) ) {
 			if (oldShader != NULL) {
 				RB_EndSurface();
 			}
@@ -528,6 +528,12 @@ void R_IssueRenderCommands( qboolean runPerformanceCounters )
                     RB_EndSurface();
                 }
 
+                /* HUD models can be submitted before the first stretch-pic
+                 * (e.g. the ammo/head icons in FFA). Finish the world using
+                 * its own camera and depth before any of those views render. */
+                if (cmd->refdef.rd.rdflags & RDF_NOWORLDMODEL)
+                    vk_temporal_begin_ui();
+
                 backEnd.refdef = cmd->refdef;
                 backEnd.viewParms = cmd->viewParms;
 				vk_temporal_prepare_view(backEnd.viewParms.projectionMatrix,
@@ -579,7 +585,7 @@ void R_IssueRenderCommands( qboolean runPerformanceCounters )
             {   
                 const screenshotCommand_t * const cmd = data;
 
-                RB_TakeScreenshot( cmd->width, cmd->height, cmd->fileName, cmd->jpeg);
+                vk_queue_screenshot(cmd);
 
                 data += sizeof(screenshotCommand_t);
             } break;
@@ -589,7 +595,7 @@ void R_IssueRenderCommands( qboolean runPerformanceCounters )
             {
                 const videoFrameCommand_t * const cmd = data;
 
-                RB_TakeVideoFrameCmd( cmd );
+                vk_queue_video_frame(cmd);
 
                 data += sizeof(videoFrameCommand_t);
             } break;

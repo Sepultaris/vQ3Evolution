@@ -106,6 +106,21 @@ extern cvar_t* r_dlssAvailable;
 extern cvar_t* r_dlssNeuralRenderingAvailable;
 extern cvar_t* r_dlssFrameGenerationAvailable;
 extern cvar_t* r_reflexAvailable;
+extern cvar_t* r_rayTracing;
+extern cvar_t* r_pathTracingSamples;
+extern cvar_t* r_pathTracingBounces;
+extern cvar_t* r_pathTracingExposure;
+extern cvar_t* r_pathTracingReference;
+extern cvar_t* r_pathTracingDenoise;
+extern cvar_t* r_pathTracingTemporal;
+extern cvar_t* r_pathTracingHistory;
+extern cvar_t* r_pathTracingTemporalDebug;
+extern cvar_t* r_pathTracingDebug;
+extern cvar_t* r_pathTracingProfile;
+extern cvar_t* r_pathTracingTestScene;
+extern cvar_t* r_rayTracingShadowStrength;
+extern cvar_t* r_rayTracingShadowBias;
+extern cvar_t* r_rayTracingAvailable;
 
 void R_Register( void );
 

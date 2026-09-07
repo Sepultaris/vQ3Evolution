@@ -9,6 +9,7 @@ void vk_createPipelineLayout(void);
 
 void vk_destroyShaderStagePipeline(void);
 void vk_destroyGlobalStagePipeline(void);
+VkPipeline vk_pipeline_for_scene(VkPipeline pipeline);
 
 void R_PipelineList_f(void);
 

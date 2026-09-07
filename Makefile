@@ -1010,6 +1010,10 @@ ifneq ($(HAVE_VM_COMPILED),true)
   BUILD_GAME_QVM=0
 endif
 
+# Native Vulkan ray-query effects. Unsupported devices are detected at runtime
+# and retain the raster renderer without requiring a separate build.
+BASE_CFLAGS += -DUSE_VULKAN_RAY_TRACING
+
 TARGETS =
 
 ifndef FULLBINEXT
@@ -1882,6 +1886,8 @@ Q3VKOBJ = \
   $(B)/renderer_vulkan/vk_pipelines.o \
   $(B)/renderer_vulkan/vk_frame.o \
   $(B)/renderer_vulkan/vk_temporal.o \
+	$(B)/renderer_vulkan/vk_raytracing.o \
+	$(B)/renderer_vulkan/vk_pathtrace.o \
   $(B)/renderer_vulkan/vk_sharpen.o \
   $(B)/renderer_vulkan/vk_swapchain.o \
   $(B)/renderer_vulkan/vk_screenshot.o \
@@ -1890,6 +1896,10 @@ Q3VKOBJ = \
   \
   $(B)/renderer_vulkan/vk_shaders.o \
   $(B)/renderer_vulkan/dlss_sharpen_comp.o \
+	$(B)/renderer_vulkan/rt_shadows_comp.o \
+	$(B)/renderer_vulkan/pathtrace_comp.o \
+	$(B)/renderer_vulkan/pt_denoise_comp.o \
+	$(B)/renderer_vulkan/pt_temporal_comp.o \
   $(B)/renderer_vulkan/multi_texture_clipping_plane_vert.o \
   $(B)/renderer_vulkan/multi_texture_frag.o \
   $(B)/renderer_vulkan/multi_texture_vert.o \

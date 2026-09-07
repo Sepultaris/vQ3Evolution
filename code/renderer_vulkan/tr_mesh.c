@@ -267,7 +267,7 @@ void R_AddMD3Surfaces( trRefEntity_t *ent )
 	//
 	// compute LOD
 	// model has only 1 LOD level, skip computations and bias
-    if ( tr.currentModel->numLods > 1 )
+    if ( tr.currentModel->numLods > 1 && r_rayTracing->integer != 2 )
 	    lod = R_ComputeLOD( ent );
 
 	header = tr.currentModel->md3[lod];
@@ -277,7 +277,7 @@ void R_AddMD3Surfaces( trRefEntity_t *ent )
 	// is outside the view frustum.
 	//
 	cull = R_CullModel ( header, ent );
-	if ( cull == CULL_OUT ) {
+	if ( cull == CULL_OUT && r_rayTracing->integer != 2 ) {
 		return;
 	}
 
@@ -334,7 +334,7 @@ void R_AddMD3Surfaces( trRefEntity_t *ent )
 		// we will add shadows even if the main object isn't visible in the view
 
 		// don't add third_person objects if not viewing through a portal
-		if ( !personalModel )
+		if ( !personalModel || r_rayTracing->integer == 2 )
         {
 	        // see if we are in a fog volume
 	        fogNum = R_ComputeFogNum( header, ent );
@@ -344,4 +344,3 @@ void R_AddMD3Surfaces( trRefEntity_t *ent )
 		surface = (md3Surface_t *)( (byte *)surface + surface->ofsEnd );
 	}
 }
-

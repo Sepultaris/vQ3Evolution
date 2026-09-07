@@ -10,6 +10,7 @@
 #include "tr_backend.h"
 #include "vk_streamline.h"
 #include "vk_temporal.h"
+#include "vk_raytracing.h"
 #include "tr_cvar.h"
 
 // vk_init have nothing to do with tr_init
@@ -26,6 +27,7 @@ void vk_initialize(void)
     vk_createWindow();
 
     vk_getProcAddress(); 
+	ri.Cvar_Set("r_rayTracingAvailable", vk_rt_supported() ? "1" : "0");
  
 	// Swapchain. vk.physical_device required to be init. 
 	vk_createSwapChain(vk.device, vk.surface, vk.surface_format);

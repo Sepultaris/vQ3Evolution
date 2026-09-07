@@ -5,10 +5,17 @@
 #include "vk_temporal.h"
 #include "vk_streamline.h"
 #include "vk_sharpen.h"
+#include "vk_raytracing.h"
+#include "vk_pathtrace.h"
 #include "tr_cvar.h"
+#include "tr_globals.h"
 
 #include <math.h>
 #include <string.h>
+
+#if defined(USE_NVIDIA_STREAMLINE) || defined(USE_VULKAN_RAY_TRACING)
+#define USE_TEMPORAL_RENDER_TARGETS
+#endif
 
 typedef struct {
 	VkImage image;
@@ -35,6 +42,7 @@ typedef struct {
 	float jitter_x;
 	float jitter_y;
 	float projection[16];
+	float render_projection[16];
 	float view[16];
 	float camera_origin[3];
 	float camera_axis[9];
@@ -44,10 +52,12 @@ typedef struct {
 	float camera_aspect;
 	temporal_image_t scene_color;
 	temporal_image_t scene_depth;
+	temporal_image_t raytraced_color;
 	temporal_image_t neural_color;
 	temporal_image_t output_color;
 	temporal_image_t sharpened_color;
 	temporal_image_t motion_vectors;
+    temporal_image_t path_depth;
 	qboolean sharpen_ready;
 	VkRenderPass scene_render_pass;
 	VkRenderPass ui_render_pass;
@@ -56,7 +66,7 @@ typedef struct {
 
 static temporal_state_t temporal;
 
-#ifdef USE_NVIDIA_STREAMLINE
+#ifdef USE_TEMPORAL_RENDER_TARGETS
 
 static float halton(uint32_t index, uint32_t base)
 {
@@ -204,6 +214,19 @@ static void initialize_layouts(void)
 			VK_IMAGE_LAYOUT_GENERAL);
 		temporal.neural_color.layout = VK_IMAGE_LAYOUT_GENERAL;
 	}
+	if (temporal.raytraced_color.image) {
+		record_image_layout_transition(command_buffer,
+			temporal.raytraced_color.image, VK_IMAGE_ASPECT_COLOR_BIT, 0,
+			VK_IMAGE_LAYOUT_UNDEFINED, VK_ACCESS_SHADER_WRITE_BIT,
+			VK_IMAGE_LAYOUT_GENERAL);
+		temporal.raytraced_color.layout = VK_IMAGE_LAYOUT_GENERAL;
+	}
+    if (temporal.path_depth.image) {
+        record_image_layout_transition(command_buffer, temporal.path_depth.image,
+            VK_IMAGE_ASPECT_COLOR_BIT, 0, VK_IMAGE_LAYOUT_UNDEFINED,
+            VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT, VK_IMAGE_LAYOUT_GENERAL);
+        temporal.path_depth.layout = VK_IMAGE_LAYOUT_GENERAL;
+    }
 	record_image_layout_transition(command_buffer, temporal.motion_vectors.image,
 		VK_IMAGE_ASPECT_COLOR_BIT, 0, VK_IMAGE_LAYOUT_UNDEFINED,
 		VK_ACCESS_TRANSFER_WRITE_BIT, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
@@ -270,10 +293,11 @@ void vk_temporal_initialize(uint32_t render_width, uint32_t render_height,
 	uint32_t output_width, uint32_t output_height)
 {
 	memset(&temporal, 0, sizeof(temporal));
-#ifdef USE_NVIDIA_STREAMLINE
+#ifdef USE_TEMPORAL_RENDER_TARGETS
 	temporal.active = ((r_dlss->integer && vk_sl_dlss_supported()) ||
 		(r_dlssNeuralRendering->integer && vk_sl_neural_rendering_supported()) ||
-		(r_dlssFrameGeneration->integer && vk_sl_frame_generation_supported())) ? qtrue : qfalse;
+		(r_dlssFrameGeneration->integer && vk_sl_frame_generation_supported()) ||
+		(r_rayTracing->integer && vk_rt_supported())) ? qtrue : qfalse;
 	if (!temporal.active)
 		return;
 	temporal.render_width = render_width;
@@ -294,7 +318,8 @@ void vk_temporal_initialize(uint32_t render_width, uint32_t render_height,
 	create_image(&temporal.scene_color, render_width, render_height,
 		vk.surface_format.format, color_usage, VK_IMAGE_ASPECT_COLOR_BIT);
 	VkFormat temporal_depth_format = vk.fmt_DepthStencil;
-	if (r_dlssNeuralRendering->integer && vk_sl_neural_rendering_supported()) {
+	if ((r_dlssNeuralRendering->integer && vk_sl_neural_rendering_supported()) ||
+		(r_rayTracing->integer && vk_rt_supported())) {
 		VkFormatProperties depth_properties;
 		memset(&depth_properties, 0, sizeof(depth_properties));
 		qvkGetPhysicalDeviceFormatProperties(vk.physical_device,
@@ -308,6 +333,9 @@ void vk_temporal_initialize(uint32_t render_width, uint32_t render_height,
 	}
 	create_image(&temporal.scene_depth, render_width, render_height,
 		temporal_depth_format, depth_usage, VK_IMAGE_ASPECT_DEPTH_BIT);
+	if (r_rayTracing->integer && vk_rt_supported())
+		create_image(&temporal.raytraced_color, render_width, render_height,
+			VK_FORMAT_R8G8B8A8_UNORM, color_usage, VK_IMAGE_ASPECT_COLOR_BIT);
 	if (r_dlssNeuralRendering->integer && vk_sl_neural_rendering_supported())
 		create_image(&temporal.neural_color, render_width, render_height,
 			vk.surface_format.format, color_usage, VK_IMAGE_ASPECT_COLOR_BIT);
@@ -323,8 +351,16 @@ void vk_temporal_initialize(uint32_t render_width, uint32_t render_height,
 			temporal.output_color.view, temporal.sharpened_color.view);
 	}
 	create_image(&temporal.motion_vectors, render_width, render_height,
-		VK_FORMAT_R16G16_SFLOAT, motion_usage, VK_IMAGE_ASPECT_COLOR_BIT);
+		VK_FORMAT_R32G32_SFLOAT, motion_usage, VK_IMAGE_ASPECT_COLOR_BIT);
+    if (r_rayTracing->integer == 2 && temporal.raytraced_color.image)
+        create_image(&temporal.path_depth, render_width, render_height,
+            VK_FORMAT_R32_SFLOAT, motion_usage, VK_IMAGE_ASPECT_COLOR_BIT);
 	initialize_layouts();
+	if (temporal.raytraced_color.image)
+		vk_rt_initialize(render_width, render_height,
+			temporal.scene_color.view, temporal.scene_color.format,
+			temporal.scene_depth.view, temporal.scene_depth.format,
+			temporal.raytraced_color.view, temporal.motion_vectors.view, temporal.path_depth.view);
 
 	temporal.scene_render_pass = create_render_pass(VK_ATTACHMENT_LOAD_OP_CLEAR,
 		VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
@@ -343,7 +379,7 @@ void vk_temporal_initialize(uint32_t render_width, uint32_t render_height,
 	framebuffer.height = render_height;
 	framebuffer.layers = 1;
 	VK_CHECK(qvkCreateFramebuffer(vk.device, &framebuffer, NULL, &temporal.scene_framebuffer));
-	ri.Printf(PRINT_ALL, "NVIDIA DLSS render targets: %ux%u scene, %ux%u output\n",
+	ri.Printf(PRINT_ALL, "VQ3 Evolution render targets: %ux%u scene, %ux%u output\n",
 		render_width, render_height, output_width, output_height);
 #else
 	(void)render_width; (void)render_height; (void)output_width; (void)output_height;
@@ -352,15 +388,18 @@ void vk_temporal_initialize(uint32_t render_width, uint32_t render_height,
 
 void vk_temporal_shutdown(void)
 {
-#ifdef USE_NVIDIA_STREAMLINE
+#ifdef USE_TEMPORAL_RENDER_TARGETS
 	if (temporal.scene_framebuffer) qvkDestroyFramebuffer(vk.device, temporal.scene_framebuffer, NULL);
 	if (temporal.scene_render_pass) qvkDestroyRenderPass(vk.device, temporal.scene_render_pass, NULL);
 	if (temporal.ui_render_pass) qvkDestroyRenderPass(vk.device, temporal.ui_render_pass, NULL);
+	vk_rt_shutdown();
 	vk_sharpen_shutdown();
 	destroy_image(&temporal.motion_vectors);
+    destroy_image(&temporal.path_depth);
 	destroy_image(&temporal.sharpened_color);
 	destroy_image(&temporal.output_color);
 	destroy_image(&temporal.neural_color);
+	destroy_image(&temporal.raytraced_color);
 	destroy_image(&temporal.scene_depth);
 	destroy_image(&temporal.scene_color);
 #endif
@@ -369,18 +408,30 @@ void vk_temporal_shutdown(void)
 
 qboolean vk_temporal_active(void) { return temporal.active; }
 qboolean vk_temporal_scene_pass_active(void) { return temporal.scene_pass; }
+
+/* A different depth attachment format requires compatible graphics pipelines. */
+VkRenderPass vk_temporal_pipeline_render_pass(void)
+{
+	return temporal.scene_depth.format != vk.fmt_DepthStencil ?
+		temporal.scene_render_pass : VK_NULL_HANDLE;
+}
 uint32_t vk_temporal_render_width(void) { return temporal.render_width; }
 uint32_t vk_temporal_render_height(void) { return temporal.render_height; }
 
 void vk_temporal_begin_frame(void)
 {
-#ifdef USE_NVIDIA_STREAMLINE
+#ifdef USE_TEMPORAL_RENDER_TARGETS
 	if (!temporal.active) return;
 	temporal.frame_index++;
 	temporal.scene_drawn = qfalse;
 	temporal.have_view = qfalse;
 	temporal.ui_pass = qfalse;
 	temporal.scene_pass = qtrue;
+	temporal.jitter_x = 0.0f;
+	temporal.jitter_y = 0.0f;
+#ifdef USE_NVIDIA_STREAMLINE
+	if (r_dlss->integer || r_dlssNeuralRendering->integer ||
+		r_dlssFrameGeneration->integer) {
 	uint32_t phase_count = 8;
 	if (temporal.render_width)
 		phase_count = (uint32_t)(8.0f * (float)temporal.output_width *
@@ -390,7 +441,19 @@ void vk_temporal_begin_frame(void)
 	const uint32_t phase = ((temporal.frame_index - 1) % phase_count) + 1;
 	temporal.jitter_x = halton(phase, 2) - 0.5f;
 	temporal.jitter_y = halton(phase, 3) - 0.5f;
+	}
 	vk_sl_begin_frame(temporal.frame_index);
+#endif
+	vk_rt_begin_frame();
+	if (temporal.scene_depth.layout != VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL) {
+		record_image_layout_transition(vk.command_buffer,
+			temporal.scene_depth.image, temporal.scene_depth.aspect,
+			VK_ACCESS_SHADER_READ_BIT, temporal.scene_depth.layout,
+			VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT |
+			VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
+			VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL);
+		temporal.scene_depth.layout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+	}
 	begin_pass(temporal.scene_render_pass, temporal.scene_framebuffer,
 		temporal.render_width, temporal.render_height);
 #endif
@@ -398,15 +461,15 @@ void vk_temporal_begin_frame(void)
 
 void vk_temporal_mark_scene_drawn(void)
 {
-	if (temporal.active) temporal.scene_drawn = qtrue;
+	if (temporal.scene_pass) temporal.scene_drawn = qtrue;
 }
 
 void vk_temporal_prepare_view(float *projection_matrix, const float *view_matrix,
 	const float *camera_origin, const float *camera_axis, float camera_near,
 	float camera_far, float fov_y_degrees, float aspect, qboolean is_portal)
 {
-#ifdef USE_NVIDIA_STREAMLINE
-	if (!temporal.active || !projection_matrix) return;
+#ifdef USE_TEMPORAL_RENDER_TARGETS
+	if (!temporal.scene_pass || !projection_matrix) return;
 	if (!is_portal) {
 		memcpy(temporal.projection, projection_matrix, sizeof(temporal.projection));
 		memcpy(temporal.view, view_matrix, sizeof(temporal.view));
@@ -420,6 +483,9 @@ void vk_temporal_prepare_view(float *projection_matrix, const float *view_matrix
 	}
 	projection_matrix[8] += 2.0f * temporal.jitter_x / (float)temporal.render_width;
 	projection_matrix[9] += 2.0f * temporal.jitter_y / (float)temporal.render_height;
+	if (!is_portal)
+		memcpy(temporal.render_projection, projection_matrix,
+			sizeof(temporal.render_projection));
 #else
 	(void)projection_matrix; (void)view_matrix; (void)camera_origin; (void)camera_axis;
 	(void)camera_near; (void)camera_far; (void)fov_y_degrees; (void)aspect; (void)is_portal;
@@ -428,7 +494,7 @@ void vk_temporal_prepare_view(float *projection_matrix, const float *view_matrix
 
 void vk_temporal_begin_ui(void)
 {
-#ifdef USE_NVIDIA_STREAMLINE
+#ifdef USE_TEMPORAL_RENDER_TARGETS
 	if (!temporal.active || !temporal.scene_pass) return;
 	qvkCmdEndRenderPass(vk.command_buffer);
 	temporal.scene_pass = qfalse;
@@ -448,22 +514,55 @@ void vk_temporal_begin_ui(void)
 	qboolean neural_evaluated = qfalse;
 	qboolean evaluated = qfalse;
 	qboolean sharpened = qfalse;
+	qboolean raytraced = qfalse;
+	if (frame_generation_valid && temporal.raytraced_color.image) {
+		record_image_layout_transition(vk.command_buffer,
+			temporal.scene_color.image, VK_IMAGE_ASPECT_COLOR_BIT,
+			VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT, temporal.scene_color.layout,
+			VK_ACCESS_SHADER_READ_BIT, VK_IMAGE_LAYOUT_GENERAL);
+		temporal.scene_color.layout = VK_IMAGE_LAYOUT_GENERAL;
+		record_image_layout_transition(vk.command_buffer,
+			temporal.scene_depth.image, temporal.scene_depth.aspect,
+			VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT |
+			VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
+			temporal.scene_depth.layout, VK_ACCESS_SHADER_READ_BIT,
+			VK_IMAGE_LAYOUT_GENERAL);
+		temporal.scene_depth.layout = VK_IMAGE_LAYOUT_GENERAL;
+		raytraced = vk_rt_record(vk.command_buffer, temporal.render_projection,
+			temporal.camera_origin, temporal.camera_axis, tr.sunDirection,
+			temporal.camera_near, temporal.camera_far, temporal.reset);
+		if (raytraced) {
+			record_image_layout_transition(vk.command_buffer,
+				temporal.raytraced_color.image, VK_IMAGE_ASPECT_COLOR_BIT,
+				VK_ACCESS_SHADER_WRITE_BIT, temporal.raytraced_color.layout,
+				VK_ACCESS_SHADER_READ_BIT, temporal.raytraced_color.layout);
+		}
+		record_image_layout_transition(vk.command_buffer,
+			temporal.scene_depth.image, temporal.scene_depth.aspect,
+			VK_ACCESS_SHADER_READ_BIT, temporal.scene_depth.layout,
+			VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT |
+			VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
+			VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL);
+		temporal.scene_depth.layout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+	}
 	if (frame_generation_valid) {
+		temporal_image_t *pre_dlss = raytraced ? &temporal.raytraced_color :
+			&temporal.scene_color;
 		vk_sl_frame_resources_t resources;
 		memset(&resources, 0, sizeof(resources));
 		resources.command_buffer = vk.command_buffer;
-		resources.color_input = temporal.scene_color.image;
-		resources.color_input_view = temporal.scene_color.view;
+		resources.color_input = pre_dlss->image;
+		resources.color_input_view = pre_dlss->view;
 		resources.color_output = temporal.output_color.image;
 		resources.color_output_view = temporal.output_color.view;
 		resources.depth = temporal.scene_depth.image;
 		resources.depth_view = temporal.scene_depth.view;
 		resources.motion_vectors = temporal.motion_vectors.image;
 		resources.motion_vectors_view = temporal.motion_vectors.view;
-		resources.color_format = temporal.scene_color.format;
+		resources.color_format = pre_dlss->format;
 		resources.depth_format = temporal.scene_depth.format;
 		resources.motion_vectors_format = temporal.motion_vectors.format;
-		resources.color_input_layout = temporal.scene_color.layout;
+		resources.color_input_layout = pre_dlss->layout;
 		resources.color_output_layout = temporal.output_color.layout;
 		resources.depth_layout = temporal.scene_depth.layout;
 		resources.motion_vectors_layout = temporal.motion_vectors.layout;
@@ -484,12 +583,14 @@ void vk_temporal_begin_ui(void)
 		resources.reset = temporal.reset;
 
 		if (temporal.neural_color.image && vk_sl_neural_rendering_supported()) {
-			record_image_layout_transition(vk.command_buffer,
-				temporal.scene_color.image, VK_IMAGE_ASPECT_COLOR_BIT,
-				VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
-				temporal.scene_color.layout, VK_ACCESS_SHADER_READ_BIT,
-				VK_IMAGE_LAYOUT_GENERAL);
-			temporal.scene_color.layout = VK_IMAGE_LAYOUT_GENERAL;
+			if (!raytraced) {
+				record_image_layout_transition(vk.command_buffer,
+					temporal.scene_color.image, VK_IMAGE_ASPECT_COLOR_BIT,
+					VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+					temporal.scene_color.layout, VK_ACCESS_SHADER_READ_BIT,
+					VK_IMAGE_LAYOUT_GENERAL);
+				temporal.scene_color.layout = VK_IMAGE_LAYOUT_GENERAL;
+			}
 			record_image_layout_transition(vk.command_buffer,
 				temporal.scene_depth.image,
 				temporal.scene_depth.aspect,
@@ -498,7 +599,10 @@ void vk_temporal_begin_ui(void)
 				temporal.scene_depth.layout, VK_ACCESS_SHADER_READ_BIT,
 				VK_IMAGE_LAYOUT_GENERAL);
 			temporal.scene_depth.layout = VK_IMAGE_LAYOUT_GENERAL;
-			resources.color_input_layout = temporal.scene_color.layout;
+			resources.color_input = pre_dlss->image;
+			resources.color_input_view = pre_dlss->view;
+			resources.color_format = pre_dlss->format;
+			resources.color_input_layout = pre_dlss->layout;
 			resources.depth_layout = temporal.scene_depth.layout;
 			resources.color_output = temporal.neural_color.image;
 			resources.color_output_view = temporal.neural_color.view;
@@ -524,23 +628,59 @@ void vk_temporal_begin_ui(void)
 		}
 
 		resources.color_input = neural_evaluated ? temporal.neural_color.image :
-			temporal.scene_color.image;
+			pre_dlss->image;
 		resources.color_input_view = neural_evaluated ? temporal.neural_color.view :
-			temporal.scene_color.view;
+			pre_dlss->view;
+		resources.color_format = neural_evaluated ? temporal.neural_color.format :
+			pre_dlss->format;
 		resources.color_input_layout = neural_evaluated ? temporal.neural_color.layout :
-			temporal.scene_color.layout;
+			pre_dlss->layout;
 		resources.color_output = temporal.output_color.image;
 		resources.color_output_view = temporal.output_color.view;
 		resources.color_output_layout = temporal.output_color.layout;
 		resources.output_width = temporal.output_width;
 		resources.output_height = temporal.output_height;
+		/* Streamline's camera-motion pass samples depth before NGX evaluates
+		 * DLSS. Keep the tagged depth readable through present (also for FG). */
+		record_image_layout_transition(vk.command_buffer,
+			temporal.scene_depth.image, temporal.scene_depth.aspect,
+			VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT |
+			VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
+			temporal.scene_depth.layout, VK_ACCESS_SHADER_READ_BIT,
+			VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+		temporal.scene_depth.layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+		resources.depth_layout = temporal.scene_depth.layout;
+		/* NGX may clear its output with a transfer command before dispatching.
+		 * Supply a writable GENERAL image and include both kinds of writes. */
+		record_image_layout_transition(vk.command_buffer,
+			temporal.output_color.image, VK_IMAGE_ASPECT_COLOR_BIT,
+			VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_TRANSFER_WRITE_BIT,
+			temporal.output_color.layout,
+			VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_TRANSFER_WRITE_BIT,
+			VK_IMAGE_LAYOUT_GENERAL);
+		temporal.output_color.layout = VK_IMAGE_LAYOUT_GENERAL;
+		resources.color_output_layout = temporal.output_color.layout;
+        if (raytraced && r_rayTracing->integer == 2) {
+            record_image_layout_transition(vk.command_buffer, temporal.path_depth.image,
+                VK_IMAGE_ASPECT_COLOR_BIT, VK_ACCESS_SHADER_WRITE_BIT, VK_IMAGE_LAYOUT_GENERAL,
+                VK_ACCESS_SHADER_READ_BIT, VK_IMAGE_LAYOUT_GENERAL);
+            record_image_layout_transition(vk.command_buffer, temporal.motion_vectors.image,
+                VK_IMAGE_ASPECT_COLOR_BIT, VK_ACCESS_SHADER_WRITE_BIT, VK_IMAGE_LAYOUT_GENERAL,
+                VK_ACCESS_SHADER_READ_BIT, VK_IMAGE_LAYOUT_GENERAL);
+            resources.depth = temporal.path_depth.image;
+            resources.depth_view = temporal.path_depth.view;
+            resources.depth_format = temporal.path_depth.format;
+            resources.depth_layout = VK_IMAGE_LAYOUT_GENERAL;
+            resources.camera_motion_included = qtrue;
+            resources.reset = resources.reset || vk_pt_history_reset();
+        }
 		evaluated = vk_sl_evaluate_dlss(&resources);
 	}
 
 	if (evaluated && temporal.sharpen_ready && r_dlssSharpness->value > 0.0f) {
 		record_image_layout_transition(vk.command_buffer,
 			temporal.output_color.image, VK_IMAGE_ASPECT_COLOR_BIT,
-			VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT,
+			VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_TRANSFER_WRITE_BIT,
 			temporal.output_color.layout, VK_ACCESS_SHADER_READ_BIT,
 			VK_IMAGE_LAYOUT_GENERAL);
 		temporal.output_color.layout = VK_IMAGE_LAYOUT_GENERAL;
@@ -551,10 +691,11 @@ void vk_temporal_begin_ui(void)
 
 	temporal_image_t *source = sharpened ? &temporal.sharpened_color :
 		(evaluated ? &temporal.output_color :
-		(neural_evaluated ? &temporal.neural_color : &temporal.scene_color));
+		(neural_evaluated ? &temporal.neural_color :
+		(raytraced ? &temporal.raytraced_color : &temporal.scene_color)));
 	const VkAccessFlags source_access = sharpened ? VK_ACCESS_SHADER_WRITE_BIT :
-		(evaluated || neural_evaluated ?
-		(VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT) :
+		(evaluated || neural_evaluated || raytraced ?
+		(VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_TRANSFER_WRITE_BIT) :
 		VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT);
 	record_image_layout_transition(vk.command_buffer, source->image, VK_IMAGE_ASPECT_COLOR_BIT,
 		source_access,
@@ -600,7 +741,7 @@ void vk_temporal_begin_ui(void)
 
 void vk_temporal_end_frame(void)
 {
-#ifdef USE_NVIDIA_STREAMLINE
+#ifdef USE_TEMPORAL_RENDER_TARGETS
 	if (!temporal.active) return;
 	if (temporal.scene_pass) vk_temporal_begin_ui();
 	if (temporal.ui_pass) {

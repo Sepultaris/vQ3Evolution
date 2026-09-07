@@ -16,6 +16,7 @@ layout(location = 3) in vec2 in_tex_coord1;
 layout(location = 0) out vec4 frag_color;
 layout(location = 1) out vec2 frag_tex_coord0;
 layout(location = 2) out vec2 frag_tex_coord1;
+layout(location = 3) out float frag_clip_dist;
 
 out gl_PerVertex {
     vec4 gl_Position;
@@ -27,6 +28,7 @@ void main() {
 
     gl_Position = clip_space_xform * p;
     gl_ClipDistance[0] = dot(clipping_plane, vec4( p * eye_space_xform, 1.0));
+    frag_clip_dist = gl_ClipDistance[0];
 
     frag_color = in_color;
     frag_tex_coord0 = in_tex_coord0;

@@ -40,6 +40,7 @@ Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
 // the client game, as well as some locally derived info
 typedef struct {
 	refEntity_t	e;
+    uint32_t motionId, motionGeneration;
 
 	float		axisLength;		// compensate for non-normalized axis
 
@@ -303,6 +304,20 @@ typedef struct shader_s {
 	fogParms_t	fogParms;
 
 	float		portalRange;			// distance to fog out at
+
+	/* Runtime light transport: retain compiler lighting metadata separately
+	 * from baked lightmaps and the original raster stages. */
+	float       rtSurfaceLight;
+	image_t     *rtLightImage;
+	float       rtRoughness;
+	float       rtMetallic;
+	qboolean    rtMaterialDefined;
+	image_t     *rtBaseColorImage, *rtNormalImage, *rtORMImage;
+	float       rtIOR, rtThickness, rtNormalScale;
+	vec3_t      rtAbsorption;
+	qboolean    rtDielectricDefined, rtAbsorptionDefined;
+	vec3_t      rtSunColor, rtSunDirection;
+	qboolean    rtSunDefined;
 
 	int			multitextureEnv;		// 0, GL_MODULATE, GL_ADD (FIXME: put in stage)
 

@@ -1166,13 +1166,14 @@ static float	CG_MachinegunSpinAngle( centity_t *cent ) {
 CG_AddWeaponWithPowerups
 ========================
 */
-static void CG_AddWeaponWithPowerups( refEntity_t *gun, int powerups ) {
+static void CG_AddWeaponWithPowerups( refEntity_t *gun, const entityState_t *state, int motionPart ) {
+	int powerups = state->powerups;
 	// add powerup effects
 	if ( powerups & ( 1 << PW_INVIS ) ) {
 		gun->customShader = cgs.media.invisShader;
-		trap_R_AddRefEntityToScene( gun );
+		CG_AddTrackedEntity(gun, state, motionPart);
 	} else {
-		trap_R_AddRefEntityToScene( gun );
+		CG_AddTrackedEntity(gun, state, motionPart);
 
 		if ( powerups & ( 1 << PW_BATTLESUIT ) ) {
 			gun->customShader = cgs.media.battleWeaponShader;
@@ -1265,7 +1266,7 @@ void CG_AddPlayerWeapon( refEntity_t *parent, playerState_t *ps, centity_t *cent
 	MatrixMultiply(lerped.axis, ((refEntity_t *)parent)->axis, gun.axis);
 	gun.backlerp = parent->backlerp;
 
-	CG_AddWeaponWithPowerups( &gun, cent->currentState.powerups );
+	CG_AddWeaponWithPowerups( &gun, &cent->currentState, ps ? 5 : 3 );
 
 	// add the spinning barrel
 	if ( weapon->barrelModel ) {
@@ -1282,7 +1283,7 @@ void CG_AddPlayerWeapon( refEntity_t *parent, playerState_t *ps, centity_t *cent
 
 		CG_PositionRotatedEntityOnTag( &barrel, &gun, weapon->weaponModel, "tag_barrel" );
 
-		CG_AddWeaponWithPowerups( &barrel, cent->currentState.powerups );
+		CG_AddWeaponWithPowerups( &barrel, &cent->currentState, ps ? 6 : 4 );
 	}
 
 	// make sure we aren't looking at cg.predictedPlayerEntity for LG

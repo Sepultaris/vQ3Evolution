@@ -193,7 +193,7 @@ static void CG_General( centity_t *cent ) {
 	AnglesToAxis( cent->lerpAngles, ent.axis );
 
 	// add to refresh list
-	trap_R_AddRefEntityToScene (&ent);
+	CG_AddTrackedEntity(&ent, s1, 0);
 }
 
 /*
@@ -254,7 +254,7 @@ static void CG_Item( centity_t *cent ) {
 		ent.shaderRGBA[1] = 255;
 		ent.shaderRGBA[2] = 255;
 		ent.shaderRGBA[3] = 255;
-		trap_R_AddRefEntityToScene(&ent);
+		CG_AddTrackedEntity(&ent, es, 0);
 		return;
 	}
 
@@ -347,7 +347,7 @@ static void CG_Item( centity_t *cent ) {
 #endif
 
 	// add to refresh list
-	trap_R_AddRefEntityToScene(&ent);
+	CG_AddTrackedEntity(&ent, es, 0);
 
 	if ( item->giType == IT_WEAPON && wi && wi->barrelModel ) {
 		refEntity_t	barrel;
@@ -370,7 +370,7 @@ static void CG_Item( centity_t *cent ) {
 
 		barrel.nonNormalizedAxes = ent.nonNormalizedAxes;
 
-		trap_R_AddRefEntityToScene( &barrel );
+		CG_AddTrackedEntity(&barrel, es, 1);
 	}
 
 	// accompanying rings / spheres for powerups
@@ -398,7 +398,7 @@ static void CG_Item( centity_t *cent ) {
 					VectorScale( ent.axis[2], frac, ent.axis[2] );
 					ent.nonNormalizedAxes = qtrue;
 				}
-				trap_R_AddRefEntityToScene( &ent );
+				CG_AddTrackedEntity(&ent, es, 2);
 			}
 		}
 	}
@@ -473,7 +473,7 @@ static void CG_Missile( centity_t *cent ) {
 		ent.radius = 16;
 		ent.rotation = 0;
 		ent.customShader = cgs.media.plasmaBallShader;
-		trap_R_AddRefEntityToScene( &ent );
+		CG_AddTrackedEntity(&ent, s1, 0);
 		return;
 	}
 
@@ -511,7 +511,7 @@ static void CG_Missile( centity_t *cent ) {
 	}
 
 	// add to refresh list, possibly with quad glow
-	CG_AddRefEntityWithPowerups( &ent, s1, TEAM_FREE );
+	CG_AddRefEntityWithPowerups( &ent, s1, TEAM_FREE, 0 );
 }
 
 /*
@@ -593,13 +593,13 @@ static void CG_Mover( centity_t *cent ) {
 	}
 
 	// add to refresh list
-	trap_R_AddRefEntityToScene(&ent);
+	CG_AddTrackedEntity(&ent, s1, 0);
 
 	// add the secondary model
 	if ( s1->modelindex2 ) {
 		ent.skinNum = 0;
 		ent.hModel = cgs.gameModels[s1->modelindex2];
-		trap_R_AddRefEntityToScene(&ent);
+		CG_AddTrackedEntity(&ent, s1, 1);
 	}
 
 }
@@ -1093,4 +1093,3 @@ void CG_AddPacketEntities( void ) {
 		CG_AddCEntity( cent );
 	}
 }
-

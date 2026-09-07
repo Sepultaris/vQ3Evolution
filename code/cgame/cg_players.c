@@ -2147,11 +2147,18 @@ Adds a piece with modifications or duplications for powerups
 Also called by CG_Missile for quad rockets, but nobody can tell...
 ===============
 */
-void CG_AddRefEntityWithPowerups( refEntity_t *ent, entityState_t *state, int team ) {
+void CG_AddTrackedEntity(const refEntity_t *ent, const entityState_t *state, int part) {
+    /* Network entity + explicit model part, never scene-array/draw-order index.
+     * Teleport toggles invalidate correspondence without changing refEntity ABI. */
+    trap_R_AddRefEntityTracked(ent, 1 + state->number * 32 + part,
+        state->eFlags & EF_TELEPORT_BIT);
+}
+
+void CG_AddRefEntityWithPowerups( refEntity_t *ent, entityState_t *state, int team, int motionPart ) {
 
 	if ( state->powerups & ( 1 << PW_INVIS ) ) {
 		ent->customShader = cgs.media.invisShader;
-		trap_R_AddRefEntityToScene( ent );
+		CG_AddTrackedEntity(ent, state, motionPart);
 	} else {
 		/*
 		if ( state->eFlags & EF_KAMIKAZE ) {
@@ -2162,7 +2169,7 @@ void CG_AddRefEntityWithPowerups( refEntity_t *ent, entityState_t *state, int te
 			trap_R_AddRefEntityToScene( ent );
 		}
 		else {*/
-			trap_R_AddRefEntityToScene( ent );
+			CG_AddTrackedEntity(ent, state, motionPart);
 		//}
 
 		if ( state->powerups & ( 1 << PW_QUAD ) )
@@ -2326,7 +2333,7 @@ void CG_Player( centity_t *cent ) {
 	legs.renderfx = renderfx;
 	VectorCopy (legs.origin, legs.oldorigin);	// don't positionally lerp at all
 
-	CG_AddRefEntityWithPowerups( &legs, &cent->currentState, ci->team );
+	CG_AddRefEntityWithPowerups( &legs, &cent->currentState, ci->team, 0 );
 
 	// if the model failed, allow the default nullmodel to be displayed
 	if (!legs.hModel) {
@@ -2350,7 +2357,7 @@ void CG_Player( centity_t *cent ) {
 	torso.shadowPlane = shadowPlane;
 	torso.renderfx = renderfx;
 
-	CG_AddRefEntityWithPowerups( &torso, &cent->currentState, ci->team );
+	CG_AddRefEntityWithPowerups( &torso, &cent->currentState, ci->team, 1 );
 
 #ifdef MISSIONPACK
 	if ( cent->currentState.eFlags & EF_KAMIKAZE ) {
@@ -2576,7 +2583,7 @@ void CG_Player( centity_t *cent ) {
 	head.shadowPlane = shadowPlane;
 	head.renderfx = renderfx;
 
-	CG_AddRefEntityWithPowerups( &head, &cent->currentState, ci->team );
+	CG_AddRefEntityWithPowerups( &head, &cent->currentState, ci->team, 2 );
 
 #ifdef MISSIONPACK
 	CG_BreathPuffs(cent, &head);
@@ -2632,4 +2639,3 @@ void CG_ResetPlayerEntity( centity_t *cent ) {
 		CG_Printf("%i ResetPlayerEntity yaw=%f\n", cent->currentState.number, cent->pe.torso.yawAngle );
 	}
 }
-

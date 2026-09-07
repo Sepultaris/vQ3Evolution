@@ -17,6 +17,11 @@ network protocols.
 - NVIDIA DLSS Super Resolution and DLAA
 - DLSS Frame Generation and NVIDIA Reflex
 - Experimental DLSS Neural Rendering with live strength controls
+- NVIDIA RTX ray-query shadows cast by live world and model geometry
+- Experimental native path-traced world lighting (unfinished; see [status](docs/PATH_TRACING.md))
+- Separate diffuse/reflection reconstruction, texture-driven PBR materials, and native refractive glass/water
+- Native surface-aware denoising with camera/object history and path-hit DLSS inputs
+- Animated path materials, layered additive emitters, cutouts and thin transparency (experimental)
 - Native Vulkan post-DLSS contrast-adaptive sharpening
 - Bilinear, trilinear, and 2x/4x/8x/16x anisotropic texture filtering
 - Native source-built game, cgame, and UI modules
@@ -95,6 +100,8 @@ The Graphics Options menu exposes these controls directly:
 | HUD Scale | `cg_hudScale` | 0.5-1.5 |
 | UI Scale | `ui_scale` | 0.5-1.5 |
 | Texture Filtering | `r_textureMode`, `r_ext_max_anisotropy` | Bilinear through anisotropic 16x |
+| NVIDIA RTX Mode | `r_rayTracing` | Off / Shadows / Path tracing (WIP) |
+| RTX Shadow Strength | `r_rayTracingShadowStrength` | 0.0-1.0 |
 | DLSS Mode | `r_dlss` | Off, Quality, Balanced, Performance, Ultra Performance, DLAA |
 | DLSS Sharpness | `r_dlssSharpness` | 0.0-1.0 |
 | Neural Rendering | `r_dlssNeuralRendering` | Off or model 1-3 |
@@ -105,8 +112,10 @@ The Graphics Options menu exposes these controls directly:
 | Frame Generation | `r_dlssFrameGeneration` | Off/On |
 | NVIDIA Reflex | `r_reflex` | Off, On, On + Boost |
 
-HUD, UI, sharpening, and Neural Rendering strength controls update live. Renderer
-mode changes apply after a renderer restart.
+HUD, UI, sharpening, RTX shadow strength, and Neural Rendering strength controls
+update live. Renderer mode changes, including enabling RTX shadows, apply after a
+renderer restart. See [docs/RTX.md](docs/RTX.md) for hardware requirements,
+architecture, controls, and current scope.
 
 ## Linux and macOS
 
@@ -117,7 +126,7 @@ platforms. NVIDIA Streamline integration is currently limited to Windows x64.
 
 ## Repository layout
 
-- `code/renderer_vulkan`: Vulkan renderer, temporal pipeline, DLSS, and sharpening
+- `code/renderer_vulkan`: Vulkan renderer, RTX, temporal pipeline, DLSS, and sharpening
 - `code/q3_ui`: source-built Quake III menus and graphics settings
 - `code/cgame`: client game and HUD code
 - `code/game`: server-side game code
@@ -138,6 +147,7 @@ The engine source is distributed under the GNU General Public License v2; see
 [COPYING.txt](COPYING.txt). Quake III game assets and NVIDIA runtime binaries
 have separate licenses and are not part of the source repository. The original
 id Software source-release notes are preserved in [id-readme.txt](id-readme.txt).
+The vendored Vulkan API headers retain their Khronos Apache-2.0 notices.
 
 Upstream references:
 

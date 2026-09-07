@@ -8,6 +8,43 @@
 #include "R_ImageJPG.h"
 #include "ref_import.h"
 #include "glConfig.h"
+static qboolean screenshot_pending, video_pending, levelshot_pending;
+static screenshotCommand_t pending_screenshot;
+static videoFrameCommand_t pending_video;
+static char pending_filename[MAX_OSPATH];
+static void R_LevelShot(int W, int H);
+
+void vk_queue_screenshot(const screenshotCommand_t *cmd)
+{
+    pending_screenshot = *cmd;
+    Q_strncpyz(pending_filename, cmd->fileName, sizeof(pending_filename));
+    pending_screenshot.fileName = pending_filename;
+    screenshot_pending = qtrue;
+}
+
+void vk_queue_video_frame(const videoFrameCommand_t *cmd)
+{
+    pending_video = *cmd;
+    video_pending = qtrue;
+}
+
+void vk_reset_captures(void)
+{
+    screenshot_pending = video_pending = levelshot_pending = qfalse;
+}
+
+void vk_flush_captures(void)
+{
+    int width, height;
+    if (!screenshot_pending && !video_pending && !levelshot_pending) return;
+    R_GetWinResolution(&width, &height);
+    if (screenshot_pending)
+        RB_TakeScreenshot(width, height, pending_filename, pending_screenshot.jpeg);
+    if (video_pending && pending_video.width == width && pending_video.height == height)
+        RB_TakeVideoFrameCmd(&pending_video);
+    if (levelshot_pending) R_LevelShot(width, height);
+    vk_reset_captures();
+}
 /* 
 ============================================================================== 
  
@@ -139,7 +176,7 @@ static void vk_read_pixels(unsigned char* pBuf, uint32_t W, uint32_t H)
     {
         image_barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
         image_barrier.pNext = NULL;
-        image_barrier.srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_READ_BIT;
+        image_barrier.srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
         image_barrier.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
         image_barrier.oldLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
         image_barrier.newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
@@ -174,6 +211,14 @@ static void vk_read_pixels(unsigned char* pBuf, uint32_t W, uint32_t H)
 
     qvkCmdPipelineBarrier(cmdBuf, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, NULL, 0, NULL, 1, &image_barrier); 
     qvkCmdCopyImageToBuffer(cmdBuf, vk.swapchain_images_array[vk.idx_swapchain_image], VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, buffer, 1, &image_copy);
+    /* Captures run while this image is still acquired. Restore the layout
+     * before presenting it or returning it to Streamline's present hook. */
+    image_barrier.srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+    image_barrier.dstAccessMask = 0;
+    image_barrier.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+    image_barrier.newLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+    qvkCmdPipelineBarrier(cmdBuf, VK_PIPELINE_STAGE_TRANSFER_BIT,
+        VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, 0, 0, NULL, 0, NULL, 1, &image_barrier);
     VK_CHECK(qvkEndCommandBuffer(cmdBuf));
 
     VkSubmitInfo submit_info;
@@ -435,7 +480,7 @@ void R_ScreenShot_f (void)
 
 	if ( !strcmp( ri.Cmd_Argv(1), "levelshot" ) )
     {
-		R_LevelShot(W, H);
+		levelshot_pending = qtrue;
 		return;
 	}
 
@@ -512,7 +557,7 @@ void R_ScreenShotJPEG_f(void)
     R_GetWinResolution(&W, &H);
 
 	if ( !strcmp( ri.Cmd_Argv(1), "levelshot" ) ) {
-		R_LevelShot(W, H);
+		levelshot_pending = qtrue;
 		return;
 	}
 

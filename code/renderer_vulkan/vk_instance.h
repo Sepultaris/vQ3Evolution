@@ -17,6 +17,7 @@ extern PFN_vkEnumerateDeviceExtensionProperties	    	qvkEnumerateDeviceExtension
 extern PFN_vkEnumeratePhysicalDevices					qvkEnumeratePhysicalDevices;
 extern PFN_vkGetDeviceProcAddr							qvkGetDeviceProcAddr;
 extern PFN_vkGetPhysicalDeviceFeatures					qvkGetPhysicalDeviceFeatures;
+extern PFN_vkGetPhysicalDeviceFeatures2					qvkGetPhysicalDeviceFeatures2;
 extern PFN_vkGetPhysicalDeviceFormatProperties			qvkGetPhysicalDeviceFormatProperties;
 extern PFN_vkGetPhysicalDeviceMemoryProperties			qvkGetPhysicalDeviceMemoryProperties;
 extern PFN_vkGetPhysicalDeviceProperties				qvkGetPhysicalDeviceProperties;
@@ -48,6 +49,7 @@ extern PFN_vkCmdClearAttachments						qvkCmdClearAttachments;
 extern PFN_vkCmdCopyBufferToImage						qvkCmdCopyBufferToImage;
 extern PFN_vkCmdCopyImage								qvkCmdCopyImage;
 extern PFN_vkCmdCopyImageToBuffer                       qvkCmdCopyImageToBuffer;
+extern PFN_vkCmdCopyBuffer qvkCmdCopyBuffer;
 extern PFN_vkCmdDispatch                                qvkCmdDispatch;
 extern PFN_vkCmdDraw									qvkCmdDraw;
 extern PFN_vkCmdDrawIndexed						    	qvkCmdDrawIndexed;
@@ -137,6 +139,7 @@ const char * cvtResToStr(VkResult result);
 // This structure is initialized/deinitialized by vk_initialize/vk_shutdown functions correspondingly.
 struct Vk_Instance {
 	VkInstance instance ;
+	uint32_t api_version;
 	VkPhysicalDevice physical_device;
 	VkPhysicalDeviceFeatures features;
 

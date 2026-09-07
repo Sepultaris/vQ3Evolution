@@ -1,0 +1,747 @@
+#version 460
+#extension GL_EXT_ray_query : require
+#extension GL_EXT_nonuniform_qualifier : require
+
+layout(local_size_x=8, local_size_y=8) in;
+layout(binding=0) uniform accelerationStructureEXT sceneAS;
+layout(binding=3, rgba8) uniform writeonly image2D outputColor;
+layout(binding=4, std430) readonly buffer Positions { float positions[]; };
+layout(binding=5, std430) readonly buffer Indices { uint indices[]; };
+struct Vertex { vec4 normal, uv, previous, meta, color, local; };
+layout(binding=6, std430) readonly buffer Attributes { Vertex vertices[]; };
+layout(binding=7, std430) readonly buffer TriangleMaterials { uint triangleMaterials[]; };
+struct TexMod { vec4 a,b,wave; };
+struct LayerRecord {
+    vec4 images[2], params, color, generators, rgbWave, alphaWave, meta, vectors[2];
+    TexMod mods[4];
+};
+struct MaterialRecord { vec4 surface, emission, tint, params, maps, optical, absorption; LayerRecord layers[9]; };
+layout(binding=8, std430) readonly buffer Materials { MaterialRecord materials[]; };
+// Never copy the variable-indexed layer/modifier arrays into invocation-local
+// storage. The legacy record is 3280 bytes; doing so in every ray-candidate
+// callback can spill large arrays and turn traversal into memory traffic.
+struct Material { vec4 surface, emission, params, maps, optical, absorption; };
+Material materialProperties(uint id) {
+    return Material(materials[id].surface,materials[id].emission,materials[id].params,
+        materials[id].maps,materials[id].optical,materials[id].absorption);
+}
+struct Layer { vec4 images[2], params, color, generators, rgbWave, alphaWave, meta, vectors[2]; };
+Layer layerProperties(uint id,int layer) {
+    return Layer(materials[id].layers[layer].images,materials[id].layers[layer].params,
+        materials[id].layers[layer].color,materials[id].layers[layer].generators,
+        materials[id].layers[layer].rgbWave,materials[id].layers[layer].alphaWave,
+        materials[id].layers[layer].meta,materials[id].layers[layer].vectors);
+}
+layout(binding=9) uniform sampler2D textures[512];
+struct Emitter { uint primitive; float cumulativePower; };
+layout(binding=10, std430) readonly buffer Lights {
+    uvec4 lightCounts;
+    vec4 lightSelection;
+    vec4 pointPositions[1056];
+    vec4 pointColors[1056];
+    vec4 pointCones[1056];
+    Emitter emitters[8192];
+};
+layout(binding=11, std430) buffer Accumulation { vec4 accumulated[]; };
+struct Guide { vec4 positionDepth; vec4 normalMaterial; vec4 albedoRoughness; };
+layout(binding=12, std430) writeonly buffer GuidePositions { vec4 guidePositions[]; };
+layout(binding=13, std430) writeonly buffer GuideNormals { vec4 guideNormals[]; };
+layout(binding=14, std430) writeonly buffer GuideAlbedos { vec4 guideAlbedos[]; };
+layout(binding=17, std430) readonly buffer Reprojection {
+    vec4 previousOrigin, previousForward, previousRight, previousUp;
+    vec4 jitterHistoryReset, options, depthProjection, cameraMedium;
+} rp;
+layout(binding=22, std430) writeonly buffer MotionPositions { vec4 motionPositions[]; };
+layout(binding=23, std430) writeonly buffer MotionNormals { vec4 motionNormals[]; };
+layout(binding=24, rg32f) uniform writeonly image2D outputMotion;
+layout(binding=25, r32f) uniform writeonly image2D outputDepth;
+layout(binding=26, std430) buffer Specular { vec4 specular[]; };
+layout(binding=27, std430) buffer VisibleEmission { vec4 visibleEmission[]; };
+layout(binding=32, std430) writeonly buffer ShadingGuides { vec4 shadingGuides[]; };
+layout(push_constant) uniform Constants {
+    vec4 originNear, forwardFar, rightProjection, upProjection;
+    vec4 sunExposure, parameters, sunRadiance, sampling;
+} pc;
+
+const float PI=3.141592653589793;
+uint rng;
+float randomFloat() {
+    rng ^= rng << 13; rng ^= rng >> 17; rng ^= rng << 5;
+    return float(rng >> 8) * (1.0 / 16777216.0);
+}
+vec3 position(uint index) {
+    uint offset=index*3;
+    return vec3(positions[offset], positions[offset+1], positions[offset+2]);
+}
+uvec3 triangle(uint primitive) {
+    uint offset=primitive*3;
+    return uvec3(indices[offset], indices[offset+1], indices[offset+2]);
+}
+vec2 triangleUV(uint primitive, vec2 bary) {
+    uvec3 t=triangle(primitive);
+    return vertices[t.x].uv.xy*(1-bary.x-bary.y) +
+        vertices[t.y].uv.xy*bary.x + vertices[t.z].uv.xy*bary.y;
+}
+vec4 sampleTexture(float textureIndex, vec2 uv) {
+    return textureLod(textures[nonuniformEXT(uint(textureIndex))], uv, 0);
+}
+vec3 linearColor(vec3 color) { return pow(max(color,vec3(0)),vec3(2.2)); }
+// Contributions are partitioned by the first scattering lobe, not by a random
+// label on the mixture sample. Their sum is exactly the original estimator.
+vec3 pathD, pathS, pathE, radianceD, radianceS, radianceE, diffuseBRDF;
+vec3 visibilityAbsorption;
+void addIncident(vec3 light) {
+    radianceD+=pathD*light; radianceS+=pathS*light; radianceE+=pathE*light;
+}
+void addDirect(vec3 brdf,vec3 light) {
+    radianceD+=(pathD*brdf+pathE*diffuseBRDF)*light;
+    radianceS+=(pathS*brdf+pathE*max(brdf-diffuseBRDF,vec3(0)))*light;
+}
+void attenuate(vec3 value) { pathD*=value; pathS*=value; pathE*=value; }
+float waveValue(vec4 wave,int function,float time) {
+    float x=wave.z+time*wave.w, p=fract(x), value=0;
+    if(function==1) value=sin(x*2*PI);
+    if(function==2) value=p<0.5 ? 1:-1;
+    if(function==3) value=1-4*abs(fract(x+0.25)-0.5);
+    if(function==4) value=p;
+    if(function==5) value=1-p;
+    if(function==6) value=mix(fract(sin(floor(x)*12.9898)*43758.5453),
+        fract(sin((floor(x)+1)*12.9898)*43758.5453),smoothstep(0,1,p))*2-1;
+    return wave.x+wave.y*value;
+}
+vec4 layerSample(uint primitive,vec2 bary,int layerIndex) {
+    uint id=triangleMaterials[primitive]&0xffffu;
+    if(materials[id].layers[layerIndex].vectors[0].w!=0)
+        return sampleTexture(materials[id].layers[layerIndex].images[0].x,triangleUV(primitive,bary))*
+            materials[id].layers[layerIndex].vectors[1];
+    Layer layer=layerProperties(id,layerIndex);
+    uvec3 t=triangle(primitive);
+    vec3 weights=vec3(1-bary.x-bary.y,bary);
+    Vertex v=vertices[t.x];
+    vec3 local=v.normal.w==0 ? position(t.x)*weights.x+position(t.y)*weights.y+position(t.z)*weights.z :
+        vertices[t.x].local.xyz*weights.x+vertices[t.y].local.xyz*weights.y+vertices[t.z].local.xyz*weights.z;
+    vec4 vertexColor=vertices[t.x].color*weights.x+vertices[t.y].color*weights.y+vertices[t.z].color*weights.z;
+    uint rgba=floatBitsToUint(v.meta.w);
+    vec4 entityColor=vec4(rgba&255u,(rgba>>8)&255u,(rgba>>16)&255u,rgba>>24)/255;
+    float time=rp.depthProjection.z-v.meta.x-layer.meta.w;
+    if(layer.meta.z>0) time=min(time,layer.meta.z);
+    vec2 uv=triangleUV(primitive,bary);
+    if(layer.params.z==1) uv=vec2(0);
+    if(layer.params.z==6) uv=vec2(dot(local,layer.vectors[0].xyz),dot(local,layer.vectors[1].xyz));
+    for(int i=0;i<int(layer.params.w);++i) {
+        TexMod m=materials[id].layers[layerIndex].mods[i];
+        int type=int(m.a.x);
+        if(type==1) uv=vec2(dot(vec3(uv,1),m.a.yzw),dot(vec3(uv,1),m.b.xyz));
+        if(type==2) uv+=sin((vec2(local.x+local.z,local.y)/1024+m.wave.z+time*m.wave.w)*2*PI)*m.wave.y;
+        if(type==3) uv+=fract(m.a.yz*time);
+        if(type==4) uv*=m.a.yz;
+        if(type==5) {
+            float stretch=waveValue(m.wave,int(m.b.w),time);
+            if(abs(stretch)>0.00001) uv=(uv-0.5)/stretch+0.5;
+        }
+        if(type==6) {
+            float angle=-m.a.y*time*PI/180, c=cos(angle), s=sin(angle);
+            uv=mat2(c,s,-s,c)*(uv-0.5)+0.5;
+        }
+        if(type==7) uv+=fract(v.meta.yz*time);
+    }
+    int frame=int(max(floor(time*layer.params.y),0))%max(int(layer.params.x),1);
+    vec4 sampled=sampleTexture(layer.images[frame/4][frame%4],uv);
+    vec3 color=vec3(1);
+    int rgb=int(layer.meta.x), alpha=int(layer.meta.y);
+    if(rgb==3) color=entityColor.rgb;
+    if(rgb==4) color=1-entityColor.rgb;
+    // Baked world vertex lighting is deliberately not an albedo multiplier.
+    if(v.normal.w!=0 && (rgb==5 || rgb==6)) color=vertexColor.rgb;
+    if(v.normal.w!=0 && rgb==7) color=1-vertexColor.rgb;
+    if(rgb==8) color=vec3(clamp(waveValue(layer.rgbWave,int(layer.generators.x),time),0,1));
+    if(rgb==11) color=layer.color.rgb;
+    float opacity=1;
+    if(alpha==2) opacity=entityColor.a;
+    if(alpha==3) opacity=1-entityColor.a;
+    if(alpha==4) opacity=vertexColor.a;
+    if(alpha==5) opacity=1-vertexColor.a;
+    if(alpha==7) opacity=clamp(waveValue(layer.alphaWave,int(layer.generators.y),time),0,1);
+    if(alpha==9) opacity=layer.color.a;
+    return sampled*vec4(color,opacity);
+}
+bool passesAlpha(uint primitive, vec2 bary) {
+    Material m=materialProperties(triangleMaterials[primitive]&0xffffu);
+    if (m.surface.w==0 && m.params.x!=1) return true;
+    float alpha=layerSample(primitive,bary,0).a;
+    if (m.params.x==1 && randomFloat()>=clamp(alpha,0,1)) return false;
+    if (m.surface.w==0) return true;
+    if (m.surface.w==1) return alpha>0;
+    if (m.surface.w==2) return alpha<0.5;
+    return alpha>=0.5;
+}
+vec3 baseColor(uint primitive,vec2 bary) {
+    Material m=materialProperties(triangleMaterials[primitive]&0xffffu);
+    return clamp(linearColor(m.maps.x>=0 ? sampleTexture(m.maps.x,triangleUV(primitive,bary)).rgb :
+        layerSample(primitive,bary,0).rgb),vec3(0),vec3(0.98));
+}
+vec2 surfaceProperties(uint primitive,vec2 bary) {
+    Material m=materialProperties(triangleMaterials[primitive]&0xffffu);
+    // ORM: R is baked occlusion (not used by physical transport), G roughness,
+    // B metalness. These data channels must not undergo an sRGB conversion.
+    return m.maps.z>=0 ? clamp(sampleTexture(m.maps.z,triangleUV(primitive,bary)).gb,vec2(0.02,0),vec2(1)) : m.surface.yz;
+}
+struct Hit { float distance; uint primitive; vec2 bary; };
+// Only the world BLAS has a second geometry; custom indices address dynamic
+// and first-person ranges. GLSL requires the committed operand to be literal.
+#define queryPrimitive(query,committed) (rayQueryGetIntersectionInstanceCustomIndexEXT(query,committed) + \
+    rayQueryGetIntersectionPrimitiveIndexEXT(query,committed) + \
+    (rayQueryGetIntersectionGeometryIndexEXT(query,committed)==1 ? uint(lightSelection.y):0u))
+bool trace(vec3 origin, vec3 direction, float minimum, float maximum,
+    uint purpose, out Hit hit) {
+    rayQueryEXT query;
+    rayQueryInitializeEXT(query, sceneAS,
+        gl_RayFlagsNoneEXT,
+        purpose==3u ? 8u : (purpose==1u ? 1u : (purpose==2u ? 4u : 2u)),
+        origin, minimum, direction, maximum);
+    while(rayQueryProceedEXT(query)) {
+        if(rayQueryGetIntersectionTypeEXT(query,false)==gl_RayQueryCandidateIntersectionTriangleEXT) {
+            uint primitive=queryPrimitive(query,false);
+            vec2 bary=rayQueryGetIntersectionBarycentricsEXT(query,false);
+            // Sky polygons delimit the environment but must not occlude the sun.
+            uint materialAndFlags=triangleMaterials[primitive];
+            bool excluded=(purpose==1u && (materialAndFlags&0x80000000u)!=0u) ||
+                (purpose==2u && (materialAndFlags&0x40000000u)!=0u);
+            bool firstPerson=(materialAndFlags&0x20000000u)!=0u;
+            excluded=excluded || (purpose==3u ? !firstPerson:firstPerson);
+            bool sky=materials[materialAndFlags&0xffffu].emission.z!=0;
+            bool additive=materials[materialAndFlags&0xffffu].params.x==2;
+            if (!excluded && (purpose!=2u || (!sky && !additive)) && passesAlpha(primitive,bary))
+                rayQueryConfirmIntersectionEXT(query);
+        }
+    }
+    if(rayQueryGetIntersectionTypeEXT(query,true)==gl_RayQueryCommittedIntersectionNoneEXT)
+        return false;
+    hit.distance=rayQueryGetIntersectionTEXT(query,true);
+    hit.primitive=queryPrimitive(query,true);
+    hit.bary=rayQueryGetIntersectionBarycentricsEXT(query,true);
+    return true;
+}
+bool primaryHit(vec3 origin,vec3 direction,out Hit hit) {
+    // Quake's first-person presentation layer has primary visibility priority,
+    // but its pixels are fully ray-hit/material shaded. It is not a depth/color
+    // copy from rasterization. The third-person model serves secondary rays.
+    if(lightCounts.z>0 && trace(origin,direction,0.001,pc.parameters.y,3u,hit)) return true;
+    return trace(origin,direction,pc.originNear.w,pc.parameters.y,1u,hit);
+}
+vec3 geometricNormal(uint primitive, out float area) {
+    uvec3 t=triangle(primitive);
+    vec3 crossEdges=cross(position(t.y)-position(t.x),position(t.z)-position(t.x));
+    float lengthEdges=length(crossEdges);
+    area=lengthEdges*0.5;
+    return crossEdges/max(lengthEdges,0.000001);
+}
+vec3 shadingNormal(Hit hit, vec3 direction, out vec3 geometric) {
+    uvec3 t=triangle(hit.primitive);
+    float area;
+    geometric=geometricNormal(hit.primitive,area);
+    vec3 n=vertices[t.x].normal.xyz*(1-hit.bary.x-hit.bary.y)+
+        vertices[t.y].normal.xyz*hit.bary.x+vertices[t.z].normal.xyz*hit.bary.y;
+    n=dot(n,n)>0.00001 ? normalize(n) : geometric;
+    // Follow the authored outward normal even when BSP winding is reversed.
+    if(dot(geometric,n)<0) geometric=-geometric;
+    Material m=materialProperties(triangleMaterials[hit.primitive]&0xffffu);
+    if(m.maps.y>=0) {
+        vec3 e1=position(t.y)-position(t.x), e2=position(t.z)-position(t.x);
+        vec2 uv1=vertices[t.y].uv.xy-vertices[t.x].uv.xy, uv2=vertices[t.z].uv.xy-vertices[t.x].uv.xy;
+        float determinant=uv1.x*uv2.y-uv1.y*uv2.x;
+        if(abs(determinant)>0.0000001) {
+            vec3 tangent=(e1*uv2.y-e2*uv1.y)/determinant;
+            tangent-=n*dot(n,tangent);
+            if(dot(tangent,tangent)>0.000001) {
+                tangent=normalize(tangent);
+                vec3 bitangent=normalize(cross(n,tangent))*sign(dot(cross(n,tangent),(e2*uv1.x-e1*uv2.x)/determinant));
+                vec3 mapped=sampleTexture(m.maps.y,triangleUV(hit.primitive,hit.bary)).xyz*2-1;
+                mapped.xy*=m.optical.w;
+                n=normalize(tangent*mapped.x+bitangent*mapped.y+n*max(mapped.z,0.001));
+            }
+        }
+    }
+    if(m.optical.z!=0 && m.maps.y<0) {
+        vec3 world=position(t.x)*(1-hit.bary.x-hit.bary.y)+position(t.y)*hit.bary.x+position(t.z)*hit.bary.y;
+        float time=rp.depthProjection.z;
+        vec3 slope=vec3(0.06*cos(world.x*0.07+time*1.3),0.045*cos(world.y*0.09-time*1.1),0);
+        n=normalize(n-slope+n*dot(n,slope));
+    }
+    if(dot(geometric,direction)>0) geometric=-geometric;
+    if(dot(n,geometric)<0) n=-n;
+    if(dot(n,-direction)<0.001) n=geometric;
+    return n;
+}
+vec3 emissionAt(uint primitive, vec2 bary, bool acceptedHit) {
+    uint id=triangleMaterials[primitive]&0xffffu;
+    Material m=materialProperties(id);
+    float alpha=layerSample(primitive,bary,0).a;
+    if((m.surface.w==1 && alpha<=0) || (m.surface.w==2 && alpha>=0.5) ||
+        (m.surface.w==3 && alpha<0.5)) return vec3(0);
+    vec3 emission=vec3(0);
+    for(int layer=1;layer<=int(m.params.z);++layer) {
+        vec4 color=layerSample(primitive,bary,layer);
+        float opacity=color.a;
+        vec4 generators=materials[id].layers[layer].generators;
+        int test=int(generators.z);
+        if((test==1 && opacity<=0) || (test==2 && opacity>=0.5) || (test==3 && opacity<0.5)) continue;
+        emission+=linearColor(color.rgb)*(generators.w!=0 ? opacity:1);
+    }
+    if(m.params.z==0) emission=linearColor(m.emission.w!=0 ?
+        sampleTexture(m.emission.x,triangleUV(primitive,bary)).rgb:layerSample(primitive,bary,0).rgb);
+    return emission*m.emission.y*(!acceptedHit && m.params.x==1 ? alpha:1);
+}
+vec3 visibility(vec3 origin,vec3 direction,float distance) {
+    if(distance<=0.001) return vec3(1);
+    rayQueryEXT query;
+    rayQueryInitializeEXT(query,sceneAS,gl_RayFlagsTerminateOnFirstHitEXT,
+        4u,origin,0.001,direction,distance);
+    vec3 transmission=vec3(1);
+    int filters=0;
+    while(rayQueryProceedEXT(query)) {
+        if(rayQueryGetIntersectionTypeEXT(query,false)!=gl_RayQueryCandidateIntersectionTriangleEXT) continue;
+        uint primitive=queryPrimitive(query,false);
+        uint flags=triangleMaterials[primitive], id=flags&0xffffu;
+        if((flags&0x40000000u)!=0u || materials[id].emission.z!=0 || materials[id].params.x==2) continue;
+        vec2 bary=rayQueryGetIntersectionBarycentricsEXT(query,false);
+        if(!passesAlpha(primitive,bary)) continue;
+        if(materials[id].params.x==3) {
+            // Multiplicative filters commute: one traversal visits them in any
+            // order, instead of restarting a closest-hit query for every pane.
+            if(++filters>=32) return vec3(0);
+            transmission*=clamp(linearColor(layerSample(primitive,bary,0).rgb),0,1);
+        } else rayQueryConfirmIntersectionEXT(query);
+    }
+    return rayQueryGetIntersectionTypeEXT(query,true)==gl_RayQueryCommittedIntersectionNoneEXT ?
+        transmission*exp(-visibilityAbsorption*distance):vec3(0);
+}
+vec3 basisSample(vec3 n, vec3 local) {
+    vec3 tangent=normalize(cross(abs(n.z)<0.999 ? vec3(0,0,1):vec3(0,1,0),n));
+    return tangent*local.x+cross(n,tangent)*local.y+n*local.z;
+}
+vec3 fresnel(vec3 f0,float cosine) {
+    return f0+(1-f0)*pow(clamp(1-cosine,0,1),5);
+}
+float distribution(float nh,float a2) {
+    float d=nh*nh*(a2-1)+1;
+    return a2/max(PI*d*d,0.0000001);
+}
+float smith(float cosine,float a2) {
+    return 2*cosine/max(cosine+sqrt(a2+(1-a2)*cosine*cosine),0.000001);
+}
+float specularProbability(vec3 albedo,float metallic) {
+    return clamp(mix(0.2, max(albedo.r,max(albedo.g,albedo.b)),metallic),0.1,0.9);
+}
+vec3 evaluateBRDF(vec3 n,vec3 v,vec3 l,vec3 albedo,float roughness,float metallic,out float pdf) {
+    float nv=max(dot(n,v),0), nl=max(dot(n,l),0);
+    pdf=0;
+    diffuseBRDF=vec3(0);
+    if(nv<=0 || nl<=0) return vec3(0);
+    vec3 h=normalize(v+l);
+    float nh=max(dot(n,h),0), vh=max(dot(v,h),0.000001);
+    float a=max(roughness*roughness,0.001), a2=a*a;
+    float d=distribution(nh,a2);
+    vec3 f=fresnel(mix(vec3(0.04),albedo,metallic),vh);
+    float p=specularProbability(albedo,metallic);
+    pdf=(1-p)*nl/PI+p*d*nh/(4*vh);
+    diffuseBRDF=(1-f)*(1-metallic)*albedo/PI;
+    return diffuseBRDF+f*d*smith(nv,a2)*smith(nl,a2)/max(4*nv*nl,0.000001);
+}
+vec3 sampleBRDF(vec3 n,vec3 v,vec3 albedo,float roughness,float metallic) {
+    float phi=2*PI*randomFloat(), xi=randomFloat();
+    if(randomFloat()<specularProbability(albedo,metallic)) {
+        float a=max(roughness*roughness,0.001);
+        float cosine=sqrt((1-xi)/max(1+(a*a-1)*xi,0.000001));
+        float sine=sqrt(max(0,1-cosine*cosine));
+        vec3 h=basisSample(n,vec3(sine*cos(phi),sine*sin(phi),cosine));
+        return reflect(-v,h);
+    }
+    return basisSample(n,vec3(sqrt(xi)*cos(phi),sqrt(xi)*sin(phi),sqrt(1-xi)));
+}
+float powerWeight(float a,float b) { return a*a/max(a*a+b*b,0.000000001); }
+uint sampleEmitter() {
+    float target=randomFloat()*lightSelection.x;
+    uint low=0, high=lightCounts.x-1;
+    while(low<high) {
+        uint mid=(low+high)/2;
+        if(emitters[mid].cumulativePower<=target) low=mid+1;
+        else high=mid;
+    }
+    return emitters[low].primitive;
+}
+float emitterPDF(uint primitive,float distanceSquared,float cosine) {
+    float power=materials[triangleMaterials[primitive]&0xffffu].emission.y;
+    // Selection probability is area * power / total, divided by area
+    // and converted from area measure to solid angle at the shading point.
+    return power*distanceSquared/max(lightSelection.x*cosine,0.000001);
+}
+vec3 environment(vec3 direction) {
+    // Explicit low-intensity sky environment; map HDR sky textures are a later material feature.
+    return mix(vec3(0.015,0.02,0.03),vec3(0.12,0.18,0.3),clamp(direction.z,0,1));
+}
+float pointAttenuation(uint light,vec3 direction,float distanceSquared) {
+    float cone=1;
+    if(pointCones[light].w>0) {
+        float cosine=dot(pointCones[light].xyz,-direction);
+        cone=smoothstep(pointCones[light].w,min(1,pointCones[light].w+0.02),cosine);
+    }
+    return pointPositions[light].w*cone/max(distanceSquared,1);
+}
+float dielectricFresnel(float cosine,float etaI,float etaT) {
+    cosine=clamp(abs(cosine),0,1);
+    float sinT2=(etaI*etaI/(etaT*etaT))*max(0,1-cosine*cosine);
+    if(sinT2>=1) return 1;
+    float ct=sqrt(1-sinT2);
+    float rs=(etaI*cosine-etaT*ct)/max(etaI*cosine+etaT*ct,0.000001);
+    float rp=(etaT*cosine-etaI*ct)/max(etaT*cosine+etaI*ct,0.000001);
+    return clamp((rs*rs+rp*rp)*0.5,0,1);
+}
+void integrator(vec3 camera,vec3 direction) {
+    pathD=pathS=radianceD=radianceS=radianceE=vec3(0); pathE=vec3(1);
+    vec3 origin=camera;
+    float mediumIOR[4]; vec3 mediumAbsorption[4];
+    int mediumCount=0;
+    if(rp.cameraMedium.x>1) {
+        mediumIOR[0]=rp.cameraMedium.x; mediumAbsorption[0]=rp.cameraMedium.yzw; mediumCount=1;
+    }
+    float previousPDF=0;
+    int transparentLayers=0;
+    float segmentDistance=0;
+    for(int bounce=0;bounce<int(pc.sampling.y);++bounce) {
+        Hit hit;
+        bool found=bounce==0 ? primaryHit(origin,direction,hit) :
+            trace(origin,direction,0.001,pc.parameters.y,0u,hit);
+        if(!found) {
+            if(mediumCount>0) attenuate(exp(-mediumAbsorption[mediumCount-1]*pc.parameters.y));
+            addIncident(environment(direction));
+            break;
+        }
+        Material m=materialProperties(triangleMaterials[hit.primitive]&0xffffu);
+        if(mediumCount>0) attenuate(exp(-mediumAbsorption[mediumCount-1]*hit.distance));
+        if(m.emission.z!=0) {
+            // Some legacy skies (notably blacksky) have SURF_SKY but no skyparms.
+            // They retain their source texture, while all sky boundaries pass sun rays.
+            vec3 sky=m.emission.z==2 ? linearColor(sampleTexture(m.surface.x,triangleUV(hit.primitive,hit.bary)).rgb) : environment(direction);
+            addIncident(sky);
+            break;
+        }
+        vec3 world=origin+direction*hit.distance, geometric;
+        if(m.params.x==4) {
+            vec3 n=shadingNormal(hit,direction,geometric);
+            uvec3 t=triangle(hit.primitive);
+            vec3 outward=vertices[t.x].normal.xyz*(1-hit.bary.x-hit.bary.y)+
+                vertices[t.y].normal.xyz*hit.bary.x+vertices[t.z].normal.xyz*hit.bary.y;
+            bool entering=dot(outward,direction)<0;
+            float etaI=mediumCount>0 ? mediumIOR[mediumCount-1]:1;
+            float etaT=entering ? m.optical.x : (mediumCount>1 ? mediumIOR[mediumCount-2]:1);
+            // A back face as the first boundary means the camera started inside.
+            if(!entering && mediumCount==0 && m.optical.y==0) {
+                etaI=m.optical.x;
+                attenuate(exp(-m.absorption.rgb*hit.distance));
+                mediumIOR[0]=etaI; mediumAbsorption[0]=m.absorption.rgb; mediumCount=1;
+            }
+            if(m.optical.y>0) etaT=m.optical.x;
+            float reflectance=dielectricFresnel(dot(-direction,n),etaI,etaT);
+            vec3 transmitted=refract(direction,n,etaI/etaT);
+            if(dot(transmitted,transmitted)<0.000001) reflectance=1;
+            // A finite parallel pane includes both interfaces and the geometric
+            // series of internal reflections. Transmitted rays leave parallel,
+            // but with the real lateral offset from their path inside the slab.
+            vec3 paneTransmission=vec3(1), paneReflection=vec3(reflectance);
+            float paneProbability=reflectance;
+            if(m.optical.y>0 && reflectance<1) {
+                float distance=m.optical.y/max(abs(dot(transmitted,geometric)),0.001);
+                vec3 absorption=m.absorption.rgb;
+                if(m.maps.w>0) absorption-=log(max(baseColor(hit.primitive,hit.bary),vec3(0.01)))/max(m.optical.y,1);
+                vec3 a=exp(-absorption*distance);
+                vec3 denominator=max(1-reflectance*reflectance*a*a,vec3(0.000001));
+                paneTransmission=(1-reflectance)*(1-reflectance)*a/denominator;
+                paneReflection=vec3(reflectance)+(1-reflectance)*(1-reflectance)*reflectance*a*a/denominator;
+                paneProbability=clamp(max(paneReflection.r,max(paneReflection.g,paneReflection.b)),0.001,0.999);
+            }
+            pathS+=pathE; pathE=vec3(0);
+            if(randomFloat()<(m.optical.y>0 ? paneProbability:reflectance)) {
+                if(m.optical.y>0) attenuate(paneReflection/max(paneProbability,0.000001));
+                direction=reflect(direction,n);
+                if(dot(direction,geometric)<=0) break;
+                origin=world+geometric*pc.parameters.x;
+            } else {
+                if(m.optical.y>0) {
+                    attenuate(paneTransmission/max(1-paneProbability,0.000001));
+                    // Equivalent zero-thickness exit on the surface plane avoids
+                    // skipping real geometry behind a legacy single-polygon pane.
+                    vec3 offset=transmitted*(m.optical.y/max(abs(dot(transmitted,geometric)),0.001));
+                    offset-=direction*(dot(offset,geometric)/min(dot(direction,geometric),-0.001));
+                    origin=world+offset-geometric*pc.parameters.x;
+                } else {
+                    if(dot(transmitted,geometric)>=0) break;
+                    attenuate(vec3((etaI*etaI)/(etaT*etaT)));
+                    direction=normalize(transmitted);
+                    origin=world-geometric*pc.parameters.x;
+                    if(entering) {
+                        if(mediumCount>=4) break;
+                        mediumIOR[mediumCount]=etaT;
+                        mediumAbsorption[mediumCount++]=m.absorption.rgb;
+                    } else mediumCount=max(mediumCount-1,0);
+                }
+            }
+            previousPDF=-1; segmentDistance=0;
+            continue;
+        }
+        if(m.params.x==2 || m.params.x==3) {
+            if(m.params.x==2) {
+                float area;
+                vec3 normal=geometricNormal(hit.primitive,area);
+                float d=segmentDistance+hit.distance;
+                float lightPDF=emitterPDF(hit.primitive,d*d,abs(dot(normal,-direction)));
+                addIncident(emissionAt(hit.primitive,hit.bary,true)*
+                    (bounce==0 || previousPDF<0 ? 1:powerWeight(previousPDF,lightPDF)));
+            } else attenuate(clamp(linearColor(layerSample(hit.primitive,hit.bary,0).rgb),0,1));
+            if(++transparentLayers>=32) break;
+            segmentDistance+=hit.distance+pc.parameters.x;
+            origin=world+direction*pc.parameters.x;
+            --bounce;
+            continue;
+        }
+        vec3 n=shadingNormal(hit,direction,geometric), v=-direction;
+        vec3 albedo=baseColor(hit.primitive,hit.bary);
+        vec2 properties=surfaceProperties(hit.primitive,hit.bary);
+        float roughness=properties.x, metallic=properties.y;
+        if(m.emission.y>0) {
+            float area;
+            vec3 normal=geometricNormal(hit.primitive,area);
+            float d=segmentDistance+hit.distance;
+            float lightPDF=emitterPDF(hit.primitive,d*d,abs(dot(normal,-direction)));
+            float weight=bounce==0 || previousPDF<0 ? 1 : powerWeight(previousPDF,lightPDF);
+            addIncident(emissionAt(hit.primitive,hit.bary,true)*weight);
+        }
+        vec3 start=world+geometric*pc.parameters.x;
+        visibilityAbsorption=mediumCount>0 ? mediumAbsorption[mediumCount-1]:vec3(0);
+        // Next-event estimation samples the actual emitting triangles, including off-screen ones.
+        if(lightCounts.x>0) {
+            uint primitive=sampleEmitter();
+            uvec3 t=triangle(primitive);
+            float root=sqrt(randomFloat());
+            vec2 bary=vec2(root*(1-randomFloat()),0);
+            bary.y=root-bary.x;
+            vec3 target=position(t.x)*(1-root)+position(t.y)*bary.x+position(t.z)*bary.y;
+            vec3 delta=target-start;
+            float distance=length(delta), area;
+            vec3 l=delta/max(distance,0.000001), ln=geometricNormal(primitive,area);
+            float nl=max(dot(n,l),0), lc=abs(dot(ln,-l));
+            float lightPDF=emitterPDF(primitive,distance*distance,lc);
+            if(nl>0 && dot(geometric,l)>0 && lc>0.0001 && distance>0.04) {
+                vec3 transmittance=visibility(start,l,distance-0.02);
+                if(any(greaterThan(transmittance,vec3(0)))) {
+                float pdf;
+                vec3 brdf=evaluateBRDF(n,v,l,albedo,roughness,metallic,pdf);
+                // No BSDF-hit technique is sampled after the final interaction;
+                // assigning it MIS weight there would darken direct-only tests.
+                float weight=bounce+1<int(pc.sampling.y) ? powerWeight(lightPDF,pdf) : 1;
+                addDirect(brdf,emissionAt(primitive,bary,false)*nl/lightPDF*weight*transmittance);
+                }
+            }
+        }
+        vec3 sun=normalize(pc.sunExposure.xyz);
+        if(dot(n,sun)>0 && dot(geometric,sun)>0 && any(greaterThan(pc.sunRadiance.rgb,vec3(0)))) {
+            vec3 transmittance=visibility(start,sun,pc.parameters.y);
+            if(any(greaterThan(transmittance,vec3(0)))) {
+                float pdf;
+                vec3 brdf=evaluateBRDF(n,v,sun,albedo,roughness,metallic,pdf);
+                addDirect(brdf,max(dot(n,sun),0)*pc.sunRadiance.rgb*transmittance);
+            }
+        }
+        for(uint i=0;i<lightCounts.y;++i) {
+            vec3 delta=pointPositions[i].xyz-start;
+            float distance=length(delta);
+            vec3 l=delta/max(distance,0.000001);
+            if(dot(n,l)<=0 || dot(geometric,l)<=0 || distance<=0.04) continue;
+            vec3 transmittance=visibility(start,l,distance-0.02);
+            if(any(greaterThan(transmittance,vec3(0)))) {
+                float pdf, intensity=pointPositions[i].w*pointPositions[i].w/max(distance*distance,1);
+                vec3 brdf=evaluateBRDF(n,v,l,albedo,roughness,metallic,pdf);
+                addDirect(brdf,dot(n,l)*pointColors[i].rgb*intensity*transmittance);
+            }
+        }
+        // Resampled importance sampling over a bounded uniform candidate set.
+        // The N/M compensation below keeps the estimator unbiased, including
+        // duplicate candidates. No visibility- or camera-based light culling.
+        float totalWeight=0, selectedWeight=0;
+        uint selected=0;
+        uint candidateCount=min(lightCounts.w,8u);
+        for(uint candidate=0;candidate<candidateCount;++candidate) {
+            uint i=32+min(uint(randomFloat()*float(lightCounts.w)),lightCounts.w-1);
+            vec3 delta=pointPositions[i].xyz-start;
+            float distanceSquared=dot(delta,delta);
+            vec3 l=delta*inversesqrt(max(distanceSquared,0.000001));
+            float weight=dot(pointColors[i].rgb,vec3(0.2126,0.7152,0.0722))*pointAttenuation(i,l,distanceSquared)*max(dot(n,l),0);
+            if(dot(geometric,l)<=0 || weight<=0) continue;
+            totalWeight+=weight;
+            if(randomFloat()*totalWeight<weight) { selected=i; selectedWeight=weight; }
+        }
+        if(selectedWeight>0) {
+            vec3 delta=pointPositions[selected].xyz-start;
+            float distance=length(delta);
+            vec3 l=delta/max(distance,0.000001);
+            if(distance>0.04) {
+                vec3 transmittance=visibility(start,l,distance-0.02);
+                if(any(greaterThan(transmittance,vec3(0)))) {
+                float pdf;
+                vec3 incident=pointColors[selected].rgb*pointAttenuation(selected,l,distance*distance);
+                vec3 brdf=evaluateBRDF(n,v,l,albedo,roughness,metallic,pdf);
+                addDirect(brdf,dot(n,l)*incident*totalWeight/selectedWeight*float(lightCounts.w)/float(candidateCount)*transmittance);
+                }
+            }
+        }
+        vec3 next=sampleBRDF(n,v,albedo,roughness,metallic);
+        if(dot(next,geometric)<=0) break;
+        float pdf;
+        vec3 brdf=evaluateBRDF(n,v,next,albedo,roughness,metallic,pdf);
+        if(pdf<=0.0000001) break;
+        float factor=max(dot(n,next),0)/pdf;
+        pathD=(pathD*brdf+pathE*diffuseBRDF)*factor;
+        pathS=(pathS*brdf+pathE*max(brdf-diffuseBRDF,vec3(0)))*factor;
+        pathE=vec3(0);
+        previousPDF=pdf;
+        if(bounce>=2) {
+            vec3 throughput=pathD+pathS;
+            float survival=clamp(max(throughput.r,max(throughput.g,throughput.b)),0.05,0.95);
+            if(randomFloat()>survival) break;
+            attenuate(vec3(1/survival));
+        }
+        origin=start; direction=next;
+        segmentDistance=0;
+    }
+}
+vec3 toneMap(vec3 radiance) {
+    vec3 x=max(radiance*pc.sunExposure.w,vec3(0));
+    vec3 mapped=clamp((x*(2.51*x+0.03))/(x*(2.43*x+0.59)+0.14),0,1);
+    return pow(mapped,vec3(1.0/2.2));
+}
+vec3 primaryDirection(vec2 pixel,ivec2 size) {
+    vec2 ndc=pixel/vec2(size)*2-1;
+    return normalize(pc.forwardFar.xyz +
+        pc.rightProjection.xyz*((ndc.x+pc.parameters.z)/pc.rightProjection.w)+
+        pc.upProjection.xyz*((ndc.y+pc.parameters.w)/pc.upProjection.w));
+}
+void writeGuide(uint index,vec3 direction) {
+    Guide g;
+    g.positionDepth=vec4(0,0,0,-1);
+    g.normalMaterial=vec4(0);
+    g.albedoRoughness=vec4(0);
+    vec4 oldPosition=vec4(0), oldNormal=vec4(0);
+    vec4 shading=vec4(0);
+    vec3 reprojectionOffset=direction;
+    float depth=1;
+    Hit hit;
+    bool found=false, reactive=false;
+    float traveled=0;
+    // Effects are not opaque depth. Follow straight additive/filter layers to
+    // the underlying surface for depth/motion, while refusing native radiance
+    // history wherever a visible effect changes the composite. Dielectrics
+    // retain their interface guide; reflected/transmitted light is specular.
+    for(int layer=0;layer<32;++layer) {
+        if(!primaryHit(pc.originNear.xyz+direction*traveled,direction,hit)) break;
+        Material material=materialProperties(triangleMaterials[hit.primitive]&0xffffu);
+        if(material.params.x!=2 && material.params.x!=3) {
+            hit.distance+=traveled;
+            found=true;
+            break;
+        }
+        if(material.params.x==3 || any(greaterThan(emissionAt(hit.primitive,hit.bary,true),vec3(0.0001))))
+            reactive=true;
+        traveled+=hit.distance+pc.parameters.x;
+    }
+    if(found) {
+        uint id=triangleMaterials[hit.primitive]&0xffffu;
+        Material m=materialProperties(id);
+        vec3 world=pc.originNear.xyz+direction*hit.distance;
+        float viewDepth=dot(world-pc.originNear.xyz,pc.forwardFar.xyz);
+        depth=clamp(-rp.depthProjection.x+rp.depthProjection.y/max(viewDepth,0.001),0,1);
+        uvec3 t=triangle(hit.primitive);
+        uint object=uint(vertices[t.x].normal.w);
+        vec3 geometric;
+        vec3 n=shadingNormal(hit,direction,geometric);
+        vec2 properties=surfaceProperties(hit.primitive,hit.bary);
+        shading=vec4(n,properties.x);
+        uint guideID=id | (object<<16);
+        oldPosition=vec4(world,1);
+        oldNormal=vec4(geometric,uintBitsToFloat(guideID));
+        if(object!=0u) {
+            vec4 a=vertices[t.x].previous, b=vertices[t.y].previous, c=vertices[t.z].previous;
+            oldPosition=vec4(a.xyz*(1-hit.bary.x-hit.bary.y)+b.xyz*hit.bary.x+c.xyz*hit.bary.y,
+                min(a.w,min(b.w,c.w)));
+            vec3 previousGeometric=cross(b.xyz-a.xyz,c.xyz-a.xyz);
+            float magnitude=length(previousGeometric);
+            if(magnitude<0.000001) oldPosition.w=0;
+            previousGeometric/=max(magnitude,0.000001);
+            if(dot(previousGeometric,oldPosition.xyz-rp.previousOrigin.xyz)>0) previousGeometric=-previousGeometric;
+            oldNormal.xyz=previousGeometric;
+        }
+        // Legacy untracked objects get camera motion only; native reconstruction
+        // rejects their history. Built-in tracked models use actual prior vertices.
+        reprojectionOffset=(oldPosition.w>0 ? oldPosition.xyz:world)-rp.previousOrigin.xyz;
+        if(!reactive && m.emission.z==0 && m.emission.y<=0 && (m.params.x==0 || m.params.x==4)) {
+            g.positionDepth=vec4(world,hit.distance);
+            // Identity is opaque bits, not a floating-point number. All consumers
+            // compare via floatBitsToUint; even NaN bit patterns retain identity.
+            g.normalMaterial=vec4(geometric,uintBitsToFloat(guideID));
+            g.albedoRoughness=vec4(baseColor(hit.primitive,hit.bary),properties.x);
+            // Texture/UV/color animation changes radiance without vertex motion.
+            if(m.params.w!=0) oldPosition.w=0;
+        }
+        ivec2 size=imageSize(outputColor), pixel=ivec2(int(index)%size.x,int(index)/size.x);
+        if(rp.options.z==4) imageStore(outputColor,pixel,vec4(n*0.5+0.5,1));
+        if(rp.options.z==5) imageStore(outputColor,pixel,vec4(properties,0,1));
+        if(rp.options.z==6) imageStore(outputColor,pixel,vec4(m.params.x==4 ? vec3(m.optical.x/3,m.optical.y>0 ? 1:0,m.optical.z):vec3(0),1));
+    }
+    guidePositions[index]=g.positionDepth;
+    guideNormals[index]=g.normalMaterial;
+    guideAlbedos[index]=g.albedoRoughness;
+    motionPositions[index]=oldPosition;
+    motionNormals[index]=oldNormal;
+    shadingGuides[index]=shading;
+    ivec2 size=imageSize(outputColor), pixel=ivec2(int(index)%size.x,int(index)/size.x);
+    float previousDepth=dot(reprojectionOffset,rp.previousForward.xyz);
+    vec2 motion=vec2(0);
+    if(rp.jitterHistoryReset.w==0 && previousDepth>0.001) {
+        vec2 previousNdc=vec2(dot(reprojectionOffset,rp.previousRight.xyz)*rp.previousRight.w,
+            dot(reprojectionOffset,rp.previousUp.xyz)*rp.previousUp.w)/previousDepth;
+        vec2 currentNdc=(vec2(pixel)+0.5)/vec2(size)*2-1+pc.parameters.zw;
+        // Previous minus current, normalized UV units, with projection jitter removed.
+        motion=(previousNdc-currentNdc)*0.5;
+    }
+    imageStore(outputMotion,pixel,vec4(motion,0,0));
+    imageStore(outputDepth,pixel,vec4(depth));
+}
+void main() {
+    ivec2 pixel=ivec2(gl_GlobalInvocationID.xy), size=imageSize(outputColor);
+    if(any(greaterThanEqual(pixel,size))) return;
+    uint index=uint(pixel.y*size.x+pixel.x);
+    rng=(index+1u)*747796405u+(uint(pc.sampling.z)+1u)*2891336453u;
+    if(rng==0) rng=1;
+    imageStore(outputColor,pixel,vec4(0,0,0,1));
+    writeGuide(index,primaryDirection(vec2(pixel)+0.5,size));
+    vec3 diffuse=vec3(0), reflection=vec3(0), emission=vec3(0);
+    for(int sampleIndex=0;sampleIndex<int(pc.sampling.x);++sampleIndex) {
+        vec2 jitter=vec2(randomFloat(),randomFloat())-0.5;
+        vec3 direction=primaryDirection(vec2(pixel)+0.5+jitter,size);
+        integrator(pc.originNear.xyz,direction);
+        if(!any(isnan(radianceD)) && !any(isinf(radianceD))) diffuse+=radianceD;
+        if(!any(isnan(radianceS)) && !any(isinf(radianceS))) reflection+=radianceS;
+        if(!any(isnan(radianceE)) && !any(isinf(radianceE))) emission+=radianceE;
+    }
+    diffuse/=pc.sampling.x; reflection/=pc.sampling.x; emission/=pc.sampling.x;
+    float history=pc.sampling.w;
+    if(history>0) {
+        diffuse=(accumulated[index].rgb*history+diffuse)/(history+1);
+        reflection=(specular[index].rgb*history+reflection)/(history+1);
+        emission=(visibleEmission[index].rgb*history+emission)/(history+1);
+    }
+    accumulated[index]=vec4(diffuse,history+1);
+    specular[index]=vec4(reflection,history+1);
+    visibleEmission[index]=vec4(emission,history+1);
+    vec3 result=rp.options.z==1 ? diffuse : (rp.options.z==2 ? reflection : (rp.options.z==3 ? emission : diffuse+reflection+emission));
+    if(rp.options.z<4) imageStore(outputColor,pixel,vec4(toneMap(result),1));
+}

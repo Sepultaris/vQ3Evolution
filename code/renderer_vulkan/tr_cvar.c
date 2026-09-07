@@ -92,6 +92,21 @@ cvar_t* r_dlssAvailable;
 cvar_t* r_dlssNeuralRenderingAvailable;
 cvar_t* r_dlssFrameGenerationAvailable;
 cvar_t* r_reflexAvailable;
+cvar_t* r_rayTracing;
+cvar_t* r_pathTracingSamples;
+cvar_t* r_pathTracingBounces;
+cvar_t* r_pathTracingExposure;
+cvar_t* r_pathTracingReference;
+cvar_t* r_pathTracingDenoise;
+cvar_t* r_pathTracingTemporal;
+cvar_t* r_pathTracingHistory;
+cvar_t* r_pathTracingTemporalDebug;
+cvar_t* r_pathTracingDebug;
+cvar_t* r_pathTracingProfile;
+cvar_t* r_pathTracingTestScene;
+cvar_t* r_rayTracingShadowStrength;
+cvar_t* r_rayTracingShadowBias;
+cvar_t* r_rayTracingAvailable;
 
 void R_Register( void ) 
 {
@@ -129,6 +144,35 @@ void R_Register( void )
 	r_dlssNeuralRenderingAvailable = ri.Cvar_Get( "r_dlssNeuralRenderingAvailable", "0", CVAR_TEMP );
 	r_dlssFrameGenerationAvailable = ri.Cvar_Get( "r_dlssFrameGenerationAvailable", "0", CVAR_TEMP );
 	r_reflexAvailable = ri.Cvar_Get( "r_reflexAvailable", "0", CVAR_TEMP );
+	r_rayTracing = ri.Cvar_Get( "r_rayTracing", "0", CVAR_ARCHIVE | CVAR_LATCH );
+	ri.Cvar_CheckRange( r_rayTracing, 0, 2, qtrue );
+	r_pathTracingSamples = ri.Cvar_Get("r_pathTracingSamples", "4", CVAR_ARCHIVE);
+	ri.Cvar_CheckRange(r_pathTracingSamples, 1, 64, qtrue);
+	r_pathTracingBounces = ri.Cvar_Get("r_pathTracingBounces", "4", CVAR_ARCHIVE);
+	ri.Cvar_CheckRange(r_pathTracingBounces, 1, 12, qtrue);
+	r_pathTracingExposure = ri.Cvar_Get("r_pathTracingExposure", "1", CVAR_ARCHIVE);
+	ri.Cvar_CheckRange(r_pathTracingExposure, 0.01f, 16.0f, qfalse);
+	r_pathTracingReference = ri.Cvar_Get("r_pathTracingReference", "0", CVAR_CHEAT);
+	ri.Cvar_CheckRange(r_pathTracingReference, 0, 1, qtrue);
+	r_pathTracingDenoise = ri.Cvar_Get("r_pathTracingDenoise", "1", CVAR_ARCHIVE);
+	ri.Cvar_CheckRange(r_pathTracingDenoise, 0, 1, qtrue);
+	r_pathTracingTemporal = ri.Cvar_Get("r_pathTracingTemporal", "1", CVAR_ARCHIVE);
+	ri.Cvar_CheckRange(r_pathTracingTemporal, 0, 1, qtrue);
+	r_pathTracingHistory = ri.Cvar_Get("r_pathTracingHistory", "8", CVAR_ARCHIVE);
+	ri.Cvar_CheckRange(r_pathTracingHistory, 1, 32, qtrue);
+	r_pathTracingTemporalDebug = ri.Cvar_Get("r_pathTracingTemporalDebug", "0", CVAR_CHEAT);
+	ri.Cvar_CheckRange(r_pathTracingTemporalDebug, 0, 2, qtrue);
+	r_pathTracingDebug = ri.Cvar_Get("r_pathTracingDebug", "0", CVAR_CHEAT);
+	r_pathTracingProfile = ri.Cvar_Get("r_pathTracingProfile", "0", CVAR_CHEAT);
+	ri.Cvar_CheckRange(r_pathTracingProfile, 0, 1, qtrue);
+	ri.Cvar_CheckRange(r_pathTracingDebug, 0, 6, qtrue);
+	r_pathTracingTestScene = ri.Cvar_Get("r_pathTracingTestScene", "0", CVAR_CHEAT | CVAR_LATCH);
+	ri.Cvar_CheckRange(r_pathTracingTestScene, 0, 1, qtrue);
+	r_rayTracingShadowStrength = ri.Cvar_Get( "r_rayTracingShadowStrength", "0.55", CVAR_ARCHIVE );
+	ri.Cvar_CheckRange( r_rayTracingShadowStrength, 0.0f, 1.0f, qfalse );
+	r_rayTracingShadowBias = ri.Cvar_Get( "r_rayTracingShadowBias", "1.5", CVAR_ARCHIVE );
+	ri.Cvar_CheckRange( r_rayTracingShadowBias, 0.05f, 16.0f, qfalse );
+	r_rayTracingAvailable = ri.Cvar_Get( "r_rayTracingAvailable", "0", CVAR_TEMP );
 	r_colorMipLevels = ri.Cvar_Get ("r_colorMipLevels", "0", CVAR_LATCH );
 
 	// r_overBrightBits = ri.Cvar_Get ("r_overBrightBits", "0", CVAR_ARCHIVE | CVAR_LATCH );

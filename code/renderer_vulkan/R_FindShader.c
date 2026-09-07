@@ -7,6 +7,7 @@
 #include "R_Parser.h"
 #include "tr_globals.h"
 #include "tr_shader.h"
+#include "vk_pathtrace.h"
 
 
 #define MAX_SHADERTEXT_HASH		2048
@@ -198,6 +199,8 @@ shader_t* R_FindShader( const char *name, int lightmapIndex, qboolean mipRawImag
 	//
     {
         char* shaderText = FindShaderInShaderText( strippedName );
+        const char *nativeText = vk_pt_builtin_shader(strippedName);
+        if (nativeText) shaderText = (char *)nativeText;
         if ( shaderText )
         {
             // enable this when building a pak file to get a global list

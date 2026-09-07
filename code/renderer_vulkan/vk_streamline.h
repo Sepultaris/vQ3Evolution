@@ -67,6 +67,7 @@ typedef struct vk_sl_frame_resources_s {
 	float jitter_x;
 	float jitter_y;
 	qboolean reset;
+    qboolean camera_motion_included;
 } vk_sl_frame_resources_t;
 
 qboolean vk_sl_begin_frame(uint32_t frame_index);

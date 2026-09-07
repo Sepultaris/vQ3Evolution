@@ -2,6 +2,7 @@
 #include "vk_instance.h"
 #include "vk_shaders.h"
 #include "vk_pipelines.h"
+#include "vk_temporal.h"
 #include "tr_shader.h"
 // The graphics pipeline is the sequence of operations that take the vertices
 // and textures of your meshes all the way to the pixels in the render targets
@@ -65,6 +66,15 @@ struct GlobalPipelineManager g_stdPipelines;
 #define MAX_VK_PIPELINES        1024
 static struct Vk_Pipeline_Def s_pipeline_defs[MAX_VK_PIPELINES];
 static uint32_t s_numPipelines = 0;
+
+/* Shader and standard pipelines both need a D32 scene variant when RTX/NR
+ * changes the depth attachment format. The original handles remain valid for
+ * the presentation/UI pass, which retains its depth/stencil attachment. */
+static struct {
+    VkPipeline presentation;
+    VkPipeline scene;
+} s_scene_pipelines[MAX_VK_PIPELINES + 64];
+static uint32_t s_numScenePipelines;
 
 
 void R_PipelineList_f(void)
@@ -194,7 +204,8 @@ void vk_createPipelineLayout(void)
 }
 
 
-static void vk_create_pipeline(const struct Vk_Pipeline_Def* def, VkPipeline* pPipeLine)
+static void vk_create_pipeline_for_pass(const struct Vk_Pipeline_Def* def,
+    VkRenderPass render_pass, VkPipeline* pPipeLine)
 {
 
 	struct Specialization_Data {
@@ -628,7 +639,7 @@ static void vk_create_pipeline(const struct Vk_Pipeline_Def* def, VkPipeline* pP
     // in which the pipeline will be used; the pipeline must only be used with
     // an instance of any render pass compatible with the one provided. 
     // See Render Pass Compatibility for more information.
-	create_info.renderPass = vk.render_pass;
+	create_info.renderPass = render_pass;
 
     // A pipeline derivative is a child pipeline created from a parent pipeline,
     // where the child and parent are expected to have much commonality. 
@@ -654,6 +665,44 @@ static void vk_create_pipeline(const struct Vk_Pipeline_Def* def, VkPipeline* pP
 }
 
 
+
+static void vk_create_pipeline(const struct Vk_Pipeline_Def* def, VkPipeline* pipeline)
+{
+    VkRenderPass scene_pass = vk_temporal_pipeline_render_pass();
+    vk_create_pipeline_for_pass(def, vk.render_pass, pipeline);
+    if (scene_pass) {
+        if (s_numScenePipelines >= ARRAY_LEN(s_scene_pipelines))
+            ri.Error(ERR_DROP, "Vulkan: scene pipeline capacity exceeded\n");
+        s_scene_pipelines[s_numScenePipelines].presentation = *pipeline;
+        vk_create_pipeline_for_pass(def, scene_pass,
+            &s_scene_pipelines[s_numScenePipelines].scene);
+        ++s_numScenePipelines;
+    }
+}
+
+VkPipeline vk_pipeline_for_scene(VkPipeline pipeline)
+{
+    uint32_t i;
+    if (!vk_temporal_scene_pass_active() || !vk_temporal_pipeline_render_pass())
+        return pipeline;
+    for (i = 0; i < s_numScenePipelines; ++i)
+        if (s_scene_pipelines[i].presentation == pipeline)
+            return s_scene_pipelines[i].scene;
+    ri.Error(ERR_DROP, "Vulkan: missing compatible scene pipeline\n");
+    return VK_NULL_HANDLE;
+}
+
+static void vk_destroy_scene_pipeline(VkPipeline pipeline)
+{
+    uint32_t i;
+    for (i = 0; i < s_numScenePipelines; ++i) {
+        if (s_scene_pipelines[i].presentation == pipeline) {
+            qvkDestroyPipeline(vk.device, s_scene_pipelines[i].scene, NULL);
+            s_scene_pipelines[i] = s_scene_pipelines[--s_numScenePipelines];
+            return;
+        }
+    }
+}
 
 static VkPipeline vk_find_pipeline(struct Vk_Pipeline_Def* def)
 {
@@ -909,6 +958,7 @@ void vk_destroyShaderStagePipeline(void)
     uint32_t i;
     for (i = 0; i < s_numPipelines; i++)
     {
+		vk_destroy_scene_pipeline(s_pipeline_defs[i].pipeline);
 		qvkDestroyPipeline(vk.device, s_pipeline_defs[i].pipeline, NULL);
         memset(&s_pipeline_defs[i], 0, sizeof(struct Vk_Pipeline_Def));
     }
@@ -919,6 +969,10 @@ void vk_destroyShaderStagePipeline(void)
 void vk_destroyGlobalStagePipeline(void)
 {
     int i, j, k;
+
+    while (s_numScenePipelines)
+        qvkDestroyPipeline(vk.device,
+            s_scene_pipelines[--s_numScenePipelines].scene, NULL);
 
 	qvkDestroyDescriptorSetLayout(vk.device, vk.set_layout, NULL); 
     qvkDestroyPipelineLayout(vk.device, vk.pipeline_layout, NULL);

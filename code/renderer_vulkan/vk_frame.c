@@ -6,6 +6,8 @@
 #include "vk_swapchain.h"
 #include "vk_temporal.h"
 #include "vk_streamline.h"
+#include "vk_screenshot.h"
+#include "vk_pathtrace.h"
 
 //  Synchronization of access to resources is primarily the responsibility
 //  of the application in Vulkan. The order of execution of commands with
@@ -55,7 +57,7 @@
 //
 
 VkSemaphore sema_imageAvailable;
-VkSemaphore sema_renderFinished;
+static VkSemaphore sema_renderFinished[MAX_SWAPCHAIN_IMAGES];
 VkFence fence_renderFinished;
 
 /*
@@ -98,7 +100,8 @@ void vk_create_sync_primitives(void)
     // which contains information about how the semaphore is to be created.
     // When created, the semaphore is in the unsignaled state.
     VK_CHECK(qvkCreateSemaphore(vk.device, &desc, NULL, &sema_imageAvailable));
-    VK_CHECK(qvkCreateSemaphore(vk.device, &desc, NULL, &sema_renderFinished));
+    for (uint32_t i = 0; i < MAX_SWAPCHAIN_IMAGES; ++i)
+        VK_CHECK(qvkCreateSemaphore(vk.device, &desc, NULL, &sema_renderFinished[i]));
 
 
     VkFenceCreateInfo fence_desc;
@@ -127,7 +130,9 @@ void vk_destroy_sync_primitives(void)
     ri.Printf(PRINT_ALL, " Destroy sema_imageAvailable sema_renderFinished fence_renderFinished\n");
 
     qvkDestroySemaphore(vk.device, sema_imageAvailable, NULL);
-	qvkDestroySemaphore(vk.device, sema_renderFinished, NULL);
+    for (uint32_t i = 0; i < MAX_SWAPCHAIN_IMAGES; ++i)
+        qvkDestroySemaphore(vk.device, sema_renderFinished[i], NULL);
+    vk_reset_captures();
 
     // To destroy a fence, 
 	qvkDestroyFence(vk.device, fence_renderFinished, NULL);
@@ -426,6 +431,18 @@ void vk_destroyFrameBuffers(void)
 
 void vk_begin_frame(void)
 {
+    // Consume the previous acquire wait before reusing its binary semaphore.
+    // The render fence also protects our single command buffer/scene resources.
+    VkResult fence_result;
+    do {
+        fence_result = qvkWaitForFences(vk.device, 1, &fence_renderFinished,
+            VK_FALSE, 1000000000ULL);
+    } while (fence_result == VK_TIMEOUT);
+    if (fence_result != VK_SUCCESS) {
+        ri.Error(ERR_FATAL, "Vulkan: %s while waiting for the render fence",
+            cvtResToStr(fence_result));
+        return;
+    }
   
     // An application can acquire use of a presentable image with vkAcquireNextImageKHR. 
     // After acquiring a presentable image and before modifying it, the application must
@@ -457,8 +474,9 @@ void vk_begin_frame(void)
         // VK_SUBOPTIMAL_KHR is acceptable - swapchain is still usable
         if (result != VK_SUCCESS && result != VK_SUBOPTIMAL_KHR)
         {
-            ri.Printf(PRINT_ALL, "Vulkan: error %s returned by qvkAcquireNextImageKHR\n",
+            ri.Error(ERR_FATAL, "Vulkan: error %s returned by qvkAcquireNextImageKHR\n",
                 cvtResToStr(result));
+            return;
         }
     }
 
@@ -475,16 +493,6 @@ void vk_begin_frame(void)
     //  the time vkWaitForFences is called, then vkWaitForFences will block and 
     //  wait up to timeout nanoseconds for the condition to become satisfied.
 
-	VkResult fence_result;
-	do {
-		fence_result = qvkWaitForFences(vk.device, 1, &fence_renderFinished,
-			VK_FALSE, 1000000000ULL);
-	} while (fence_result == VK_TIMEOUT);
-	if (fence_result != VK_SUCCESS) {
-		ri.Error(ERR_FATAL, "Vulkan: %s while waiting for the render fence",
-			cvtResToStr(fence_result));
-		return;
-	}
  
     //  To set the state of fences to unsignaled from the host
     //  "1" is the number of fences to reset. 
@@ -508,6 +516,7 @@ void vk_begin_frame(void)
 
     // To begin recording a command buffer
 	VK_CHECK(qvkBeginCommandBuffer(vk.command_buffer, &begin_info));
+	vk_pt_profile(vk.command_buffer, 0);
 
 	// Ensure visibility of geometry buffers writes.
 
@@ -586,10 +595,13 @@ void vk_end_frame(void)
 	else
 		qvkCmdEndRenderPass(vk.command_buffer);
 	
+    vk_pt_profile(vk.command_buffer, 6);
     VK_CHECK(qvkEndCommandBuffer(vk.command_buffer));
 
 
-	VkPipelineStageFlags wait_dst_stage_mask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+    /* Streamline may still be reading shared depth/motion/color resources on
+     * its present queue. Its acquire signal protects compute as well as WSI. */
+	VkPipelineStageFlags wait_dst_stage_mask = VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
     
     // Queue submission and synchronization
 	VkSubmitInfo submit_info;
@@ -603,7 +615,7 @@ void vk_end_frame(void)
 	submit_info.signalSemaphoreCount = 1;
     // specify which semaphones to signal once the command buffers
     // have finished execution
-	submit_info.pSignalSemaphores = &sema_renderFinished;
+	submit_info.pSignalSemaphores = &sema_renderFinished[vk.idx_swapchain_image];
 
 
     //  queue is the queue that the command buffers will be submitted to.
@@ -647,12 +659,14 @@ void vk_end_frame(void)
     vk_sl_mark_render_submit(qtrue);
     VK_CHECK(qvkQueueSubmit(vk.queue, 1, &submit_info, fence_renderFinished));
     vk_sl_mark_render_submit(qfalse);
+    /* Readbacks must occur before presentation releases image ownership. */
+    vk_flush_captures();
 
     VkPresentInfoKHR present_info;
 	present_info.sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR;
 	present_info.pNext = NULL;
 	present_info.waitSemaphoreCount = 1;
-	present_info.pWaitSemaphores = &sema_renderFinished;
+	present_info.pWaitSemaphores = &sema_renderFinished[vk.idx_swapchain_image];
 
     // specify the swap chains to present images to
 	present_info.swapchainCount = 1;

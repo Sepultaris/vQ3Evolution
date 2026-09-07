@@ -28,6 +28,8 @@ Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
 #include "ref_import.h"
 #include "R_Parser.h"
 #include "tr_shader.h"
+#include "vk_raytracing.h"
+#include "vk_pathtrace.h"
 /*
 
 Loads and prepares a map file for scene rendering.
@@ -1837,7 +1839,7 @@ void RE_LoadWorldMap( const char *name )
 
 
 	// load it
-	ri.FS_ReadFile( name, (void**)&buffer );
+	int bspLength = ri.FS_ReadFile( name, (void**)&buffer );
 	if ( !buffer ) {
 		ri.Error (ERR_DROP, "RE_LoadWorldMap: %s not found", name);
 	}
@@ -1886,5 +1888,7 @@ void RE_LoadWorldMap( const char *name )
 	// only set tr.world now that we know the entire level has loaded properly
 	tr.world = &s_worldData;
 	tr.worldMapLoaded = qtrue;
-    ri.FS_FreeFile( buffer );
+	vk_rt_load_world();
+	vk_pt_load_media((const byte *)buffer, bspLength, header);
+	ri.FS_FreeFile( buffer );
 }

@@ -290,7 +290,9 @@ static void R_AddWorldSurface( msurface_t *surf, int dlightBits )
 	// FIXME: bmodel fog?
 
 	// try to cull before dlighting or adding
-	if ( R_CullSurface( surf->data, surf->shader ) ) {
+	if (!(r_rayTracing->integer == 2 && (tr.currentEntityNum != REFENTITYNUM_WORLD ||
+		surf->shader->numDeforms)) &&
+		R_CullSurface( surf->data, surf->shader ) ) {
 		return;
 	}
 
@@ -327,7 +329,7 @@ void R_AddBrushModelSurfaces ( trRefEntity_t *ent ) {
 	bmodel = pModel->bmodel;
 
 	clip = R_CullLocalBox( bmodel->bounds );
-	if ( clip == CULL_OUT ) {
+	if ( clip == CULL_OUT && r_rayTracing->integer != 2 ) {
 		return;
 	}
 	
@@ -662,4 +664,11 @@ void R_AddWorldSurfaces (void)
 		tr.refdef.num_dlights = 32 ;
 	}
 	R_RecursiveWorldNode( tr.world->nodes, 15, ( 1 << tr.refdef.num_dlights ) - 1 );
+	if (r_rayTracing->integer == 2 && tr.world->bmodels) {
+		const bmodel_t *world = &tr.world->bmodels[0];
+		int surface;
+		for (surface = 0; surface < world->numSurfaces; ++surface)
+			if (world->firstSurface[surface].shader->numDeforms)
+				R_AddWorldSurface(&world->firstSurface[surface], 0);
+	}
 }

@@ -1,0 +1,128 @@
+#version 460
+// Native edge-aware a-trous spatial reconstruction in linear radiance. This
+// is deliberately separate from reference accumulation. When enabled, the
+// temporal pass supplies validated, clipped history before spatial filtering.
+layout(local_size_x=8, local_size_y=8) in;
+layout(binding=3, rgba8) uniform writeonly image2D outputColor;
+layout(binding=11, std430) readonly buffer Accumulation { vec4 accumulated[]; };
+struct Guide { vec4 positionDepth; vec4 normalMaterial; vec4 albedoRoughness; };
+layout(binding=12, std430) readonly buffer GuidePositions { vec4 guidePositions[]; };
+layout(binding=13, std430) readonly buffer GuideNormals { vec4 guideNormals[]; };
+layout(binding=14, std430) readonly buffer GuideAlbedos { vec4 guideAlbedos[]; };
+layout(binding=15, std430) buffer FilterA { vec4 filterA[]; };
+layout(binding=16, std430) buffer FilterB { vec4 filterB[]; };
+layout(binding=17, std430) readonly buffer Reprojection {
+    vec4 previousOrigin, previousForward, previousRight, previousUp;
+    vec4 jitterHistoryReset, options, depthProjection, cameraMedium;
+} rp;
+layout(binding=21, std430) readonly buffer Resolved { vec4 resolved[]; };
+layout(binding=26, std430) readonly buffer Specular { vec4 specular[]; };
+layout(binding=27, std430) readonly buffer VisibleEmission { vec4 visibleEmission[]; };
+layout(binding=29, std430) readonly buffer SpecResolved { vec4 specResolved[]; };
+layout(binding=30, std430) buffer SpecFilterA { vec4 specFilterA[]; };
+layout(binding=31, std430) buffer SpecFilterB { vec4 specFilterB[]; };
+layout(binding=32, std430) readonly buffer ShadingGuides { vec4 shadingGuides[]; };
+layout(push_constant) uniform Constants {
+    vec4 originNear, forwardFar, rightProjection, upProjection;
+    vec4 sunExposure, parameters, sunRadiance, sampling;
+} pc;
+
+Guide guide(uint index) {
+    return Guide(guidePositions[index],guideNormals[index],guideAlbedos[index]);
+}
+vec3 source(uint index,int pass) {
+    if(pass==0) return rp.options.x!=0 ? resolved[index].rgb:accumulated[index].rgb;
+    if(pass==1) return filterA[index].rgb;
+    return filterB[index].rgb;
+}
+vec3 specSource(uint index,int pass) {
+    if(pass==0) return rp.options.x!=0 ? specResolved[index].rgb:specular[index].rgb;
+    return pass==1 ? specFilterA[index].rgb:specFilterB[index].rgb;
+}
+float luminance(vec3 color) { return dot(color,vec3(0.2126,0.7152,0.0722)); }
+vec3 toneMap(vec3 radiance) {
+    vec3 x=max(radiance*pc.sunExposure.w,vec3(0));
+    return pow(clamp((x*(2.51*x+0.03))/(x*(2.43*x+0.59)+0.14),0,1),vec3(1.0/2.2));
+}
+void main() {
+    ivec2 pixel=ivec2(gl_GlobalInvocationID.xy), size=imageSize(outputColor);
+    if(any(greaterThanEqual(pixel,size))) return;
+    uint index=uint(pixel.y*size.x+pixel.x);
+    int pass=int(pc.sampling.z), stepSize=1<<pass;
+    Guide center=guide(index);
+    vec3 centerColor=source(index,pass);
+    vec3 centerSpec=specSource(index,pass);
+    // Sky and directly visible emitters keep the integrator output.
+    // Initialize scratch even for excluded pixels.
+    if(center.positionDepth.w<0) {
+        if(pass==0) filterA[index]=vec4(centerColor,1);
+        if(pass==1) filterB[index]=vec4(centerColor,1);
+        if(pass==0) specFilterA[index]=vec4(centerSpec,1);
+        if(pass==1) specFilterB[index]=vec4(centerSpec,1);
+        return;
+    }
+    if(pass==2 && rp.options.y!=0) {
+        float count=rp.options.x!=0 ? (rp.options.y==2 ? specResolved[index].w:resolved[index].w):1;
+        vec3 color=(floatBitsToUint(center.normalMaterial.w)>>16)!=0u ?
+            (count>1.01 ? vec3(0,1,1):vec3(0,0,1)) :
+            (count>1.01 ? vec3(0,clamp(count/max(rp.jitterHistoryReset.z,2),0.25,1),0):vec3(1,0,0));
+        imageStore(outputColor,pixel,vec4(color,1));
+        return;
+    }
+    vec2 mean=vec2(0), secondMoment=vec2(0);
+    float count=0;
+    for(int y=-1;y<=1;++y) for(int x=-1;x<=1;++x) {
+        ivec2 q=clamp(pixel+ivec2(x,y),ivec2(0),size-1);
+        uint qi=uint(q.y*size.x+q.x);
+        if(floatBitsToUint(guideNormals[qi].w)!=floatBitsToUint(center.normalMaterial.w) || guidePositions[qi].w<0) continue;
+        vec2 l=vec2(luminance(source(qi,pass)),luminance(specSource(qi,pass)));
+        mean+=l; secondMoment+=l*l; count+=1;
+    }
+    mean/=max(count,1);
+    vec2 variance=max(secondMoment/max(count,1)-mean*mean,vec2(0));
+    vec2 phi=max(4*sqrt(variance),max(vec2(luminance(centerColor),luminance(centerSpec))*0.1,vec2(0.0001)));
+    float footprint=max(0.02,center.positionDepth.w*2/(float(size.y)*abs(pc.upProjection.w)));
+    float kernel[5]=float[5](1,4,6,4,1);
+    vec3 sum=vec3(0);
+    float total=0;
+    vec3 specSum=vec3(0);
+    float specTotal=0;
+    for(int y=-2;y<=2;++y) for(int x=-2;x<=2;++x) {
+        ivec2 q=pixel+ivec2(x,y)*stepSize;
+        if(any(lessThan(q,ivec2(0))) || any(greaterThanEqual(q,size))) continue;
+        uint qi=uint(q.y*size.x+q.x);
+        Guide other=guide(qi);
+        if(other.positionDepth.w<0 || floatBitsToUint(other.normalMaterial.w)!=floatBitsToUint(center.normalMaterial.w)) continue;
+        float agreement=max(dot(center.normalMaterial.xyz,other.normalMaterial.xyz),0);
+        if(agreement<0.9) continue;
+        vec3 delta=other.positionDepth.xyz-center.positionDepth.xyz;
+        float planeDistance=abs(dot(delta,center.normalMaterial.xyz));
+        // Position/normal tests prevent mixing surfaces at silhouettes and corners.
+        float weight=kernel[x+2]*kernel[y+2]*pow(agreement,64)*exp(-planeDistance/(footprint+0.001));
+        float shadingAgreement=max(dot(shadingGuides[index].xyz,shadingGuides[qi].xyz),0);
+        weight*=pow(shadingAgreement,32);
+        float specWeight=weight*pow(shadingAgreement,96)*exp(-abs(center.albedoRoughness.w-other.albedoRoughness.w)*64);
+        vec3 relativeAlbedo=(other.albedoRoughness.rgb-center.albedoRoughness.rgb)/max(center.albedoRoughness.rgb+other.albedoRoughness.rgb,vec3(0.1));
+        weight*=exp(-dot(relativeAlbedo,relativeAlbedo)*8);
+        vec3 color=source(qi,pass);
+        weight*=exp(-abs(luminance(color)-luminance(centerColor))/phi.x);
+        vec3 specColor=specSource(qi,pass);
+        specWeight*=exp(-abs(luminance(specColor)-luminance(centerSpec))/phi.y);
+        // Independent specular footprint. Mirror/transmission paths never get
+        // spatially blurred; rough lobes gradually permit wider passes.
+        if(center.albedoRoughness.w < 0.2+float(pass)*0.25 && (x!=0 || y!=0)) specWeight=0;
+        sum+=color*weight;
+        total+=weight;
+        specSum+=specColor*specWeight;
+        specTotal+=specWeight;
+    }
+    vec3 result=total>0 ? sum/total:centerColor;
+    vec3 reflection=specTotal>0 ? specSum/specTotal:centerSpec;
+    if(pass==0) { filterA[index]=vec4(result,1); specFilterA[index]=vec4(reflection,1); }
+    else if(pass==1) { filterB[index]=vec4(result,1); specFilterB[index]=vec4(reflection,1); }
+    else if(rp.options.z<4) {
+        vec3 emission=visibleEmission[index].rgb;
+        vec3 combined=rp.options.z==1 ? result : (rp.options.z==2 ? reflection : (rp.options.z==3 ? emission : result+reflection+emission));
+        imageStore(outputColor,pixel,vec4(toneMap(combined),1));
+    }
+}

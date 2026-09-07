@@ -1391,6 +1391,57 @@ qboolean ParseShader( char **text )
 			tr.sunDirection[0] = cos( a ) * cos( b );
 			tr.sunDirection[1] = sin( a ) * cos( b );
 			tr.sunDirection[2] = sin( b );
+			VectorCopy(tr.sunLight, shader.rtSunColor);
+			VectorCopy(tr.sunDirection, shader.rtSunDirection);
+			shader.rtSunDefined = qtrue;
+		}
+		else if ( !Q_stricmp( token, "q3map_surfacelight" ) ) {
+			token = R_ParseExt( text, qfalse );
+			shader.rtSurfaceLight = fmaxf(0.0f, atof(token));
+		}
+		else if ( !Q_stricmp( token, "q3map_lightimage" ) ) {
+			token = R_ParseExt( text, qfalse );
+			if (token[0])
+				shader.rtLightImage = R_FindImageFile(token, qtrue, qtrue, GL_REPEAT);
+		}
+		else if ( !Q_stricmp( token, "rt_material" ) ) {
+			/* Optional roughness / metallic values; original shaders need no edits. */
+			token = R_ParseExt(text, qfalse);
+			shader.rtRoughness = Com_Clamp(0.02f, 1.0f, atof(token));
+			token = R_ParseExt(text, qfalse);
+			shader.rtMetallic = Com_Clamp(0.0f, 1.0f, atof(token));
+			shader.rtMaterialDefined = qtrue;
+		}
+		else if (!Q_stricmp(token, "rt_basecolormap") || !Q_stricmp(token, "rt_normalmap") ||
+			!Q_stricmp(token, "rt_ormmap")) {
+			int kind = !Q_stricmp(token, "rt_normalmap") ? 1 : (!Q_stricmp(token, "rt_ormmap") ? 2 : 0);
+			token = R_ParseExt(text, qfalse);
+			if (!token[0]) return qfalse;
+			image_t *image = R_FindImageFile(token, qtrue, qfalse, GL_REPEAT);
+			if (kind == 0) shader.rtBaseColorImage = image;
+			if (kind == 1) shader.rtNormalImage = image;
+			if (kind == 2) shader.rtORMImage = image;
+		}
+		else if (!Q_stricmp(token, "rt_normalscale")) {
+			token = R_ParseExt(text, qfalse);
+			shader.rtNormalScale = Com_Clamp(0, 4, atof(token));
+		}
+		else if (!Q_stricmp(token, "rt_dielectric")) {
+			token = R_ParseExt(text, qfalse);
+			if (!token[0]) return qfalse;
+			shader.rtIOR = Com_Clamp(1, 3, atof(token));
+			token = R_ParseExt(text, qfalse);
+			if (!token[0]) return qfalse;
+			shader.rtThickness = Com_Clamp(0, 1024, atof(token));
+			shader.rtDielectricDefined = qtrue;
+		}
+		else if (!Q_stricmp(token, "rt_absorption")) {
+			for (int channel = 0; channel < 3; ++channel) {
+				token = R_ParseExt(text, qfalse);
+				if (!token[0]) return qfalse;
+				shader.rtAbsorption[channel] = Com_Clamp(0, 10, atof(token));
+			}
+			shader.rtAbsorptionDefined = qtrue;
 		}
 		else if ( !Q_stricmp( token, "deformVertexes" ) ) {
 			ParseDeform( text );
@@ -1889,7 +1940,7 @@ shader_t* FinishShader( void )
 	//
 	// if we are in r_vertexLight mode, never use a lightmap texture
 	//
-	if ( iStage > 1 && ( r_vertexLight->integer && !r_uiFullScreen->integer ) ) {
+	if ( r_rayTracing->integer != 2 && iStage > 1 && ( r_vertexLight->integer && !r_uiFullScreen->integer ) ) {
 		VertexLightingCollapse();
 		iStage = 1;
 		hasLightmapStage = qfalse;
@@ -1898,7 +1949,8 @@ shader_t* FinishShader( void )
 	//
 	// look for multitexture potential
 	//
-	if ( iStage > 1 && CollapseMultitexture() ) {
+	// Path materials require each source layer's independent blend/animation.
+	if ( r_rayTracing->integer != 2 && iStage > 1 && CollapseMultitexture() ) {
 		iStage--;
 	}
 
@@ -1937,6 +1989,7 @@ void R_SetTheShader( const char *name, int lightmapIndex )
 
 	// clear the global shader
 	memset( &shader, 0, sizeof( shader ) );
+	shader.rtNormalScale = 1;
 
 	strncpy( shader.name, name, sizeof( shader.name ) );
 	

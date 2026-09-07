@@ -12,6 +12,7 @@
 #include "vk_shaders.h"
 #include "vk_depth_attachment.h"
 #include "vk_streamline.h"
+#include "vk_raytracing.h"
 
 
 struct Vk_Instance vk;
@@ -30,6 +31,7 @@ PFN_vkEnumerateDeviceExtensionProperties		qvkEnumerateDeviceExtensionProperties;
 PFN_vkEnumeratePhysicalDevices					qvkEnumeratePhysicalDevices;
 PFN_vkGetDeviceProcAddr							qvkGetDeviceProcAddr;
 PFN_vkGetPhysicalDeviceFeatures					qvkGetPhysicalDeviceFeatures;
+PFN_vkGetPhysicalDeviceFeatures2				qvkGetPhysicalDeviceFeatures2;
 PFN_vkGetPhysicalDeviceFormatProperties			qvkGetPhysicalDeviceFormatProperties;
 PFN_vkGetPhysicalDeviceMemoryProperties			qvkGetPhysicalDeviceMemoryProperties;
 PFN_vkGetPhysicalDeviceProperties				qvkGetPhysicalDeviceProperties;
@@ -63,6 +65,7 @@ PFN_vkCmdClearAttachments						qvkCmdClearAttachments;
 PFN_vkCmdCopyBufferToImage						qvkCmdCopyBufferToImage;
 PFN_vkCmdCopyImage								qvkCmdCopyImage;
 PFN_vkCmdCopyImageToBuffer                      qvkCmdCopyImageToBuffer;
+PFN_vkCmdCopyBuffer qvkCmdCopyBuffer;
 PFN_vkCmdDispatch                               qvkCmdDispatch;
 PFN_vkCmdDraw									qvkCmdDraw;
 PFN_vkCmdDrawIndexed							qvkCmdDrawIndexed;
@@ -188,8 +191,19 @@ static void vk_createInstance(void)
     // number specified in apiVersion is ignored when creating an 
     // instance object. Only the major and minor versions of the 
     // instance must match those requested in apiVersion.
-	/* Streamline's Vulkan backend requires Vulkan 1.2 or newer. */
-	appInfo.apiVersion = vk_sl_is_initialized() ? VK_MAKE_VERSION(1, 2, 0) : VK_MAKE_VERSION(1, 0, 0);
+	/* Ray queries and Streamline use Vulkan 1.2. Query the loader first so
+	 * older non-RTX systems retain the original Vulkan 1.0 path. */
+	{
+		uint32_t loader_version = VK_API_VERSION_1_0;
+		PFN_vkEnumerateInstanceVersion enumerate_version =
+			(PFN_vkEnumerateInstanceVersion)qvkGetInstanceProcAddr(NULL,
+				"vkEnumerateInstanceVersion");
+		if (enumerate_version)
+			enumerate_version(&loader_version);
+		vk.api_version = loader_version >= VK_API_VERSION_1_2 ?
+			VK_API_VERSION_1_2 : VK_API_VERSION_1_0;
+	}
+	appInfo.apiVersion = vk.api_version;
 
 
 	VkInstanceCreateInfo instanceCreateInfo;
@@ -318,7 +332,9 @@ static void vk_loadGlobalFunctions(void)
 	INIT_INSTANCE_FUNCTION(vkEnumeratePhysicalDevices)
 	INIT_INSTANCE_FUNCTION(vkGetDeviceProcAddr)
 
-    INIT_INSTANCE_FUNCTION(vkGetPhysicalDeviceFeatures)
+	INIT_INSTANCE_FUNCTION(vkGetPhysicalDeviceFeatures)
+	qvkGetPhysicalDeviceFeatures2 = (PFN_vkGetPhysicalDeviceFeatures2)
+		qvkGetInstanceProcAddr(vk.instance, "vkGetPhysicalDeviceFeatures2");
     INIT_INSTANCE_FUNCTION(vkGetPhysicalDeviceProperties)
 	INIT_INSTANCE_FUNCTION(vkGetPhysicalDeviceFormatProperties)
 	INIT_INSTANCE_FUNCTION(vkGetPhysicalDeviceMemoryProperties)
@@ -553,6 +569,10 @@ static void vk_createLogicalDevice(void)
     const char **device_extensions;
     uint32_t device_extension_count = 0;
     uint32_t requested_extension_count = vk_sl_device_extension_count();
+	uint32_t rt_extension_count;
+	void *rt_device_features = NULL;
+    VkPhysicalDevicePrivateDataFeatures private_data = {
+        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PRIVATE_DATA_FEATURES };
 
     //  Not all graphics cards are capble of presenting images directly
     //  to a screen for various reasons, for example because they are 
@@ -574,10 +594,31 @@ static void vk_createLogicalDevice(void)
 
     qvkEnumerateDeviceExtensionProperties( vk.physical_device, NULL, &nDevExts, pDeviceExt);
 
+	vk_rt_configure_device(vk.physical_device, pDeviceExt, nDevExts,
+		qvkGetPhysicalDeviceFeatures2, &rt_device_features);
+	rt_extension_count = vk_rt_device_extension_count();
+
 
     device_extensions = (const char **)malloc(
-        sizeof(char *) * (requested_extension_count + 1));
+        sizeof(char *) * (requested_extension_count + rt_extension_count + 2));
     device_extensions[device_extension_count++] = VK_KHR_SWAPCHAIN_EXTENSION_NAME;
+    /* Streamline uses private data on its swapchains. Extension availability
+     * alone does not enable the feature; query it and include it explicitly. */
+    if (vk_sl_is_initialized() && qvkGetPhysicalDeviceFeatures2) {
+        for (uint32_t i = 0; i < nDevExts; ++i) {
+            if (!strcmp(pDeviceExt[i].extensionName, VK_EXT_PRIVATE_DATA_EXTENSION_NAME)) {
+                VkPhysicalDeviceFeatures2 query = { .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2 };
+                query.pNext = &private_data;
+                qvkGetPhysicalDeviceFeatures2(vk.physical_device, &query);
+                if (private_data.privateData) {
+                    device_extensions[device_extension_count++] = VK_EXT_PRIVATE_DATA_EXTENSION_NAME;
+                    private_data.pNext = rt_device_features;
+                    rt_device_features = &private_data;
+                }
+                break;
+            }
+        }
+    }
 
     uint32_t j;
     for (j = 0; j < nDevExts; j++)
@@ -620,6 +661,18 @@ static void vk_createLogicalDevice(void)
         if (!duplicate)
             device_extensions[device_extension_count++] = requested;
     }
+	for (uint32_t i = 0; i < rt_extension_count; ++i) {
+		const char *requested = vk_rt_device_extension(i);
+		VkBool32 duplicate = VK_FALSE;
+		for (j = 0; j < device_extension_count; ++j) {
+			if (!strcmp(requested, device_extensions[j])) {
+				duplicate = VK_TRUE;
+				break;
+			}
+		}
+		if (!duplicate)
+			device_extensions[device_extension_count++] = requested;
+	}
 
     free(pDeviceExt);
 
@@ -641,7 +694,7 @@ static void vk_createLogicalDevice(void)
 
     VkDeviceCreateInfo device_desc;
     device_desc.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
-    device_desc.pNext = NULL;
+    device_desc.pNext = rt_device_features;
     device_desc.flags = 0;
     device_desc.queueCreateInfoCount = 1;
     device_desc.pQueueCreateInfos = &queue_desc;
@@ -693,6 +746,7 @@ static void vk_loadDeviceFunctions(void)
 	INIT_DEVICE_FUNCTION(vkCmdCopyBufferToImage)
 	INIT_DEVICE_FUNCTION(vkCmdCopyImage)
     INIT_DEVICE_FUNCTION(vkCmdCopyImageToBuffer)
+    INIT_DEVICE_FUNCTION(vkCmdCopyBuffer)
 	INIT_DEVICE_FUNCTION(vkCmdDispatch)
 	INIT_DEVICE_FUNCTION(vkCmdDraw)
 	INIT_DEVICE_FUNCTION(vkCmdDrawIndexed)
@@ -831,6 +885,7 @@ void vk_clearProcAddress(void)
 	qvkEnumeratePhysicalDevices					= NULL;
 	qvkGetDeviceProcAddr						= NULL;
 	qvkGetPhysicalDeviceFeatures				= NULL;
+	qvkGetPhysicalDeviceFeatures2				= NULL;
 	qvkGetPhysicalDeviceFormatProperties		= NULL;
 	qvkGetPhysicalDeviceMemoryProperties		= NULL;
 	qvkGetPhysicalDeviceProperties				= NULL;
@@ -862,6 +917,7 @@ void vk_clearProcAddress(void)
 	qvkCmdCopyBufferToImage						= NULL;
 	qvkCmdCopyImage								= NULL;
     qvkCmdCopyImageToBuffer                     = NULL;
+    qvkCmdCopyBuffer = NULL;
 	qvkCmdDispatch                               = NULL;
 	qvkCmdDraw									= NULL;
 	qvkCmdDrawIndexed							= NULL;
@@ -990,8 +1046,6 @@ const char * cvtResToStr(VkResult result)
 //
         case VK_RESULT_MAX_ENUM:
             return "VK_RESULT_MAX_ENUM";
-        case VK_RESULT_RANGE_SIZE:
-            return "VK_RESULT_RANGE_SIZE"; 
         case VK_ERROR_FRAGMENTATION_EXT:
             return "VK_ERROR_FRAGMENTATION_EXT";
     }

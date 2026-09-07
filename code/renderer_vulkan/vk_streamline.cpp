@@ -28,34 +28,7 @@
 #include <sl_pcl.h>
 #include <sl_reflex.h>
 #include <sl_security.h>
-
-/*
- * This backend deliberately keeps its compact Vulkan 1.0 header.  VulkanInfo
- * only contains opaque Vulkan handles and queue indices, so reproduce the
- * public Streamline 2.12 ABI declaration here instead of pulling the SDK's
- * helper header (which also requires all Vulkan 1.2/1.3 feature structs).
- */
-namespace sl {
-SL_STRUCT_BEGIN(VulkanInfo,
-	StructType({ 0xeed6fd5, 0x82cd, 0x43a9, { 0xbd, 0xb5, 0x47, 0xa5, 0xba, 0x2f, 0x45, 0xd6 } }),
-	kStructVersion3)
-	VkDevice device {};
-	VkInstance instance {};
-	VkPhysicalDevice physicalDevice {};
-	uint32_t computeQueueIndex {};
-	uint32_t computeQueueFamily {};
-	uint32_t graphicsQueueIndex {};
-	uint32_t graphicsQueueFamily {};
-	uint32_t opticalFlowQueueIndex {};
-	uint32_t opticalFlowQueueFamily {};
-	bool useNativeOpticalFlowMode = false;
-	uint32_t computeQueueCreateFlags {};
-	uint32_t graphicsQueueCreateFlags {};
-	uint32_t opticalFlowQueueCreateFlags {};
-SL_STRUCT_END()
-}
-
-using PFun_slSetVulkanInfo = sl::Result(const sl::VulkanInfo& info);
+#include <sl_helpers_vk.h>
 
 namespace {
 
@@ -669,7 +642,7 @@ extern "C" qboolean vk_sl_evaluate_dlss(const vk_sl_frame_resources_t *r)
 	constants.cameraAspectRatio = r->camera_aspect;
 	constants.motionVectorsInvalidValue = 0.0f;
 	constants.depthInverted = sl::Boolean::eFalse;
-	constants.cameraMotionIncluded = sl::Boolean::eFalse;
+	constants.cameraMotionIncluded = r->camera_motion_included ? sl::Boolean::eTrue : sl::Boolean::eFalse;
 	constants.motionVectors3D = sl::Boolean::eFalse;
 	constants.reset = (!g_sl.havePreviousCamera || r->reset) ? sl::Boolean::eTrue : sl::Boolean::eFalse;
 	constants.motionVectorsJittered = sl::Boolean::eFalse;
@@ -681,7 +654,7 @@ extern "C" qboolean vk_sl_evaluate_dlss(const vk_sl_frame_resources_t *r)
 	const VkImageUsageFlags colorUsage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT |
 		VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_STORAGE_BIT |
 		VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
-	const VkImageUsageFlags depthUsage = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT |
+	const VkImageUsageFlags depthUsage = (r->camera_motion_included ? VK_IMAGE_USAGE_STORAGE_BIT : VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT) |
 		VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT |
 		VK_IMAGE_USAGE_TRANSFER_DST_BIT;
 	const VkImageUsageFlags motionUsage = VK_IMAGE_USAGE_SAMPLED_BIT |

@@ -21,6 +21,7 @@ void RE_SetWorldVisData( const byte *vis );
 void RE_EndRegistration( void );
 void RE_ClearScene( void );
 void RE_AddRefEntityToScene( const refEntity_t *ent );
+void RE_AddRefEntityTracked(const refEntity_t *ent, int motionId, int generation);
 void RE_AddPolyToScene( qhandle_t hShader , int numVerts, const polyVert_t *verts, int num );
 
 int RE_LightForPoint( vec3_t point, vec3_t ambientLight, vec3_t directedLight, vec3_t lightDir );

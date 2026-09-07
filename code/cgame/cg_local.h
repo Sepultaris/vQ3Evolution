@@ -1316,7 +1316,8 @@ qhandle_t CG_StatusHandle(int task);
 //
 void CG_Player( centity_t *cent );
 void CG_ResetPlayerEntity( centity_t *cent );
-void CG_AddRefEntityWithPowerups( refEntity_t *ent, entityState_t *state, int team );
+void CG_AddRefEntityWithPowerups( refEntity_t *ent, entityState_t *state, int team, int motionPart );
+void CG_AddTrackedEntity(const refEntity_t *ent, const entityState_t *state, int part);
 void CG_NewClientInfo( int clientNum );
 sfxHandle_t	CG_CustomSound( int clientNum, const char *soundName );
 
@@ -1591,6 +1592,7 @@ qhandle_t	trap_R_RegisterShaderNoMip( const char *name );			// returns all white
 // Nothing is drawn until R_RenderScene is called.
 void		trap_R_ClearScene( void );
 void		trap_R_AddRefEntityToScene( const refEntity_t *re );
+void trap_R_AddRefEntityTracked(const refEntity_t *re, int motionId, int generation);
 
 // polys are intended for simple wall marks, not really for doing
 // significant construction
@@ -1691,4 +1693,3 @@ void	CG_ParticleMisc (qhandle_t pshader, vec3_t origin, int size, int duration, 
 void	CG_ParticleExplosion (char *animStr, vec3_t origin, vec3_t vel, int duration, int sizeStart, int sizeEnd);
 extern qboolean		initparticles;
 int CG_NewParticleArea ( int num );
-

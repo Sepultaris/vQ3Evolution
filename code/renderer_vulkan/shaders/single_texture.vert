@@ -26,6 +26,7 @@ void main() {
     vec4 p = vec4(in_position, 1.0);
     gl_Position = clip_space_xform * p;
 
+    frag_clip_dist = 1.0;
     if (clip_plane != 0)
         frag_clip_dist = dot(clipping_plane, vec4( p * eye_space_xform, 1.0));
 

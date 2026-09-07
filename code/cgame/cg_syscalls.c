@@ -257,6 +257,9 @@ void	trap_R_ClearScene( void ) {
 void	trap_R_AddRefEntityToScene( const refEntity_t *re ) {
 	syscall( CG_R_ADDREFENTITYTOSCENE, re );
 }
+void trap_R_AddRefEntityTracked(const refEntity_t *re, int motionId, int generation) {
+    syscall(CG_R_ADDREFENTITYTRACKED, re, motionId, generation);
+}
 
 void	trap_R_AddPolyToScene( qhandle_t hShader , int numVerts, const polyVert_t *verts ) {
 	syscall( CG_R_ADDPOLYTOSCENE, hShader, numVerts, verts );

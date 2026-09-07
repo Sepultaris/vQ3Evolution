@@ -11,6 +11,7 @@
 #include "tr_light.h"
 #include "tr_shader.h"
 #include "vk_temporal.h"
+#include "vk_raytracing.h"
 
 #define VERTEX_CHUNK_SIZE   (768 * 1024)
 #define INDEX_BUFFER_SIZE   (2 * 1024 * 1024)
@@ -392,7 +393,8 @@ void vk_shade_geometry(VkPipeline pipeline, VkBool32 multitexture, enum Vk_Depth
         vk.pipeline_layout, 0, (multitexture ? 2 : 1), shadingDat.curDescriptorSets, 0, NULL);
 
     // bind pipeline
-	qvkCmdBindPipeline(vk.command_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
+	qvkCmdBindPipeline(vk.command_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS,
+		vk_pipeline_for_scene(pipeline));
 
 	// configure pipeline's dynamic state
 
@@ -1162,6 +1164,25 @@ void RB_StageIteratorGeneric( void )
 //	shaderCommands_t *input = &tess;
 
 	RB_DeformTessGeometry();
+	vk_rt_capture_geometry(tess.xyz, tess.numVertexes, tess.indexes,
+		tess.numIndexes, backEnd.or.origin, backEnd.or.axis,
+		((r_rayTracing->integer == 2 ? (tess.shader->sort != SS_PORTAL && tess.shader->sort != SS_FOG &&
+            tess.shader->sort != SS_STENCIL_SHADOW) : tess.shader->sort <= SS_OPAQUE) && !tess.shader->isSky &&
+		vk_temporal_scene_pass_active() &&
+		!backEnd.viewParms.isPortal && !backEnd.projection2D &&
+		!(backEnd.refdef.rd.rdflags & RDF_NOWORLDMODEL) &&
+		(backEnd.currentEntity != &tr.worldEntity ||
+		(r_rayTracing->integer == 2 && tess.shader->numDeforms)) &&
+		(r_rayTracing->integer == 2 || !(backEnd.currentEntity->e.renderfx &
+			(RF_DEPTHHACK | RF_FIRST_PERSON))) &&
+		(r_rayTracing->integer == 2 || !(backEnd.currentEntity->e.renderfx & RF_NOSHADOW))) ? qtrue : qfalse,
+		tess.normal, tess.texCoords, tess.shader);
+	/* The local player's body is available to secondary rays but is not a
+	 * first-person raster object. Tessellation above supplies the ray scene. */
+	if (r_rayTracing->integer == 2 && vk_temporal_scene_pass_active() &&
+		!backEnd.viewParms.isPortal && backEnd.currentEntity != &tr.worldEntity &&
+		(backEnd.currentEntity->e.renderfx & RF_THIRD_PERSON))
+		return;
 
 	// call shader function
 	//
