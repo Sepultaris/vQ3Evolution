@@ -532,6 +532,7 @@ int		Cvar_VariableIntegerValue( const char *var_name );
 // returns 0 if not defined or non numeric
 
 char	*Cvar_VariableString( const char *var_name );
+const char *Cvar_PendingString(const char *var_name);
 void	Cvar_VariableStringBuffer( const char *var_name, char *buffer, int bufsize );
 // returns an empty string if not defined
 
@@ -646,6 +647,7 @@ fileHandle_t	FS_FCreateOpenPipeFile( const char *filename );
 // will properly create any needed paths and deal with seperater character issues
 
 fileHandle_t FS_SV_FOpenFileWrite( const char *filename );
+qboolean FS_SV_ReplaceFile(const char *from, const char *to);
 long		FS_SV_FOpenFileRead( const char *filename, fileHandle_t *fp );
 void	FS_SV_Rename( const char *from, const char *to, qboolean safe );
 long		FS_FOpenFileRead( const char *qpath, fileHandle_t *file, qboolean uniqueFILE );
@@ -732,6 +734,12 @@ qboolean FS_idPak(char *pak, char *base, int numPaks);
 qboolean FS_ComparePaks( char *neededpaks, int len, qboolean dlstring );
 
 void FS_Rename( const char *from, const char *to );
+
+// Client presentation profile, independent of the selected game directory.
+#ifndef DEDICATED
+void CL_OptionsLoadGlobal(qboolean safeMode);
+qboolean CL_OptionsSaveGlobal(void);
+#endif
 
 void FS_Remove( const char *osPath );
 void FS_HomeRemove( const char *homePath );
@@ -986,6 +994,7 @@ void CL_Init( void );
 void CL_Disconnect( qboolean showMainMenu );
 void CL_Shutdown(char *finalmsg, qboolean disconnect, qboolean quit);
 void CL_Frame( int msec );
+void CL_CheckVideoRestart( void );
 qboolean CL_GameCommand( void );
 void CL_KeyEvent (int key, qboolean down, unsigned time);
 
@@ -1118,6 +1127,7 @@ void		Sys_ShowIP(void);
 
 FILE	*Sys_FOpen( const char *ospath, const char *mode );
 qboolean Sys_Mkdir( const char *path );
+qboolean Sys_ReplaceFile(const char *from, const char *to);
 FILE	*Sys_Mkfifo( const char *ospath );
 char	*Sys_Cwd( void );
 void	Sys_SetDefaultInstallPath(const char *path);

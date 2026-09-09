@@ -1,4 +1,6 @@
 #version 460
+#extension GL_GOOGLE_include_directive : require
+#include "pt_transmission_guide.glsl"
 // Native edge-aware a-trous spatial reconstruction in linear radiance. This
 // is deliberately separate from reference accumulation. When enabled, the
 // temporal pass supplies validated, clipped history before spatial filtering.
@@ -22,6 +24,13 @@ layout(binding=29, std430) readonly buffer SpecResolved { vec4 specResolved[]; }
 layout(binding=30, std430) buffer SpecFilterA { vec4 specFilterA[]; };
 layout(binding=31, std430) buffer SpecFilterB { vec4 specFilterB[]; };
 layout(binding=32, std430) readonly buffer ShadingGuides { vec4 shadingGuides[]; };
+struct ReflectionGuide { vec4 position; vec4 normal; };
+layout(binding=36, std430) readonly buffer ReflectionGuides { ReflectionGuide reflectionGuides[]; };
+layout(binding=40, std430) readonly buffer Moments { vec4 moments[]; };
+layout(binding=41, std430) readonly buffer LightChange { vec4 lightChange[]; };
+layout(binding=42, std430) readonly buffer Transmission { vec4 transmission[]; };
+layout(binding=44, std430) readonly buffer TransmissionResolved { vec4 transmissionResolved[]; };
+layout(binding=45, std430) readonly buffer TransmissionGuides { TransmissionGuide transmissionGuides[]; };
 layout(push_constant) uniform Constants {
     vec4 originNear, forwardFar, rightProjection, upProjection;
     vec4 sunExposure, parameters, sunRadiance, sampling;
@@ -52,6 +61,9 @@ void main() {
     Guide center=guide(index);
     vec3 centerColor=source(index,pass);
     vec3 centerSpec=specSource(index,pass);
+    // These pixels already keep their center reflection unchanged. Decide
+    // before neighborhood loads/BRDF-guide weights, not after calculating them.
+    bool filterSpecular=center.albedoRoughness.w>=0.2+float(pass)*0.25;
     // Sky and directly visible emitters keep the integrator output.
     // Initialize scratch even for excluded pixels.
     if(center.positionDepth.w<0) {
@@ -62,10 +74,21 @@ void main() {
         return;
     }
     if(pass==2 && rp.options.y!=0) {
-        float count=rp.options.x!=0 ? (rp.options.y==2 ? specResolved[index].w:resolved[index].w):1;
-        vec3 color=(floatBitsToUint(center.normalMaterial.w)>>16)!=0u ?
+        float count=rp.options.x!=0 ? (rp.options.y==5 ? transmissionResolved[index].w:
+            (rp.options.y==2 || rp.options.y==3 ? specResolved[index].w:resolved[index].w)):1;
+        uint identity=rp.options.y==5 ? transmissionGuides[index].identity.x:
+            (rp.options.y==3 ? floatBitsToUint(reflectionGuides[index].normal.w):floatBitsToUint(center.normalMaterial.w));
+        vec3 color=(identity>>16)!=0u ?
             (count>1.01 ? vec3(0,1,1):vec3(0,0,1)) :
             (count>1.01 ? vec3(0,clamp(count/max(rp.jitterHistoryReset.z,2),0.25,1),0):vec3(1,0,0));
+        if(rp.options.y==3 && reflectionGuides[index].position.w<=0) color=vec3(0.1);
+        if(rp.options.y==5 && transmissionGuides[index].identity.w==0u) color=vec3(0.1);
+        if(rp.options.y==4) {
+            vec4 delta=lightChange[index];
+            vec2 reaction=smoothstep(vec2(0.03),vec2(0.3),abs(delta.xz-delta.yw)/
+                max(vec2(luminance(centerColor),luminance(centerSpec)),vec2(0.01/max(pc.sunExposure.w,0.001))));
+            color=vec3(reaction.x,1-max(reaction.x,reaction.y),reaction.y);
+        }
         imageStore(outputColor,pixel,vec4(color,1));
         return;
     }
@@ -75,11 +98,16 @@ void main() {
         ivec2 q=clamp(pixel+ivec2(x,y),ivec2(0),size-1);
         uint qi=uint(q.y*size.x+q.x);
         if(floatBitsToUint(guideNormals[qi].w)!=floatBitsToUint(center.normalMaterial.w) || guidePositions[qi].w<0) continue;
-        vec2 l=vec2(luminance(source(qi,pass)),luminance(specSource(qi,pass)));
+        vec2 l=vec2(luminance(source(qi,pass)),filterSpecular ? luminance(specSource(qi,pass)):0);
         mean+=l; secondMoment+=l*l; count+=1;
     }
     mean/=max(count,1);
     vec2 variance=max(secondMoment/max(count,1)-mean*mean,vec2(0));
+    if(rp.options.x!=0) {
+        vec4 temporalMoments=moments[index];
+        vec2 temporalVariance=max(temporalMoments.yw-temporalMoments.xz*temporalMoments.xz,vec2(0));
+        variance=max(variance,temporalVariance/max(vec2(resolved[index].w,specResolved[index].w),vec2(1)));
+    }
     vec2 phi=max(4*sqrt(variance),max(vec2(luminance(centerColor),luminance(centerSpec))*0.1,vec2(0.0001)));
     float footprint=max(0.02,center.positionDepth.w*2/(float(size.y)*abs(pc.upProjection.w)));
     float kernel[5]=float[5](1,4,6,4,1);
@@ -87,6 +115,8 @@ void main() {
     float total=0;
     vec3 specSum=vec3(0);
     float specTotal=0;
+    vec3 centerShading=shadingGuides[index].xyz;
+    vec2 centerLuminance=vec2(luminance(centerColor),luminance(centerSpec));
     for(int y=-2;y<=2;++y) for(int x=-2;x<=2;++x) {
         ivec2 q=pixel+ivec2(x,y)*stepSize;
         if(any(lessThan(q,ivec2(0))) || any(greaterThanEqual(q,size))) continue;
@@ -99,22 +129,23 @@ void main() {
         float planeDistance=abs(dot(delta,center.normalMaterial.xyz));
         // Position/normal tests prevent mixing surfaces at silhouettes and corners.
         float weight=kernel[x+2]*kernel[y+2]*pow(agreement,64)*exp(-planeDistance/(footprint+0.001));
-        float shadingAgreement=max(dot(shadingGuides[index].xyz,shadingGuides[qi].xyz),0);
+        float shadingAgreement=max(dot(centerShading,shadingGuides[qi].xyz),0);
         weight*=pow(shadingAgreement,32);
-        float specWeight=weight*pow(shadingAgreement,96)*exp(-abs(center.albedoRoughness.w-other.albedoRoughness.w)*64);
+        // The specular branch uses the common geometric/shading weight, before
+        // the diffuse albedo edge weight. Preserve that ordering exactly.
+        if(filterSpecular) {
+            float specWeight=weight*pow(shadingAgreement,96)*exp(-abs(center.albedoRoughness.w-other.albedoRoughness.w)*64);
+            vec3 specColor=specSource(qi,pass);
+            specWeight*=exp(-abs(luminance(specColor)-centerLuminance.y)/phi.y);
+            specSum+=specColor*specWeight;
+            specTotal+=specWeight;
+        }
         vec3 relativeAlbedo=(other.albedoRoughness.rgb-center.albedoRoughness.rgb)/max(center.albedoRoughness.rgb+other.albedoRoughness.rgb,vec3(0.1));
         weight*=exp(-dot(relativeAlbedo,relativeAlbedo)*8);
         vec3 color=source(qi,pass);
-        weight*=exp(-abs(luminance(color)-luminance(centerColor))/phi.x);
-        vec3 specColor=specSource(qi,pass);
-        specWeight*=exp(-abs(luminance(specColor)-luminance(centerSpec))/phi.y);
-        // Independent specular footprint. Mirror/transmission paths never get
-        // spatially blurred; rough lobes gradually permit wider passes.
-        if(center.albedoRoughness.w < 0.2+float(pass)*0.25 && (x!=0 || y!=0)) specWeight=0;
+        weight*=exp(-abs(luminance(color)-centerLuminance.x)/phi.x);
         sum+=color*weight;
         total+=weight;
-        specSum+=specColor*specWeight;
-        specTotal+=specWeight;
     }
     vec3 result=total>0 ? sum/total:centerColor;
     vec3 reflection=specTotal>0 ? specSum/specTotal:centerSpec;
@@ -122,7 +153,11 @@ void main() {
     else if(pass==1) { filterB[index]=vec4(result,1); specFilterB[index]=vec4(reflection,1); }
     else if(rp.options.z<4) {
         vec3 emission=visibleEmission[index].rgb;
-        vec3 combined=rp.options.z==1 ? result : (rp.options.z==2 ? reflection : (rp.options.z==3 ? emission : result+reflection+emission));
+        // Smooth optical transmission is never blurred with reflection or the
+        // interface's diffuse neighbors. Debug 2 keeps its old combined meaning.
+        vec3 transmitted=rp.options.x!=0 ? transmissionResolved[index].rgb:transmission[index].rgb;
+        vec3 combined=rp.options.z==1 ? result : (rp.options.z==2 ? reflection+transmitted :
+            (rp.options.z==3 ? emission : result+reflection+transmitted+emission));
         imageStore(outputColor,pixel,vec4(toneMap(combined),1));
     }
 }

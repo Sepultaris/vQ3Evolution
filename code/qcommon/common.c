@@ -2344,10 +2344,11 @@ For controlling environment variables
 
 void Com_ExecuteCfg(void)
 {
+	qboolean safeMode=Com_SafeMode();
 	Cbuf_ExecuteText(EXEC_NOW, "exec default.cfg\n");
 	Cbuf_Execute(); // Always execute after exec to prevent text buffer overflowing
 
-	if(!Com_SafeMode())
+	if(!safeMode)
 	{
 		// skip the q3config.cfg and autoexec.cfg if "safe" is on the command line
 		Cbuf_ExecuteText(EXEC_NOW, "exec " Q3CONFIG_CFG "\n");
@@ -2355,6 +2356,9 @@ void Com_ExecuteCfg(void)
 		Cbuf_ExecuteText(EXEC_NOW, "exec autoexec.cfg\n");
 		Cbuf_Execute();
 	}
+#ifndef DEDICATED
+	CL_OptionsLoadGlobal(safeMode); // Shared presentation wins over per-mod configs.
+#endif
 }
 
 /*
@@ -2379,6 +2383,9 @@ void Com_GameRestart(int checksumFeed, qboolean disconnect)
 
 		if(com_gameClientRestarting)
 		{
+#ifndef DEDICATED
+			CL_OptionsSaveGlobal(); // Before cvar cleanup/defaults for the new mod.
+#endif
 			if(disconnect)
 				CL_Disconnect(qfalse);
 				
@@ -2922,6 +2929,9 @@ void Com_WriteConfiguration( void ) {
 	cvar_modifiedFlags &= ~CVAR_ARCHIVE;
 
 	Com_WriteConfigToFile( Q3CONFIG_CFG );
+#ifndef DEDICATED
+	CL_OptionsSaveGlobal();
+#endif
 
 	// not needed for dedicated or standalone
 #if !defined(DEDICATED) && !defined(STANDALONE)
@@ -3133,6 +3143,12 @@ void Com_Frame( void ) {
 	msec = com_frameTime - lastTime;
 
 	Cbuf_Execute ();
+
+#ifndef DEDICATED
+	// No renderer, UI, cgame, or input callback is on the stack here. Process
+	// recovery independently of command-buffer waits used by scripts/loading.
+	CL_CheckVideoRestart();
+#endif
 
 	if (com_altivec->modified)
 	{

@@ -40,6 +40,7 @@ using NgxEvaluate = NVSDK_NGX_Result (NVSDK_CONV *)(VkCommandBuffer,
 	const NVSDK_NGX_Handle *, const NVSDK_NGX_Parameter *,
 	PFN_NVSDK_NGX_ProgressCallback_C);
 using NgxRelease = NVSDK_NGX_Result (NVSDK_CONV *)(NVSDK_NGX_Handle *);
+using NgxShutdown = NVSDK_NGX_Result (NVSDK_CONV *)(VkDevice);
 using NgxGetCapabilities = NVSDK_NGX_Result (NVSDK_CONV *)(NVSDK_NGX_Parameter **);
 using NgxDestroyParameters = NVSDK_NGX_Result (NVSDK_CONV *)(NVSDK_NGX_Parameter *);
 
@@ -56,6 +57,7 @@ using BridgeEvaluate = NVSDK_NGX_Result (NVSDK_CONV *)(NgxEvaluate,
 	PFN_NVSDK_NGX_ProgressCallback_C);
 using BridgeRelease = NVSDK_NGX_Result (NVSDK_CONV *)(NgxRelease,
 	NVSDK_NGX_Handle *);
+using BridgeShutdown = NVSDK_NGX_Result (NVSDK_CONV *)(NgxShutdown, VkDevice);
 
 struct NeuralRenderingState {
 	HMODULE snippet = nullptr;
@@ -66,6 +68,7 @@ struct NeuralRenderingState {
 	NgxCreate create = nullptr;
 	NgxEvaluate evaluate = nullptr;
 	NgxRelease release = nullptr;
+	NgxShutdown shutdown = nullptr;
 	NgxGetCapabilities getCapabilities = nullptr;
 	NgxDestroyParameters destroyParameters = nullptr;
 	BridgeInit bridgeInit = nullptr;
@@ -73,9 +76,15 @@ struct NeuralRenderingState {
 	BridgeCreate bridgeCreate = nullptr;
 	BridgeEvaluate bridgeEvaluate = nullptr;
 	BridgeRelease bridgeRelease = nullptr;
+	BridgeShutdown bridgeShutdown = nullptr;
 	NVSDK_NGX_Parameter *parameters = nullptr;
 	NVSDK_NGX_Handle *feature = nullptr;
 	VkDevice device = VK_NULL_HANDLE;
+	VkInstance instance = VK_NULL_HANDLE;
+	VkPhysicalDevice physicalDevice = VK_NULL_HANDLE;
+	PFN_vkGetInstanceProcAddr getInstanceProcAddr = nullptr;
+	PFN_vkGetDeviceProcAddr getDeviceProcAddr = nullptr;
+	bool runtimeInitialized = false;
 	uint32_t width = 0;
 	uint32_t height = 0;
 	int mode = 0;
@@ -154,11 +163,63 @@ void releaseFeature()
 	g_nr.feature = nullptr;
 }
 
+void shutdownRuntime()
+{
+	releaseFeature();
+	// Parameters belong to the Streamline-owned NGX core, not the snippet.
+	// Destroy them while that core is still initialized and its exports live.
+	if (g_nr.parameters && g_nr.destroyParameters) {
+		const NVSDK_NGX_Result result = g_nr.destroyParameters(g_nr.parameters);
+		if (NVSDK_NGX_FAILED(result))
+			ri.Printf(PRINT_WARNING, "NVIDIA DLSS Neural Rendering parameter release failed (0x%08x)\n", (unsigned)result);
+	}
+	g_nr.parameters = nullptr;
+	// Match our direct snippet Init_Ext2. Streamline only owns its own NGX
+	// initialization; it cannot close this separately initialized snippet.
+	if (g_nr.runtimeInitialized && g_nr.device && g_nr.shutdown && g_nr.bridgeShutdown) {
+		const NVSDK_NGX_Result result = g_nr.bridgeShutdown(g_nr.shutdown, g_nr.device);
+		if (NVSDK_NGX_FAILED(result))
+			ri.Printf(PRINT_WARNING, "NVIDIA DLSS Neural Rendering shutdown failed (0x%08x)\n", (unsigned)result);
+		else
+			ri.Printf(PRINT_ALL, "NVIDIA DLSS Neural Rendering shutdown before NGX core teardown\n");
+	}
+	g_nr.device = VK_NULL_HANDLE;
+	g_nr.runtimeInitialized = false;
+	g_nr.attached = false;
+}
+
+bool initializeRuntime()
+{
+	if (g_nr.runtimeInitialized) return true;
+	const std::wstring directory = executableDirectory();
+	NVSDK_NGX_Result result = g_nr.bridgeInit(g_nr.init,
+		kStreamlineTemporaryAppId, directory.c_str(), g_nr.instance, g_nr.physicalDevice,
+		g_nr.device, g_nr.getInstanceProcAddr, g_nr.getDeviceProcAddr, NVSDK_NGX_Version_API, nullptr);
+	if (NVSDK_NGX_FAILED(result)) {
+		ri.Printf(PRINT_WARNING, "NVIDIA DLSS Neural Rendering snippet initialization failed (0x%08x)\n", (unsigned)result);
+		return false;
+	}
+	// Only successful Init owns a matching Shutdown, including later failures.
+	g_nr.runtimeInitialized = true;
+	result = g_nr.getCapabilities(&g_nr.parameters);
+	if (NVSDK_NGX_FAILED(result) || !g_nr.parameters) {
+		ri.Printf(PRINT_WARNING, "NVIDIA DLSS Neural Rendering could not acquire NGX parameters (0x%08x)\n", (unsigned)result);
+		shutdownRuntime();
+		return false;
+	}
+	result = g_nr.bridgePopulate(g_nr.populate, g_nr.parameters);
+	if (NVSDK_NGX_FAILED(result)) {
+		ri.Printf(PRINT_WARNING, "NVIDIA DLSS Neural Rendering parameter initialization failed (0x%08x)\n", (unsigned)result);
+		shutdownRuntime();
+		return false;
+	}
+	ri.Printf(PRINT_ALL, "NVIDIA DLSS Neural Rendering runtime initialized on first use\n");
+	return true;
+}
+
 void resetModules()
 {
-	if (g_nr.parameters && g_nr.destroyParameters)
-		g_nr.destroyParameters(g_nr.parameters);
-	g_nr.parameters = nullptr;
+	shutdownRuntime();
 	if (g_nr.bridge) FreeLibrary(g_nr.bridge);
 	if (g_nr.snippet) FreeLibrary(g_nr.snippet);
 	g_nr = NeuralRenderingState{};
@@ -338,62 +399,44 @@ extern "C" qboolean vk_dlssnr_attach(VkInstance instance,
 		!loadExport(g_nr.snippet, g_nr.create, "NVSDK_NGX_VULKAN_CreateFeature") ||
 		!loadExport(g_nr.snippet, g_nr.evaluate, "NVSDK_NGX_VULKAN_EvaluateFeature") ||
 		!loadExport(g_nr.snippet, g_nr.release, "NVSDK_NGX_VULKAN_ReleaseFeature") ||
+		!loadExport(g_nr.snippet, g_nr.shutdown, "NVSDK_NGX_VULKAN_Shutdown1") ||
 		!loadExport(g_nr.core, g_nr.getCapabilities, "NVSDK_NGX_VULKAN_GetCapabilityParameters") ||
 		!loadExport(g_nr.core, g_nr.destroyParameters, "NVSDK_NGX_VULKAN_DestroyParameters") ||
 		!loadExport(g_nr.bridge, g_nr.bridgeInit, "NVNGXBridge_VULKAN_InitExt2") ||
 		!loadExport(g_nr.bridge, g_nr.bridgePopulate, "NVNGXBridge_VULKAN_PopulateParameters") ||
 		!loadExport(g_nr.bridge, g_nr.bridgeCreate, "NVNGXBridge_VULKAN_CreateFeature") ||
 		!loadExport(g_nr.bridge, g_nr.bridgeEvaluate, "NVNGXBridge_VULKAN_EvaluateFeature") ||
-		!loadExport(g_nr.bridge, g_nr.bridgeRelease, "NVNGXBridge_VULKAN_ReleaseFeature")) {
+		!loadExport(g_nr.bridge, g_nr.bridgeRelease, "NVNGXBridge_VULKAN_ReleaseFeature") ||
+		!loadExport(g_nr.bridge, g_nr.bridgeShutdown, "NVNGXBridge_VULKAN_Shutdown1")) {
 		ri.Printf(PRINT_WARNING,
 			"NVIDIA DLSS Neural Rendering runtime is missing a required Vulkan entry point\n");
 		resetModules();
 		return qfalse;
 	}
-	NVSDK_NGX_Result result = g_nr.bridgeInit(g_nr.init,
-		kStreamlineTemporaryAppId, directory.c_str(), instance, physicalDevice,
-		device, getInstanceProcAddr, getDeviceProcAddr, NVSDK_NGX_Version_API,
-		nullptr);
-	if (NVSDK_NGX_FAILED(result)) {
-		ri.Printf(PRINT_WARNING,
-			"NVIDIA DLSS Neural Rendering snippet initialization failed (0x%08x)\n",
-			(unsigned)result);
-		resetModules();
-		return qfalse;
-	}
-	result = g_nr.getCapabilities(&g_nr.parameters);
-	if (NVSDK_NGX_FAILED(result) || !g_nr.parameters) {
-		ri.Printf(PRINT_WARNING,
-			"NVIDIA DLSS Neural Rendering could not acquire NGX parameters (0x%08x)\n",
-			(unsigned)result);
-		resetModules();
-		return qfalse;
-	}
-	result = g_nr.bridgePopulate(g_nr.populate, g_nr.parameters);
-	if (NVSDK_NGX_FAILED(result)) {
-		ri.Printf(PRINT_WARNING,
-			"NVIDIA DLSS Neural Rendering parameter initialization failed (0x%08x)\n",
-			(unsigned)result);
-		resetModules();
-		return qfalse;
-	}
-
+	// Probe the signed runtime/exports now, but initialize it only if NR is
+	// actually prepared. RR deliberately bypasses NR without changing its setting.
 	g_nr.device = device;
+	g_nr.instance = instance;
+	g_nr.physicalDevice = physicalDevice;
+	g_nr.getInstanceProcAddr = getInstanceProcAddr;
+	g_nr.getDeviceProcAddr = getDeviceProcAddr;
 	g_nr.attached = true;
 	ri.Printf(PRINT_ALL,
-		"NVIDIA DLSS Neural Rendering 310.8 runtime attached (experimental feature 18)\n");
+		"NVIDIA DLSS Neural Rendering 310.8 runtime discovered (initialization deferred until use)\n");
 	return qtrue;
 }
 
 extern "C" void vk_dlssnr_shutdown(void)
 {
-	releaseFeature();
+	shutdownRuntime();
 }
 
 extern "C" void vk_dlssnr_unload(void)
 {
-	releaseFeature();
+	const bool hadModules = g_nr.snippet || g_nr.bridge;
 	resetModules();
+	if (hadModules)
+		ri.Printf(PRINT_ALL, "NVIDIA Neural Rendering module references released\n");
 }
 
 extern "C" qboolean vk_dlssnr_supported(void)
@@ -416,9 +459,14 @@ extern "C" void vk_dlssnr_configure(int mode, uint32_t width, uint32_t height)
 
 extern "C" qboolean vk_dlssnr_prepare(VkCommandBuffer commandBuffer)
 {
-	if (!g_nr.attached || g_nr.failed || !g_nr.mode || !g_nr.parameters ||
+	if (!g_nr.attached || g_nr.failed || !g_nr.mode ||
 		commandBuffer == VK_NULL_HANDLE)
 		return qfalse;
+	if (!initializeRuntime()) {
+		g_nr.failed = true;
+		ri.Cvar_Set("r_dlssNeuralRenderingAvailable", "0");
+		return qfalse;
+	}
 	if (g_nr.feature)
 		return qtrue;
 
@@ -442,7 +490,7 @@ extern "C" qboolean vk_dlssnr_prepare(VkCommandBuffer commandBuffer)
 extern "C" qboolean vk_dlssnr_evaluate(const vk_sl_frame_resources_t *r)
 {
 	if (!r || !g_nr.attached || g_nr.failed || !g_nr.mode ||
-		!g_nr.parameters || !r->color_input || !r->color_output)
+		!r->color_input || !r->color_output)
 		return qfalse;
 	if (r->render_width != g_nr.width || r->render_height != g_nr.height)
 		return qfalse;

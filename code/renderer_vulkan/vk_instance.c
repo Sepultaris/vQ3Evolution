@@ -1,5 +1,6 @@
 #include <string.h>
 #include <stdlib.h>
+#include <stdio.h>
 
 #include "VKimpl.h"
 #include "vk_instance.h"
@@ -16,6 +17,55 @@
 
 
 struct Vk_Instance vk;
+
+// Optional raw audit sink. Unlike an SDK-owned messenger, this survives SDK
+// shutdown and appends every instance lifetime to one file. Do not send these
+// asynchronous callbacks through the engine's non-thread-safe console.
+static FILE *validation_audit;
+static VkDebugUtilsMessengerEXT validation_messenger;
+static PFN_vkDestroyDebugUtilsMessengerEXT destroy_validation_messenger;
+
+static VKAPI_ATTR VkBool32 VKAPI_CALL vk_audit_validation(
+    VkDebugUtilsMessageSeverityFlagBitsEXT severity, VkDebugUtilsMessageTypeFlagsEXT type,
+    const VkDebugUtilsMessengerCallbackDataEXT *data, void *user)
+{
+    FILE *output = (FILE *)user;
+    (void)type;
+    fprintf(output, "Validation %s: [ %s ]\n%s\n\n",
+        severity & VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT ? "Error" : "Warning",
+        data->pMessageIdName ? data->pMessageIdName : "unknown",
+        data->pMessage ? data->pMessage : "(empty message)");
+    fflush(output);
+    return VK_FALSE;
+}
+
+static void vk_create_validation_audit(void)
+{
+    const char *path = getenv("VQ3E_VULKAN_AUDIT_LOG");
+    PFN_vkCreateDebugUtilsMessengerEXT create;
+    VkDebugUtilsMessengerCreateInfoEXT info = { .sType = VK_STRUCTURE_TYPE_DEBUG_UTILS_MESSENGER_CREATE_INFO_EXT };
+    if (!path || !*path) return;
+    create = (PFN_vkCreateDebugUtilsMessengerEXT)qvkGetInstanceProcAddr(vk.instance, "vkCreateDebugUtilsMessengerEXT");
+    destroy_validation_messenger = (PFN_vkDestroyDebugUtilsMessengerEXT)
+        qvkGetInstanceProcAddr(vk.instance, "vkDestroyDebugUtilsMessengerEXT");
+    if (!create || !destroy_validation_messenger || !(validation_audit = fopen(path, "ab"))) {
+        ri.Printf(PRINT_WARNING, "Vulkan raw validation audit could not be opened\n");
+        return;
+    }
+    info.messageSeverity = VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT | VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT;
+    info.messageType = VK_DEBUG_UTILS_MESSAGE_TYPE_GENERAL_BIT_EXT |
+        VK_DEBUG_UTILS_MESSAGE_TYPE_VALIDATION_BIT_EXT | VK_DEBUG_UTILS_MESSAGE_TYPE_PERFORMANCE_BIT_EXT;
+    info.pfnUserCallback = vk_audit_validation;
+    info.pUserData = validation_audit;
+    if (create(vk.instance, &info, NULL, &validation_messenger) != VK_SUCCESS) {
+        fclose(validation_audit);
+        validation_audit = NULL;
+        ri.Printf(PRINT_WARNING, "Vulkan raw validation audit messenger creation failed\n");
+        return;
+    }
+    fprintf(validation_audit, "VQ3E validation instance begin\n");
+    ri.Printf(PRINT_ALL, "Vulkan raw validation audit active\n");
+}
 
 //
 // Vulkan API functions used by the renderer.
@@ -323,11 +373,20 @@ static void vk_loadGlobalFunctions(void)
 	// Get instance level functions.
 	//
 	vk_createInstance();
+	vk_create_validation_audit();
 
 
 	INIT_INSTANCE_FUNCTION(vkCreateDevice)
 	INIT_INSTANCE_FUNCTION(vkDestroyInstance)
     INIT_INSTANCE_FUNCTION(vkDestroySurfaceKHR)
+    // The interposer's generic lookup deliberately omits Win32 surface
+    // interception. Pair our explicitly routed creation with its destroy hook.
+    if (vk_sl_is_initialized()) {
+        qvkDestroySurfaceKHR = (PFN_vkDestroySurfaceKHR)
+            vk_sl_get_instance_proc_addr(vk.instance, "vkDestroySurfaceKHR");
+        if (!qvkDestroySurfaceKHR)
+            ri.Error(ERR_FATAL, "Failed to find Streamline surface destruction entrypoint");
+    }
 	INIT_INSTANCE_FUNCTION(vkEnumerateDeviceExtensionProperties)
 	INIT_INSTANCE_FUNCTION(vkEnumeratePhysicalDevices)
 	INIT_INSTANCE_FUNCTION(vkGetDeviceProcAddr)
@@ -862,7 +921,7 @@ void vk_clearProcAddress(void)
     
     ri.Printf( PRINT_ALL, " Destroy surface: vk.surface. \n" );
     // make sure that the surface is destroyed before the instance
-    qvkDestroySurfaceKHR(vk.instance, vk.surface, NULL);
+    if (vk.surface) qvkDestroySurfaceKHR(vk.instance, vk.surface, NULL);
 
 #ifndef NDEBUG
     ri.Printf( PRINT_ALL, " Destroy callback function: vk.h_debugCB. \n" );
@@ -870,6 +929,16 @@ void vk_clearProcAddress(void)
 	qvkDestroyDebugReportCallbackEXT(vk.instance, vk.h_debugCB, NULL);
 #endif
 
+    if (validation_messenger) {
+        destroy_validation_messenger(vk.instance, validation_messenger, NULL);
+        validation_messenger = VK_NULL_HANDLE;
+    }
+    if (validation_audit) {
+        fprintf(validation_audit, "VQ3E validation instance end\n");
+        fclose(validation_audit);
+        validation_audit = NULL;
+    }
+    destroy_validation_messenger = NULL;
     ri.Printf( PRINT_ALL, " Destroy instance: vk.instance. \n" );
 	qvkDestroyInstance(vk.instance, NULL);
 

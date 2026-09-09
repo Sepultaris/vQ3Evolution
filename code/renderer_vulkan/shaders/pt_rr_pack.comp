@@ -1,0 +1,23 @@
+#version 460
+#extension GL_GOOGLE_include_directive : require
+layout(local_size_x=8,local_size_y=8) in;
+layout(set=0,binding=11,std430) readonly buffer Diffuse { vec4 diffuse[]; };
+layout(set=0,binding=26,std430) readonly buffer Specular { vec4 specular[]; };
+layout(set=0,binding=27,std430) readonly buffer Emission { vec4 emission[]; };
+layout(set=0,binding=42,std430) readonly buffer Transmission { vec4 transmission[]; };
+#include "pt_rr_images.glsl"
+#include "pt_rr_sampling_buffers.glsl"
+layout(push_constant) uniform Constants {
+    vec4 originNear,forwardFar,rightProjection,upProjection;
+    vec4 sunExposure,parameters,sunRadiance,sampling;
+} pc;
+#include "pt_rr_output.glsl"
+void main() {
+    ivec2 p=ivec2(gl_GlobalInvocationID.xy), size=imageSize(rrNoisy);
+    if(any(greaterThanEqual(p,size))) return;
+    uint i=uint(p.y*size.x+p.x);
+    // Fresh, lit linear radiance, including material response. Never native
+    // temporal history, demodulated irradiance, gamma or display tone mapping.
+    vec3 c=diffuse[i].rgb+specular[i].rgb+transmission[i].rgb+emission[i].rgb;
+    rrStoreNoisy(p,i,c);
+}

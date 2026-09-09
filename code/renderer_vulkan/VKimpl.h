@@ -18,6 +18,7 @@ IMPLEMENTATION SPECIFIC FUNCTIONS
 #include "vulkan/vulkan.h"
 
 void vk_createWindow(void);
+void vk_getDrawableSize(int *width, int *height);
 void vk_destroyWindow(void);
 
 void vk_getInstanceProcAddrImpl(void);

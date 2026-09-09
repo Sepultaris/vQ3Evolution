@@ -68,6 +68,7 @@ void RB_BeginSurface( shader_t *shader, int fogNum )
 	tess.shader = state;
 	tess.fogNum = fogNum;
 	tess.dlightBits = 0;		// will be OR'd in by surface functions
+	tess.rayDynamicPolys = qfalse;
 	tess.xstages = state->stages;
 	tess.numPasses = state->numUnfoggedPasses;
 
@@ -135,4 +136,3 @@ void RB_EndSurface( void )
     tess.numVertexes = 0;
 
 }
-

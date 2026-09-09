@@ -142,12 +142,13 @@ VkSampler vk_find_sampler(VkBool32 mipmap, VkBool32 repeat_texture)
 		}
 	}
 
-	s_SamplerDefs[s_NumSamplers] = sampler_def;
 	// Create new sampler.
 	if (s_NumSamplers >= MAX_VK_SAMPLERS)
     {
 		ri.Error(ERR_DROP, "vk_find_sampler: MAX_VK_SAMPLERS hit\n");
+		return VK_NULL_HANDLE;
 	}
+	s_SamplerDefs[s_NumSamplers] = sampler_def;
 
 	VkSamplerAddressMode address_mode = repeat_texture ?
         VK_SAMPLER_ADDRESS_MODE_REPEAT : VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;

@@ -1247,6 +1247,7 @@ void CL_KeyDownEvent( int key, unsigned time )
 
 		Cvar_SetValue( "r_fullscreen",
 			!Cvar_VariableIntegerValue( "r_fullscreen" ) );
+		CL_RequestVideoRestart(0);
 		return;
 	}
 
@@ -1365,6 +1366,7 @@ Called by the system for both key up and key down events
 ===================
 */
 void CL_KeyEvent (int key, qboolean down, unsigned time) {
+	if (CL_OptionsKey(key,down)) return;
 	if( down )
 		CL_KeyDownEvent( key, time );
 	else
@@ -1379,6 +1381,7 @@ Normal keyboard characters, already shifted / capslocked / etc
 ===================
 */
 void CL_CharEvent( int key ) {
+	if (CL_OptionsActive()) return;
 	// delete is not a printable character and is
 	// otherwise handled by Field_KeyDownEvent
 	if ( key == 127 ) {
@@ -1413,6 +1416,7 @@ Key_ClearStates
 void Key_ClearStates (void)
 {
 	int		i;
+	CL_OptionsClearInput();
 
 	anykeydown = 0;
 

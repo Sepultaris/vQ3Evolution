@@ -83,12 +83,15 @@ def check_motion(directory, log):
         raise SystemExit("FAIL: ordinary camera turning caused a global history reset")
     if causes[2][4] != causes[1][4] + 1:
         raise SystemExit("FAIL: scripted camera cut did not register one camera reset")
-    if causes[3][2] <= causes[2][2]:
-        raise SystemExit("FAIL: firing did not trigger point-light history invalidation")
+    if causes[3][2] != causes[2][2]:
+        raise SystemExit("FAIL: firing discarded global lighting history")
+    updates = [int(n) for n in re.findall(r"reconstruction: (\d+) local light updates", log.read_text(errors="replace"))]
+    if len(updates) != 4 or updates[3] <= updates[2]:
+        raise SystemExit("FAIL: firing did not reach the local lighting comparison")
     matched = [int(value) for value in re.findall(r"Path tracing object motion: (\d+) matched", log.read_text(errors="replace"))]
     if len(matched) != 4 or min(matched) < 1:
         raise SystemExit("FAIL: missing stable object correspondence at a checkpoint")
-    print("PASS: world/object reprojection, disocclusion, camera cut and game-light reset checks")
+    print("PASS: world/object reprojection, disocclusion, camera cut and local game-light updates")
 
 
 def main():

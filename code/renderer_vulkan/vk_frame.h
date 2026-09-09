@@ -1,8 +1,10 @@
 #ifndef VK_FRAME_H_
 #define VK_FRAME_H_
 
-void vk_begin_frame(void);
+qboolean vk_begin_frame(void);
+qboolean vk_frame_active(void);
 void vk_end_frame(void);
+void vk_test_recovery_f(void);
 
 
 void vk_createFrameBuffers(uint32_t w, uint32_t h);

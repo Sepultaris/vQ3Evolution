@@ -59,6 +59,45 @@
 VkSemaphore sema_imageAvailable;
 static VkSemaphore sema_renderFinished[MAX_SWAPCHAIN_IMAGES];
 VkFence fence_renderFinished;
+static qboolean frame_recording;
+static qboolean recreate_after_present;
+static VkResult test_acquire_result = VK_SUCCESS;
+static VkResult test_present_result = VK_SUCCESS;
+
+void vk_test_recovery_f(void)
+{
+    // One-shot, explicit fault injection for the real frame/restart path.
+    // No archived cvars or runtime quality changes. Never call the driver for
+    // a failed acquire; successful/suboptimal cases retain real semaphore work.
+    static const struct { const char *name; VkResult result; qboolean present; } cases[] = {
+        {"acquire-out-of-date", VK_ERROR_OUT_OF_DATE_KHR, qfalse},
+        {"acquire-surface-lost", VK_ERROR_SURFACE_LOST_KHR, qfalse},
+        {"acquire-timeout", VK_TIMEOUT, qfalse},
+        {"acquire-not-ready", VK_NOT_READY, qfalse},
+        {"acquire-suboptimal", VK_SUBOPTIMAL_KHR, qfalse},
+        {"present-out-of-date", VK_ERROR_OUT_OF_DATE_KHR, qtrue},
+        {"present-surface-lost", VK_ERROR_SURFACE_LOST_KHR, qtrue},
+        {"present-suboptimal", VK_SUBOPTIMAL_KHR, qtrue}
+    };
+    if (!ri.Cvar_VariableIntegerValue("developer") || !ri.Cvar_VariableIntegerValue("sv_cheats")) {
+        ri.Printf(PRINT_WARNING, "vk_testRecovery requires developer 1 and a cheats-enabled local test\n");
+        return;
+    }
+    for (unsigned i = 0; i < sizeof(cases) / sizeof(cases[0]); ++i) {
+        if (ri.Cmd_Argc() == 2 && !strcmp(ri.Cmd_Argv(1), cases[i].name)) {
+            if (cases[i].present) test_present_result = cases[i].result;
+            else test_acquire_result = cases[i].result;
+            ri.Printf(PRINT_ALL, "Vulkan recovery TEST armed: %s\n", cases[i].name);
+            return;
+        }
+    }
+    ri.Printf(PRINT_ALL, "vk_testRecovery: acquire-{out-of-date,surface-lost,timeout,not-ready,suboptimal} or present-{out-of-date,surface-lost,suboptimal}\n");
+}
+
+qboolean vk_frame_active(void)
+{
+    return frame_recording;
+}
 
 /*
    Use of a presentable image must occur only after the image is
@@ -86,6 +125,9 @@ VkFence fence_renderFinished;
 
 void vk_create_sync_primitives(void)
 {
+    frame_recording = qfalse;
+    recreate_after_present = qfalse;
+    test_acquire_result = test_present_result = VK_SUCCESS;
     VkSemaphoreCreateInfo desc;
     desc.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
     desc.pNext = NULL;
@@ -429,8 +471,12 @@ void vk_destroyFrameBuffers(void)
 }
 
 
-void vk_begin_frame(void)
+qboolean vk_begin_frame(void)
 {
+	if (vk_swapchain_restart_pending() || ri.Cvar_VariableIntegerValue("com_minimized"))
+		return qfalse;
+	// Include command recording in the render interval seen by Reflex.
+	vk_sl_mark_render_submit(qtrue);
     // Consume the previous acquire wait before reusing its binary semaphore.
     // The render fence also protects our single command buffer/scene resources.
     VkResult fence_result;
@@ -441,7 +487,7 @@ void vk_begin_frame(void)
     if (fence_result != VK_SUCCESS) {
         ri.Error(ERR_FATAL, "Vulkan: %s while waiting for the render fence",
             cvtResToStr(fence_result));
-        return;
+        return qfalse;
     }
   
     // An application can acquire use of a presentable image with vkAcquireNextImageKHR. 
@@ -462,22 +508,40 @@ void vk_begin_frame(void)
     // used to present but the surface properties no longer match exactly.
     // This commonly happens on Wayland when the window is resized.
     {
-        VkResult result = qvkAcquireNextImageKHR(vk.device, vk.swapchain, UINT64_MAX,
-            sema_imageAvailable, VK_NULL_HANDLE, &vk.idx_swapchain_image);
+        // Finite wait keeps native events responsive when WSI cannot progress.
+        VkResult injected = test_acquire_result;
+        test_acquire_result = VK_SUCCESS;
+        VkResult result = injected;
+        if (injected == VK_SUCCESS || injected == VK_SUBOPTIMAL_KHR) {
+            result = qvkAcquireNextImageKHR(vk.device, vk.swapchain, 100000000ULL,
+                sema_imageAvailable, VK_NULL_HANDLE, &vk.idx_swapchain_image);
+            if (result == VK_SUCCESS && injected == VK_SUBOPTIMAL_KHR)
+                result = injected;
+        }
+        if (injected != VK_SUCCESS)
+            ri.Printf(PRINT_ALL, "Vulkan recovery TEST acquire result: %s\n", cvtResToStr(result));
         if (result == VK_ERROR_OUT_OF_DATE_KHR || result == VK_ERROR_SURFACE_LOST_KHR)
         {
-            qvkDeviceWaitIdle(vk.device);
-            vk_recreateSwapChain();
-            result = qvkAcquireNextImageKHR(vk.device, vk.swapchain, UINT64_MAX,
-                sema_imageAvailable, VK_NULL_HANDLE, &vk.idx_swapchain_image);
+            vk_sl_mark_render_submit(qfalse);
+            vk_request_swapchain_restart(cvtResToStr(result));
+            // No image was acquired. Leave the render fence signaled and
+            // discard this frame, including draws/captures/presentation.
+            return qfalse;
+        }
+        if (result == VK_TIMEOUT || result == VK_NOT_READY) {
+            vk_sl_mark_render_submit(qfalse);
+            return qfalse;
         }
         // VK_SUBOPTIMAL_KHR is acceptable - swapchain is still usable
         if (result != VK_SUCCESS && result != VK_SUBOPTIMAL_KHR)
         {
             ri.Error(ERR_FATAL, "Vulkan: error %s returned by qvkAcquireNextImageKHR\n",
                 cvtResToStr(result));
-            return;
+            return qfalse;
         }
+        // A suboptimal acquire DID signal the semaphore. Finish and present
+        // this image before scheduling recovery, so its wait is consumed.
+        recreate_after_present = result == VK_SUBOPTIMAL_KHR;
     }
 
 
@@ -516,6 +580,7 @@ void vk_begin_frame(void)
 
     // To begin recording a command buffer
 	VK_CHECK(qvkBeginCommandBuffer(vk.command_buffer, &begin_info));
+	frame_recording = qtrue;
 	vk_pt_profile(vk.command_buffer, 0);
 
 	// Ensure visibility of geometry buffers writes.
@@ -563,7 +628,7 @@ void vk_begin_frame(void)
 
 	if (vk_temporal_active()) {
 		vk_temporal_begin_frame();
-		return;
+		return qtrue;
 	}
 
 	// Begin render pass.
@@ -584,18 +649,19 @@ void vk_begin_frame(void)
 	renderPass_beginInfo.pClearValues = clear_values;
 
 	qvkCmdBeginRenderPass(vk.command_buffer, &renderPass_beginInfo, VK_SUBPASS_CONTENTS_INLINE);
-
+	return qtrue;
 }
 
 
 void vk_end_frame(void)
 {
+	if (!frame_recording) return;
 	if (vk_temporal_active())
 		vk_temporal_end_frame();
 	else
 		qvkCmdEndRenderPass(vk.command_buffer);
 	
-    vk_pt_profile(vk.command_buffer, 6);
+    vk_pt_profile(vk.command_buffer, 7);
     VK_CHECK(qvkEndCommandBuffer(vk.command_buffer));
 
 
@@ -656,8 +722,8 @@ void vk_end_frame(void)
        
     //  To submit command buffers to a queue 
     
-    vk_sl_mark_render_submit(qtrue);
     VK_CHECK(qvkQueueSubmit(vk.queue, 1, &submit_info, fence_renderFinished));
+    frame_recording = qfalse;
     vk_sl_mark_render_submit(qfalse);
     /* Readbacks must occur before presentation releases image ownership. */
     vk_flush_captures();
@@ -688,20 +754,25 @@ void vk_end_frame(void)
 	vk_sl_mark_present(qtrue);
 	VkResult result = qvkQueuePresentKHR(vk.queue, &present_info);
 	vk_sl_mark_present(qfalse);
+    if (test_present_result != VK_SUCCESS) {
+        if (result == VK_SUCCESS || result == VK_SUBOPTIMAL_KHR)
+            result = test_present_result;
+        test_present_result = VK_SUCCESS;
+        ri.Printf(PRINT_ALL, "Vulkan recovery TEST present result: %s\n", cvtResToStr(result));
+    }
     // VK_SUCCESS and VK_SUBOPTIMAL_KHR are both acceptable results.
     // VK_SUBOPTIMAL_KHR means the swapchain can still be used but doesn't
     // match the surface properties exactly (common on Wayland).
-    if(result == VK_SUCCESS || result == VK_SUBOPTIMAL_KHR)
+    if(result == VK_SUCCESS && !recreate_after_present)
     {
         return;
     }
-    else if( (result == VK_ERROR_OUT_OF_DATE_KHR) || (result == VK_ERROR_SURFACE_LOST_KHR))
+    else if(result == VK_SUBOPTIMAL_KHR || result == VK_ERROR_OUT_OF_DATE_KHR ||
+        result == VK_ERROR_SURFACE_LOST_KHR || (result == VK_SUCCESS && recreate_after_present))
     {
-        // we first call vkDeviceWaitIdle because we 
-        // shouldn't touch resources that still be in use
-        qvkDeviceWaitIdle(vk.device);
-        // recreate the objects that depend on the swap chain and the window size
-
-        vk_recreateSwapChain();
+        vk_request_swapchain_restart(result == VK_SUCCESS ? "suboptimal acquire" : cvtResToStr(result));
+    }
+    else {
+        ri.Error(ERR_FATAL, "Vulkan: %s returned by qvkQueuePresentKHR", cvtResToStr(result));
     }
 }

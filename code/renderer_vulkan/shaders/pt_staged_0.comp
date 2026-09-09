@@ -1,0 +1,8 @@
+#version 460
+#extension GL_GOOGLE_include_directive : require
+#define PT_COMPACT_TRANSPORT
+#define PT_MATERIAL_CACHE
+#define PT_BRDF_REUSE
+#define PT_UNIFIED_LIGHTS
+#define PT_STAGED_PASS 0
+#include "pt_integrator.glsl"

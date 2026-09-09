@@ -9,6 +9,8 @@ qboolean vk_rt_configure_device(VkPhysicalDevice physical_device,
 uint32_t vk_rt_device_extension_count(void);
 const char *vk_rt_device_extension(uint32_t index);
 qboolean vk_rt_supported(void);
+qboolean vk_rt_shader_clock_supported(void);
+qboolean vk_rt_pipeline_statistics_supported(void);
 
 qboolean vk_rt_initialize(uint32_t width, uint32_t height,
 	VkImageView color_view, VkFormat color_format,
@@ -17,6 +19,7 @@ qboolean vk_rt_initialize(uint32_t width, uint32_t height,
 void vk_rt_load_world(void);
 void vk_rt_shutdown(void);
 void vk_rt_begin_frame(void);
+VkDeviceSize vk_rt_scene_upload_bytes(void);
 void vk_rt_capture_geometry(const float (*vertices)[4], uint32_t vertex_count,
 	const uint32_t *indices, uint32_t index_count, const float *origin,
 	const float (*axis)[3], qboolean opaque, const float (*normals)[4],

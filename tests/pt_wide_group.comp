@@ -1,0 +1,8 @@
+#version 460
+#extension GL_GOOGLE_include_directive : require
+#define PT_COMPACT_TRANSPORT 1
+#define PT_MATERIAL_CACHE 1
+#define PT_BRDF_REUSE 1
+#define PT_UNIFIED_LIGHTS 1
+#define PT_WORKGROUP_ROWS 64
+#include "../code/renderer_vulkan/shaders/pt_integrator.glsl"

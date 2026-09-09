@@ -12,6 +12,8 @@ struct vk_sl_frame_resources_s;
 qboolean vk_dlssnr_attach(VkInstance instance, VkPhysicalDevice physical_device,
 	VkDevice device, PFN_vkGetInstanceProcAddr get_instance_proc_addr,
 	PFN_vkGetDeviceProcAddr get_device_proc_addr);
+/* Drain GPU work first. Closes the snippet and its parameters while the
+ * Streamline-owned NGX core/device are still alive; safe to call twice. */
 void vk_dlssnr_shutdown(void);
 void vk_dlssnr_unload(void);
 qboolean vk_dlssnr_supported(void);

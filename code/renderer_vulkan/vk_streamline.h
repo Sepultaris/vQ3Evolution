@@ -12,8 +12,12 @@ extern "C" {
  * of the renderer lets the rest of the Vulkan backend remain C.
  */
 qboolean vk_sl_initialize(void);
+/* GPU work must be drained before releasing tags/features and their images. */
+void vk_sl_release_frame_resources(void);
 void vk_sl_shutdown(void);
 void vk_sl_unload(void);
+void vk_sl_info_f(void);
+void vk_sl_set_frame_generation_presentation_supported(qboolean supported);
 qboolean vk_sl_is_initialized(void);
 
 uint32_t vk_sl_instance_extension_count(void);
@@ -27,6 +31,7 @@ void *vk_sl_get_instance_proc_addr(VkInstance instance, const char *name);
 void *vk_sl_get_device_proc_addr(VkDevice device, const char *name);
 
 qboolean vk_sl_dlss_supported(void);
+qboolean vk_sl_ray_reconstruction_enabled(void);
 qboolean vk_sl_neural_rendering_supported(void);
 qboolean vk_sl_frame_generation_supported(void);
 qboolean vk_sl_reflex_supported(void);
@@ -68,10 +73,16 @@ typedef struct vk_sl_frame_resources_s {
 	float jitter_y;
 	qboolean reset;
     qboolean camera_motion_included;
+    /* RR-only, linear input-resolution guides: diffuse/specular reflectance,
+     * world-space shading normal + roughness, and specular hit distance. */
+    VkImage rr_guides[4];
+    VkImageView rr_guide_views[4];
+    float exposure;
 } vk_sl_frame_resources_t;
 
-qboolean vk_sl_begin_frame(uint32_t frame_index);
+qboolean vk_sl_begin_frame(void);
 qboolean vk_sl_evaluate_dlss(const vk_sl_frame_resources_t *resources);
+qboolean vk_sl_evaluate_ray_reconstruction(const vk_sl_frame_resources_t *resources);
 void vk_sl_configure_neural_rendering(int mode, uint32_t width, uint32_t height);
 qboolean vk_sl_prepare_neural_rendering(VkCommandBuffer command_buffer);
 qboolean vk_sl_evaluate_neural_rendering(const vk_sl_frame_resources_t *resources);

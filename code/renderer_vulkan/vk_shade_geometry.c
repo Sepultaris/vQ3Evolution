@@ -1172,7 +1172,7 @@ void RB_StageIteratorGeneric( void )
 		!backEnd.viewParms.isPortal && !backEnd.projection2D &&
 		!(backEnd.refdef.rd.rdflags & RDF_NOWORLDMODEL) &&
 		(backEnd.currentEntity != &tr.worldEntity ||
-		(r_rayTracing->integer == 2 && tess.shader->numDeforms)) &&
+		(r_rayTracing->integer == 2 && (tess.shader->numDeforms || tess.rayDynamicPolys))) &&
 		(r_rayTracing->integer == 2 || !(backEnd.currentEntity->e.renderfx &
 			(RF_DEPTHHACK | RF_FIRST_PERSON))) &&
 		(r_rayTracing->integer == 2 || !(backEnd.currentEntity->e.renderfx & RF_NOSHADOW))) ? qtrue : qfalse,

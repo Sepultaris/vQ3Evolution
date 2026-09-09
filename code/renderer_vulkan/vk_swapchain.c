@@ -2,6 +2,8 @@
 #include "tr_cvar.h"
 #include "VKimpl.h"
 #include "vk_instance.h"
+#include "vk_streamline.h"
+#include "glConfig.h"
 
 
 /*
@@ -32,25 +34,26 @@ vkAcquireNextImageKHR.
 // 3) Available presentation modes
 
 
-void vk_recreateSwapChain(void)
+static qboolean swapchain_restart_pending;
+
+qboolean vk_swapchain_restart_pending(void)
 {
+    return swapchain_restart_pending;
+}
 
-    ri.Printf( PRINT_ALL, " Recreate swap chain \n");
-
-    if( r_fullscreen->integer )
-    {
-        ri.Cvar_Set( "r_fullscreen", "0" );
-        r_fullscreen->modified = qtrue;
-    }
-    
-    // hasty prevent crash.
-    ri.Cmd_ExecuteText (EXEC_NOW, "vid_restart\n");
+void vk_request_swapchain_restart(const char *reason)
+{
+    if (swapchain_restart_pending) return;
+    swapchain_restart_pending = qtrue;
+    ri.Printf(PRINT_ALL, "Vulkan: deferred swapchain recovery (%s)\n", reason);
+    ri.RequestVideoRestart(0);
 }
 
 
 // create swap chain
 void vk_createSwapChain(VkDevice device, VkSurfaceKHR surface, VkSurfaceFormatKHR surface_format)
 {
+    swapchain_restart_pending = qfalse;
 
     // The presentation is arguably the most impottant setting for the swap chain
     // because it represents the actual conditions for showing images to the screen
@@ -123,19 +126,31 @@ void vk_createSwapChain(VkDevice device, VkSurfaceKHR surface, VkSurfaceFormatKH
         free(pPresentModes);
 
 
-        if (mailbox_supported)
+        const qboolean frame_generation = r_dlssFrameGeneration->integer &&
+            vk_sl_frame_generation_supported() && immediate_supported;
+        vk_sl_set_frame_generation_presentation_supported(immediate_supported);
+        // MAILBOX is synchronized presentation too. Honor the actual VSync
+        // setting, and use the unsynchronized mode required by Vulkan DLSS-G.
+        if (r_swapInterval->integer && !frame_generation)
         {
-            present_mode = VK_PRESENT_MODE_MAILBOX_KHR;
-            image_count = MAX(3u, vk.surface_caps.minImageCount);
-            
-            ri.Printf(PRINT_ALL, "\n VK_PRESENT_MODE_MAILBOX_KHR mode, minImageCount: %d. \n", image_count);
+            present_mode = VK_PRESENT_MODE_FIFO_KHR;
+            image_count = MAX(2u, vk.surface_caps.minImageCount);
+            ri.Printf(PRINT_ALL, "\n VK_PRESENT_MODE_FIFO_KHR mode (VSync on)\n");
         }
         else if(immediate_supported)
         {
             present_mode = VK_PRESENT_MODE_IMMEDIATE_KHR;
             image_count = MAX(2u, vk.surface_caps.minImageCount);
-
             ri.Printf(PRINT_ALL, "\n VK_PRESENT_MODE_IMMEDIATE_KHR mode, minImageCount: %d. \n", image_count);
+            if (frame_generation && r_swapInterval->integer)
+                ri.Printf(PRINT_ALL, "Vulkan Frame Generation requires unsynchronized presentation; VSync applies when Frame Generation is off\n");
+        }
+        else if (mailbox_supported)
+        {
+            present_mode = VK_PRESENT_MODE_MAILBOX_KHR;
+            image_count = MAX(3u, vk.surface_caps.minImageCount);
+
+            ri.Printf(PRINT_ALL, "\n VK_PRESENT_MODE_MAILBOX_KHR mode, minImageCount: %d. \n", image_count);
         }
         else
         {
@@ -180,14 +195,19 @@ void vk_createSwapChain(VkDevice device, VkSurfaceKHR surface, VkSurfaceFormatKH
         VkExtent2D image_extent = vk.surface_caps.currentExtent;
         if ( (image_extent.width == 0xffffffff) && (image_extent.height == 0xffffffff))
         {
+            int drawable_width, drawable_height;
+            vk_getDrawableSize(&drawable_width, &drawable_height);
             image_extent.width = MIN( vk.surface_caps.maxImageExtent.width, 
-                    MAX(vk.surface_caps.minImageExtent.width, 640u) );
+                    MAX(vk.surface_caps.minImageExtent.width, (uint32_t)MAX(1, drawable_width)) );
             image_extent.height = MIN(vk.surface_caps.maxImageExtent.height, 
-                    MAX(vk.surface_caps.minImageExtent.height, 480u) );
+                    MAX(vk.surface_caps.minImageExtent.height, (uint32_t)MAX(1, drawable_height)) );
         }
 
         ri.Printf(PRINT_ALL, " Surface capabilities, image_extent.width: %d, image_extent.height: %d\n",
                 image_extent.width, image_extent.height);
+
+        if (!image_extent.width || !image_extent.height)
+            ri.Error(ERR_FATAL, "Cannot create a Vulkan swapchain for a zero-size surface");
 
 
         VkSwapchainCreateInfoKHR desc;
@@ -246,6 +266,9 @@ void vk_createSwapChain(VkDevice device, VkSurfaceKHR surface, VkSurfaceFormatKH
         desc.oldSwapchain = VK_NULL_HANDLE;
 
         VK_CHECK(qvkCreateSwapchainKHR(device, &desc, NULL, &vk.swapchain));
+        // Before depth, framebuffers, temporal images and NVIDIA resources are
+        // allocated, make every consumer agree on the actual swapchain size.
+        R_SetDrawableResolution(image_extent.width, image_extent.height);
     }
     
     //

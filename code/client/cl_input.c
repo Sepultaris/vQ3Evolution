@@ -360,9 +360,12 @@ CL_MouseEvent
 =================
 */
 void CL_MouseEvent( int dx, int dy, int time ) {
+	if (CL_OptionsMouse(dx,dy)) return;
 	if ( Key_GetCatcher( ) & KEYCATCH_UI ) {
+		CL_OptionsScaleMouse(qtrue,&dx,&dy);
 		VM_Call( uivm, UI_MOUSE_EVENT, dx, dy );
 	} else if (Key_GetCatcher( ) & KEYCATCH_CGAME) {
+		CL_OptionsScaleMouse(qfalse,&dx,&dy);
 		VM_Call (cgvm, CG_MOUSE_EVENT, dx, dy);
 	} else {
 		cl.mouseDx[cl.mouseIndex] += dx;
@@ -578,6 +581,12 @@ CL_CreateCmd
 usercmd_t CL_CreateCmd( void ) {
 	usercmd_t	cmd;
 	vec3_t		oldAngles;
+	if (CL_OptionsActive()) {
+		Com_Memset(&cmd,0,sizeof(cmd));
+		CL_FinishMove(&cmd);
+		cmd.buttons=0; cmd.forwardmove=cmd.rightmove=cmd.upmove=0;
+		return cmd;
+	}
 
 	VectorCopy( cl.viewangles, oldAngles );
 

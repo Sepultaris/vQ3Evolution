@@ -7,6 +7,23 @@
 /compile_commands.json
 /.cache/
 
+# Accidental out-of-tree compiler output / downloaded binary dependencies.
+# Existing tracked libraries under code/libs remain tracked; new vendored
+# binaries require explicit review instead of an accidental bulk add.
+*.o
+*.obj
+*.pdb
+*.ilk
+*.exp
+*.idb
+*.exe
+*.dll
+*.so
+*.so.*
+*.dylib
+*.a
+*.lib
+
 # Build archives created at the repository root
 /debug-*.zip
 /release-*.zip
@@ -23,12 +40,21 @@
 # a more specific filename instead of q3config.cfg or autoexec.cfg.
 q3config.cfg
 autoexec.cfg
+vq3e-rendering.cfg
+qconsole.log
 games.log
 crashlog.txt
 stdout.log
 stderr.log
 condump*.txt
 *.dmp
+# NVIDIA captures can embed shaders, game resources and local process details.
+*.nsys-rep
+*.qdstrm
+*.ngfx-gputrace
+*.ngfx-capture
+*.nv-gpudmp
+*.rdc
 *.dm_*
 screenshots/
 videos/
@@ -82,6 +108,27 @@ Icon?
 *.sbr
 *.tlog
 *.lastbuildstate
+
+# -----------------------------------------------------------------------------
+# Python test/generator caches
+# -----------------------------------------------------------------------------
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
+
+# Local credentials and downloaded neural-model weights (never source).
+.env
+.env.*
+!.env.example
+!.env.sample
+*.safetensors
+*.onnx
+*.pth
+*.pt
 
 # -----------------------------------------------------------------------------
 # Xcode

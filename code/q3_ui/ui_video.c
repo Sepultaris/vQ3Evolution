@@ -261,6 +261,9 @@ GRAPHICS OPTIONS MENU
 #define ID_DLSSSHARPNESS 121
 #define ID_RAYTRACING	122
 #define ID_RTSHADOWSTRENGTH 123
+#define ID_PTEXPOSURE    124
+#define ID_PTEXPOSURERESET 125
+#define ID_DLSSRR 126
 
 typedef struct {
 	menuframework_s	menu;
@@ -288,9 +291,12 @@ typedef struct {
 	menulist_s  	filter;
 	menulist_s		raytracing;
 	menuslider_s	rtshadowstrength;
+	menuslider_s	ptexposure;
+	menutext_s	ptexposurereset;
 	menuslider_s	hudscale;
 	menuslider_s	uiscale;
 	menulist_s		dlss;
+	menulist_s		dlssrr;
 	menuslider_s	dlsssharpness;
 	menulist_s		dlssnr;
 	menuslider_s	nrintensity;
@@ -322,6 +328,7 @@ typedef struct
 	int dlssfg;
 	int reflex;
 	int raytracing;
+	int dlssrr;
 } InitialVideoOptions_s;
 
 static InitialVideoOptions_s	s_ivo;
@@ -510,6 +517,7 @@ static void GraphicsOptions_GetInitialVideo( void )
 	s_ivo.filter      = s_graphicsoptions.filter.curvalue;
 	s_ivo.texturebits = s_graphicsoptions.texturebits.curvalue;
 	s_ivo.dlss        = s_graphicsoptions.dlss.curvalue;
+	s_ivo.dlssrr      = s_graphicsoptions.dlssrr.curvalue;
 	s_ivo.dlssnr      = s_graphicsoptions.dlssnr.curvalue;
 	s_ivo.dlssfg      = s_graphicsoptions.dlssfg.curvalue;
 	s_ivo.reflex      = s_graphicsoptions.reflex.curvalue;
@@ -587,6 +595,49 @@ static void GraphicsOptions_CheckConfig( void )
 GraphicsOptions_UpdateMenuItems
 =================
 */
+/* Quarter-stop spacing gives useful fine control near normal exposure, while
+ * still reaching 16x. Keep this compatible with the QVM's small math library. */
+static float GraphicsOptions_ExposureForStep( float step ) {
+	static const float quarterStops[] = { 1.0f, 1.189207115f, 1.414213562f, 1.681792831f };
+	int index = (int)Com_Clamp( 0, 32, step + 0.5f );
+	return 0.0625f * (1 << (index / 4)) * quarterStops[index % 4];
+}
+
+static float GraphicsOptions_ExposureStep( float exposure ) {
+	int i, closest = 0;
+	float distance = 1e30f;
+	for ( i = 0; i <= 32; ++i ) {
+		float difference = fabs( GraphicsOptions_ExposureForStep( i ) - exposure );
+		if ( difference < distance ) {
+			distance = difference;
+			closest = i;
+		}
+	}
+	return closest;
+}
+
+static void GraphicsOptions_UpdateExposureItems( void ) {
+	int hidden = QMF_HIDDEN | QMF_INACTIVE;
+	qboolean pathTracing = s_graphicsoptions.raytracing.curvalue == 2;
+	/* The two RTX modes use the same row; no extra off-screen menu controls. */
+	if ( pathTracing ) {
+		s_graphicsoptions.rtshadowstrength.generic.flags |= hidden;
+		s_graphicsoptions.ptexposure.generic.flags &= ~hidden;
+		s_graphicsoptions.ptexposurereset.generic.flags &= ~hidden;
+	} else {
+		s_graphicsoptions.rtshadowstrength.generic.flags &= ~hidden;
+		s_graphicsoptions.ptexposure.generic.flags |= hidden;
+		s_graphicsoptions.ptexposurereset.generic.flags |= hidden;
+	}
+	if ( s_graphicsoptions.raytracing.generic.flags & QMF_GRAYED ) {
+		s_graphicsoptions.ptexposure.generic.flags |= QMF_GRAYED;
+		s_graphicsoptions.ptexposurereset.generic.flags |= QMF_GRAYED;
+	} else {
+		s_graphicsoptions.ptexposure.generic.flags &= ~QMF_GRAYED;
+		s_graphicsoptions.ptexposurereset.generic.flags &= ~QMF_GRAYED;
+	}
+}
+
 static void GraphicsOptions_UpdateMenuItems( void )
 {
 	if ( s_graphicsoptions.driver.curvalue == 1 )
@@ -618,6 +669,17 @@ static void GraphicsOptions_UpdateMenuItems( void )
 		}
 	}
 
+	if ( Q_stricmp(UI_Cvar_VariableString("cl_renderer"), "vulkan") ||
+		!trap_Cvar_VariableValue("r_dlssRayReconstructionAvailable") ||
+		s_graphicsoptions.raytracing.curvalue != 2 || s_graphicsoptions.dlss.curvalue == 0 )
+		s_graphicsoptions.dlssrr.generic.flags |= QMF_GRAYED;
+	else
+		s_graphicsoptions.dlssrr.generic.flags &= ~QMF_GRAYED;
+	if ( s_graphicsoptions.dlssrr.curvalue && !(s_graphicsoptions.dlssrr.generic.flags & QMF_GRAYED) )
+		s_graphicsoptions.dlssnr.generic.flags |= QMF_GRAYED;
+	else if ( !Q_stricmp(UI_Cvar_VariableString("cl_renderer"), "vulkan") &&
+		trap_Cvar_VariableValue("r_dlssNeuralRenderingAvailable") )
+		s_graphicsoptions.dlssnr.generic.flags &= ~QMF_GRAYED;
 	if ( (s_graphicsoptions.dlssnr.generic.flags & QMF_GRAYED) ||
 		s_graphicsoptions.dlssnr.curvalue == 0 )
 	{
@@ -643,6 +705,7 @@ static void GraphicsOptions_UpdateMenuItems( void )
 		s_graphicsoptions.rtshadowstrength.generic.flags |= QMF_GRAYED;
 	else
 		s_graphicsoptions.rtshadowstrength.generic.flags &= ~QMF_GRAYED;
+	GraphicsOptions_UpdateExposureItems();
 
 	s_graphicsoptions.apply.generic.flags |= QMF_HIDDEN|QMF_INACTIVE;
 
@@ -687,6 +750,7 @@ static void GraphicsOptions_UpdateMenuItems( void )
 		s_graphicsoptions.apply.generic.flags &= ~(QMF_HIDDEN|QMF_INACTIVE);
 	}
 	if ( s_ivo.dlss != s_graphicsoptions.dlss.curvalue ||
+		s_ivo.dlssrr != s_graphicsoptions.dlssrr.curvalue ||
 		s_ivo.dlssnr != s_graphicsoptions.dlssnr.curvalue ||
 		s_ivo.dlssfg != s_graphicsoptions.dlssfg.curvalue ||
 		s_ivo.reflex != s_graphicsoptions.reflex.curvalue )
@@ -770,6 +834,7 @@ static void GraphicsOptions_ApplyChanges( void *unused, int notification )
 	}
 	trap_Cvar_SetValue( "r_vertexLight", s_graphicsoptions.lighting.curvalue );
 	trap_Cvar_SetValue( "r_dlss", s_graphicsoptions.dlss.curvalue );
+	trap_Cvar_SetValue( "r_dlssRayReconstruction", s_graphicsoptions.dlssrr.curvalue );
 	trap_Cvar_SetValue( "r_dlssSharpness", s_graphicsoptions.dlsssharpness.curvalue * 0.1f );
 	trap_Cvar_SetValue( "r_dlssNeuralRendering", s_graphicsoptions.dlssnr.curvalue );
 	trap_Cvar_SetValue( "r_dlssNRIntensity", s_graphicsoptions.nrintensity.curvalue * 0.1f );
@@ -1012,6 +1077,25 @@ static void GraphicsOptions_RTShadowStrengthEvent( void *ptr, int event ) {
 	trap_Cvar_SetValue( "r_rayTracingShadowStrength", value * 0.1f );
 }
 
+static void GraphicsOptions_ExposureEvent( void *ptr, int event ) {
+	float value;
+	if ( event != QM_ACTIVATED ) return;
+	if ( ((menucommon_s *)ptr)->id == ID_PTEXPOSURERESET ) {
+		value = 1.0f;
+	} else {
+		value = GraphicsOptions_ExposureForStep( s_graphicsoptions.ptexposure.curvalue );
+	}
+	s_graphicsoptions.ptexposure.curvalue = GraphicsOptions_ExposureStep( value );
+	/* Archived, non-latched renderer cvar: applies to the next in-game frame.
+	 * Do not set it on menu entry or Apply; preserve custom console values. */
+	trap_Cvar_SetValue( "r_pathTracingExposure", value );
+}
+
+static void GraphicsOptions_ExposureStatus( void *ptr ) {
+	UI_DrawString( 320, 456, "Live scene exposure. 1.00x = normal; 2.00x = +1 stop.",
+		UI_CENTER|UI_SMALLFONT, text_color_normal );
+}
+
 
 /*
 ================
@@ -1033,9 +1117,16 @@ void GraphicsOptions_MenuDraw (void)
 	UI_DrawString( 520, s_graphicsoptions.dlsssharpness.generic.y,
 		va( "%i%%", (int)s_graphicsoptions.dlsssharpness.curvalue * 10 ),
 		UI_LEFT|UI_SMALLFONT, text_color_normal );
-	UI_DrawString( 520, s_graphicsoptions.rtshadowstrength.generic.y,
-		va( "%i%%", (int)s_graphicsoptions.rtshadowstrength.curvalue * 10 ),
-		UI_LEFT|UI_SMALLFONT, text_color_normal );
+	if ( !(s_graphicsoptions.ptexposure.generic.flags & QMF_HIDDEN) ) {
+		UI_DrawString( 520, s_graphicsoptions.ptexposure.generic.y,
+			va( "%.2fx", trap_Cvar_VariableValue( "r_pathTracingExposure" ) ),
+			UI_LEFT|UI_SMALLFONT, (s_graphicsoptions.ptexposure.generic.flags & QMF_GRAYED) ?
+			text_color_disabled : text_color_normal );
+	} else {
+		UI_DrawString( 520, s_graphicsoptions.rtshadowstrength.generic.y,
+			va( "%i%%", (int)s_graphicsoptions.rtshadowstrength.curvalue * 10 ),
+			UI_LEFT|UI_SMALLFONT, text_color_normal );
+	}
 	UI_DrawString( 520, s_graphicsoptions.nrintensity.generic.y,
 		va( "%i%%", (int)s_graphicsoptions.nrintensity.curvalue * 10 ),
 		UI_LEFT|UI_SMALLFONT, text_color_normal );
@@ -1182,6 +1273,8 @@ static void GraphicsOptions_SetMenuItems( void )
 		Com_Clamp( 5, 15, trap_Cvar_VariableValue( "ui_scale" ) * 10.0f );
 	s_graphicsoptions.dlss.curvalue =
 		Com_Clamp( 0, 5, trap_Cvar_VariableValue( "r_dlss" ) );
+	s_graphicsoptions.dlssrr.curvalue =
+		Com_Clamp( 0, 1, trap_Cvar_VariableValue( "r_dlssRayReconstruction" ) );
 	s_graphicsoptions.dlsssharpness.curvalue =
 		Com_Clamp( 0, 10, trap_Cvar_VariableValue( "r_dlssSharpness" ) * 10.0f );
 	s_graphicsoptions.dlssnr.curvalue =
@@ -1202,6 +1295,8 @@ static void GraphicsOptions_SetMenuItems( void )
 		Com_Clamp( 0, 2, trap_Cvar_VariableValue( "r_rayTracing" ) );
 	s_graphicsoptions.rtshadowstrength.curvalue =
 		Com_Clamp( 0, 10, trap_Cvar_VariableValue( "r_rayTracingShadowStrength" ) * 10.0f );
+	s_graphicsoptions.ptexposure.curvalue =
+		GraphicsOptions_ExposureStep( trap_Cvar_VariableValue( "r_pathTracingExposure" ) );
 }
 
 /*
@@ -1514,6 +1609,28 @@ void GraphicsOptions_MenuInit( void )
 	s_graphicsoptions.rtshadowstrength.generic.callback = GraphicsOptions_RTShadowStrengthEvent;
 	s_graphicsoptions.rtshadowstrength.minvalue         = 0;
 	s_graphicsoptions.rtshadowstrength.maxvalue         = 10;
+
+	s_graphicsoptions.ptexposure.generic.type     = MTYPE_SLIDER;
+	s_graphicsoptions.ptexposure.generic.name     = "RTX Exposure:";
+	s_graphicsoptions.ptexposure.generic.flags    = QMF_PULSEIFFOCUS|QMF_SMALLFONT;
+	s_graphicsoptions.ptexposure.generic.x        = 400;
+	s_graphicsoptions.ptexposure.generic.y        = y;
+	s_graphicsoptions.ptexposure.generic.id       = ID_PTEXPOSURE;
+	s_graphicsoptions.ptexposure.generic.callback = GraphicsOptions_ExposureEvent;
+	s_graphicsoptions.ptexposure.generic.statusbar = GraphicsOptions_ExposureStatus;
+	s_graphicsoptions.ptexposure.minvalue         = 0;
+	s_graphicsoptions.ptexposure.maxvalue         = 32;
+
+	s_graphicsoptions.ptexposurereset.generic.type = MTYPE_PTEXT;
+	s_graphicsoptions.ptexposurereset.generic.flags = QMF_PULSEIFFOCUS;
+	s_graphicsoptions.ptexposurereset.generic.x = 584;
+	s_graphicsoptions.ptexposurereset.generic.y = y;
+	s_graphicsoptions.ptexposurereset.generic.id = ID_PTEXPOSURERESET;
+	s_graphicsoptions.ptexposurereset.generic.callback = GraphicsOptions_ExposureEvent;
+	s_graphicsoptions.ptexposurereset.generic.statusbar = GraphicsOptions_ExposureStatus;
+	s_graphicsoptions.ptexposurereset.string = "Reset";
+	s_graphicsoptions.ptexposurereset.style = UI_LEFT|UI_SMALLFONT;
+	s_graphicsoptions.ptexposurereset.color = color_red;
 	y += BIGCHAR_HEIGHT+2;
 
 	s_graphicsoptions.hudscale.generic.type     = MTYPE_SLIDER;
@@ -1545,6 +1662,14 @@ void GraphicsOptions_MenuInit( void )
 	s_graphicsoptions.dlss.generic.y         = y;
 	s_graphicsoptions.dlss.generic.id        = ID_DLSS;
 	s_graphicsoptions.dlss.itemnames         = dlss_names;
+	y += 12;
+	s_graphicsoptions.dlssrr.generic.type = MTYPE_SPINCONTROL;
+	s_graphicsoptions.dlssrr.generic.name = "DLSS Ray Reconstruction:";
+	s_graphicsoptions.dlssrr.generic.flags = QMF_PULSEIFFOCUS|QMF_SMALLFONT;
+	s_graphicsoptions.dlssrr.generic.x = 400;
+	s_graphicsoptions.dlssrr.generic.y = y;
+	s_graphicsoptions.dlssrr.generic.id = ID_DLSSRR;
+	s_graphicsoptions.dlssrr.itemnames = enabled_names;
 	y += 12;
 
 	s_graphicsoptions.dlsssharpness.generic.type     = MTYPE_SLIDER;
@@ -1683,9 +1808,12 @@ void GraphicsOptions_MenuInit( void )
 	Menu_AddItem( &s_graphicsoptions.menu, ( void * ) &s_graphicsoptions.filter );
 	Menu_AddItem( &s_graphicsoptions.menu, ( void * ) &s_graphicsoptions.raytracing );
 	Menu_AddItem( &s_graphicsoptions.menu, ( void * ) &s_graphicsoptions.rtshadowstrength );
+	Menu_AddItem( &s_graphicsoptions.menu, ( void * ) &s_graphicsoptions.ptexposure );
+	Menu_AddItem( &s_graphicsoptions.menu, ( void * ) &s_graphicsoptions.ptexposurereset );
 	Menu_AddItem( &s_graphicsoptions.menu, ( void * ) &s_graphicsoptions.hudscale );
 	Menu_AddItem( &s_graphicsoptions.menu, ( void * ) &s_graphicsoptions.uiscale );
 	Menu_AddItem( &s_graphicsoptions.menu, ( void * ) &s_graphicsoptions.dlss );
+	Menu_AddItem( &s_graphicsoptions.menu, ( void * ) &s_graphicsoptions.dlssrr );
 	Menu_AddItem( &s_graphicsoptions.menu, ( void * ) &s_graphicsoptions.dlsssharpness );
 	Menu_AddItem( &s_graphicsoptions.menu, ( void * ) &s_graphicsoptions.dlssnr );
 	Menu_AddItem( &s_graphicsoptions.menu, ( void * ) &s_graphicsoptions.nrintensity );
@@ -1717,6 +1845,7 @@ void GraphicsOptions_MenuInit( void )
 	if ( Q_stricmp( UI_Cvar_VariableString( "cl_renderer" ), "vulkan" ) ||
 		!trap_Cvar_VariableValue( "r_rayTracingAvailable" ) )
 		s_graphicsoptions.raytracing.generic.flags |= QMF_GRAYED;
+	GraphicsOptions_UpdateExposureItems();
 
 	if ( uis.glconfig.driverType == GLDRV_ICD &&
 		 uis.glconfig.hardwareType == GLHW_3DFX_2D3D )

@@ -53,6 +53,7 @@ void RB_CheckOverflow( int verts, int indexes )
 		return;
 	}
 
+	qboolean rayPolys = tess.rayDynamicPolys;
 	RB_EndSurface();
 
 	if ( verts >= SHADER_MAX_VERTEXES ) {
@@ -63,6 +64,7 @@ void RB_CheckOverflow( int verts, int indexes )
 	}
 
 	RB_BeginSurface(tess.shader, tess.fogNum );
+	tess.rayDynamicPolys = rayPolys;
 }
 
 
@@ -207,6 +209,18 @@ RB_SurfacePolychain
 */
 void RB_SurfacePolychain( srfPoly_t *p ) {
 	int		i;
+	vec3_t normal = {0, 0, 0};
+	if (p->numVerts < 3) return;
+	// Newell's normal tolerates clipped polygons with collinear initial edges.
+	// These arrays are reused by other surfaces; never leave stale normals/UVs.
+	for (i = 0; i < p->numVerts; ++i) {
+		const float *a = p->verts[i].xyz;
+		const float *b = p->verts[(i + 1) % p->numVerts].xyz;
+		normal[0] += (a[1] - b[1]) * (a[2] + b[2]);
+		normal[1] += (a[2] - b[2]) * (a[0] + b[0]);
+		normal[2] += (a[0] - b[0]) * (a[1] + b[1]);
+	}
+	VectorNormalize(normal);
 
 	RB_CHECKOVERFLOW( p->numVerts, 3*(p->numVerts - 2) );
 
@@ -215,8 +229,13 @@ void RB_SurfacePolychain( srfPoly_t *p ) {
 	for ( i = 0; i < p->numVerts; i++ )
     {
 		VectorCopy( p->verts[i].xyz, tess.xyz[numv] );
+		VectorCopy( normal, tess.normal[numv] );
+		tess.normal[numv][3] = 0;
+		tess.rayPolyIds[numv] = tess.rayDynamicPolys ? (uint32_t)(p - backEnd.refdef.polys) + 1 : 0;
 		tess.texCoords[numv][0][0] = p->verts[i].st[0];
 		tess.texCoords[numv][0][1] = p->verts[i].st[1];
+		tess.texCoords[numv][1][0] = p->verts[i].st[0];
+		tess.texCoords[numv][1][1] = p->verts[i].st[1];
 		// *(int *)&tess.vertexColors[numv] = *(int *)p->verts[ i ].modulate;
         memcpy(tess.vertexColors[numv], p->verts[ i ].modulate, 4);
 

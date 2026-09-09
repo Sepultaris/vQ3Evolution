@@ -831,6 +831,20 @@ void FS_SV_Rename( const char *from, const char *to, qboolean safe ) {
 	rename(from_ospath, to_ospath);
 }
 
+// Commit a completed home-root data file, preserving the old file on failure.
+// Unlike C rename() on Windows, this explicitly supports an existing target.
+qboolean FS_SV_ReplaceFile(const char *from, const char *to) {
+	char fromPath[MAX_OSPATH], toPath[MAX_OSPATH];
+	if (!fs_searchpaths) Com_Error(ERR_FATAL,"Filesystem call made without initialization");
+	Q_strncpyz(fromPath,FS_BuildOSPath(fs_homepath->string,from,""),sizeof(fromPath));
+	Q_strncpyz(toPath,FS_BuildOSPath(fs_homepath->string,to,""),sizeof(toPath));
+	fromPath[strlen(fromPath)-1]=0;
+	toPath[strlen(toPath)-1]=0;
+	FS_CheckFilenameIsMutable(fromPath,__func__);
+	FS_CheckFilenameIsMutable(toPath,__func__);
+	return Sys_ReplaceFile(fromPath,toPath);
+}
+
 
 
 /*
@@ -1442,6 +1456,8 @@ Return the searchpath in "startSearch".
 =================
 */
 
+#include "fs_vm_search.h"
+
 int FS_FindVM(void **startSearch, char *found, int foundlen, const char *name,
 		int enableDll, qboolean allowUnpure)
 {
@@ -1461,51 +1477,17 @@ int FS_FindVM(void **startSearch, char *found, int foundlen, const char *name,
 
 	lastSearch = *startSearch;
 
-	// Pure mode moves approved packs ahead of directories.  Local VMs are built
-	// as loose files, so give directories their own first pass when the caller
-	// explicitly permits local modules.
-	if(allowUnpure && (!lastSearch || lastSearch->dir))
+	if(allowUnpure)
 	{
-		search = lastSearch ? lastSearch->next : fs_searchpaths;
-
-		while(search)
-		{
-			if(search->dir)
-			{
-				dir = search->dir;
-
-				if(enableDll)
-				{
-					netpath = FS_BuildOSPath(dir->path, dir->gamedir, dllName);
-
-					if(FS_FileInPathExists(netpath))
-					{
-						Q_strncpyz(found, netpath, foundlen);
-						*startSearch = search;
-
-						return VMI_NATIVE;
-					}
-				}
-
-				if(FS_FOpenFileReadDir(qvmName, search, NULL, qfalse, qtrue) > 0)
-				{
-					*startSearch = search;
-					return VMI_COMPILED;
-				}
-			}
-
-			search = search->next;
-		}
+		const char *games[3] = {fs_gamedir, fs_basegame->string, BASEGAME};
+		return FS_FindLocalVM(startSearch,found,foundlen,enableDll ? dllName : NULL,qvmName,games);
 	}
 
-	if(allowUnpure)
-		search = (lastSearch && lastSearch->pack) ? lastSearch->next : fs_searchpaths;
-	else
-		search = lastSearch ? lastSearch->next : fs_searchpaths;
+	search = lastSearch ? lastSearch->next : fs_searchpaths;
 
 	while(search)
 	{
-		if(!allowUnpure && search->dir && !fs_numServerPaks)
+		if(search->dir && !fs_numServerPaks)
 		{
 			dir = search->dir;
 

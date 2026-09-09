@@ -14,12 +14,22 @@ def summarize(path, minimum=50):
     # Quake executes its command buffer twice per rendered frame. Keep support
     # for the original 59-frame baseline; new captures run roughly 599 frames.
     if len(rows) < minimum or "PT_BENCH_STATIC" not in text or "PT_BENCH_TURN" not in text or \
-            "Path tracer: active" not in text or any(set(r) != set(FIELDS) for r in rows):
+            "Path tracer: active" not in text or any(set(r) not in (set(FIELDS), set(FIELDS) | {"guides"}) for r in rows):
         raise SystemExit(f"FAIL: {path.name}: incomplete profile ({len(rows)} frames)")
     print(f"{path.name}: {len(rows)} frames (milliseconds, no added query waits)")
     result = {}
-    for key in FIELDS:
-        values = sorted(row[key] for row in rows)
+    views = re.findall(r"\((-?\d+) (-?\d+) (-?\d+)\) : (-?\d+)", text)
+    if views:
+        x, y, z, yaw = map(int, views[0])
+        # The game resolves the requested position out of the adjacent wall;
+        # check the actual settled camera, not merely command submission.
+        if abs(x+1510)>8 or abs(y-200)>8 or abs(z-50)>8 or abs(yaw)>1:
+            raise SystemExit(f"FAIL: benchmark camera did not settle: {views[0]}")
+        print(f"  verified initial camera: {views[0]}")
+    else:
+        print("  historical capture: initial camera was not logged")
+    for key in FIELDS + ("guides",):
+        values = sorted(row.get(key, 0) for row in rows)
         result[key] = statistics.median(values)
         print(f"  {key:9} median {result[key]:9.3f}  p95 {values[int(.95*(len(values)-1))]:9.3f}  max {max(values):9.3f}")
     return result
@@ -35,4 +45,4 @@ if __name__ == "__main__":
     if args.compare:
         baseline = summarize(args.compare)
         print(f"Median frame-time reduction: {(1-current['frame']/baseline['frame'])*100:.1f}%")
-        print(f"Median integrator speedup: {baseline['trace']/max(current['trace'], .001):.2f}x")
+        print(f"Median tracing + guides speedup: {(baseline['trace']+baseline['guides'])/max(current['trace']+current['guides'], .001):.2f}x")

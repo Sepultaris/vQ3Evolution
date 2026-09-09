@@ -540,6 +540,7 @@ void SCR_DrawScreenField( stereoFrame_t stereoFrame ) {
 	}
 
 	// console draws next
+	CL_OptionsDraw();
 	Con_DrawConsole ();
 
 	// debug graph can be drawn on top of anything

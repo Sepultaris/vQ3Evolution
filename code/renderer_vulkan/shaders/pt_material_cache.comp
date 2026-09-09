@@ -1,0 +1,65 @@
+#version 460
+#extension GL_GOOGLE_include_directive : require
+// One invocation per authored layer, not per ray hit or screen pixel. Results
+// occupy an UNUSED fourth modifier slot; original programs remain recoverable.
+layout(local_size_x=64) in;
+struct TexMod { vec4 a,b,wave; };
+struct LayerRecord {
+    vec4 images[2], params, color, generators, rgbWave, alphaWave, meta, vectors[2];
+    TexMod mods[4];
+};
+struct MaterialRecord { vec4 surface, emission, composition, params, maps, optical, absorption; LayerRecord layers[9]; vec4 skybox[2]; };
+layout(binding=8, std430) buffer Materials { MaterialRecord materials[]; };
+layout(binding=17, std430) readonly buffer Reprojection {
+    vec4 previousOrigin, previousForward, previousRight, previousUp;
+    vec4 jitterHistoryReset, options, depthProjection, cameraMedium;
+} rp;
+layout(push_constant) uniform Constants {
+    vec4 originNear, forwardFar, rightProjection, upProjection;
+    vec4 sunExposure, parameters, sunRadiance, sampling;
+} pc;
+const float PI=3.141592653589793;
+#include "pt_wave.glsl"
+void main() {
+    uint invocation=gl_GlobalInvocationID.x,id=invocation/9u;
+    int layer=int(invocation%9u);
+    if(id>=uint(pc.sampling.x) || layer>=int(materials[id].composition.x)) return;
+    if(materials[id].layers[layer].vectors[0].w!=2 || materials[id].layers[layer].params.w>=4) return;
+    float time=rp.depthProjection.z-materials[id].layers[layer].meta.w;
+    if(materials[id].layers[layer].meta.z>0) time=min(time,materials[id].layers[layer].meta.z);
+    TexMod cached;
+    cached.a=cached.b=vec4(0);
+    for(int i=0;i<int(materials[id].layers[layer].params.w);++i) {
+        TexMod m=materials[id].layers[layer].mods[i];
+        int type=int(m.a.x);
+        vec2 value=vec2(0);
+        if(type==3) value=fract(m.a.yz*time);
+        if(type==5) {
+            float stretch=waveValue(m.wave,int(m.b.w),time);
+            value.x=stretch;
+        }
+        if(type==6) {
+            float angle=-m.a.y*time*PI/180, c=cos(angle), s=sin(angle);
+            value=vec2(c,s);
+        }
+        if(i==0) cached.a.xy=value;
+        else if(i==1) cached.a.zw=value;
+        else cached.b.xy=value;
+        // Entity translate is zero for the cache's zero timeScroll context.
+        // Turbulence/vector/environment coordinates are not native program 2.
+    }
+    int frame=int(max(floor(time*materials[id].layers[layer].params.y),0))%
+        max(int(materials[id].layers[layer].params.x),1);
+    float textureIndex=materials[id].layers[layer].images[frame/4][frame%4];
+    vec4 tint=vec4(1);
+    int rgb=int(materials[id].layers[layer].meta.x),alpha=int(materials[id].layers[layer].meta.y);
+    if(rgb==8) tint.rgb=vec3(clamp(waveValue(materials[id].layers[layer].rgbWave,
+        int(materials[id].layers[layer].generators.x),time),0,1));
+    if(rgb==11) tint.rgb=materials[id].layers[layer].color.rgb;
+    if(alpha==7) tint.a=clamp(waveValue(materials[id].layers[layer].alphaWave,
+        int(materials[id].layers[layer].generators.y),time),0,1);
+    if(alpha==9) tint.a=materials[id].layers[layer].color.a;
+    materials[id].layers[layer].mods[3].a=cached.a;
+    materials[id].layers[layer].mods[3].b=vec4(cached.b.xy,textureIndex,1);
+    materials[id].layers[layer].mods[3].wave=tint;
+}

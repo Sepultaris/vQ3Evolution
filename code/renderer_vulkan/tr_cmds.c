@@ -20,6 +20,7 @@ Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
 ===========================================================================
 */
 #include "tr_local.h"
+#include "vk_streamline.h"
 #include "tr_globals.h"
 #include "tr_backend.h"
 #include "tr_cvar.h"
@@ -27,6 +28,7 @@ Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
 
 #include "vk_instance.h"
 #include "vk_frame.h"
+#include "vk_swapchain.h"
 #include "vk_screenshot.h"
 #include "vk_shade_geometry.h"
 #include "RB_ShowImages.h"
@@ -149,9 +151,12 @@ void RE_StretchPic ( float x, float y, float w, float h,
 void RE_BeginFrame( stereoFrame_t stereoFrame )
 {
 
-	if ( !tr.registered ) {
+	if ( !tr.registered || vk_swapchain_restart_pending() ) {
 		return;
 	}
+	// Pace before the CPU builds the scene, not after acquiring a backbuffer
+	// and recording GPU work. One token covers this whole rendered frame.
+	vk_sl_begin_frame();
 
 	// use the other buffers next frame, because another CPU
 	// may still be rendering into the current ones
@@ -254,6 +259,7 @@ static void RB_RenderDrawSurfList( drawSurf_t* drawSurfs, int numDrawSurfs )
 	oldFogNum = -1;
 	oldDlighted = qfalse;
 	int oldSort = -1;
+	qboolean oldRayPolys = qfalse;
 
 	backEnd.pc.c_surfaces += numDrawSurfs;
 
@@ -263,7 +269,8 @@ static void RB_RenderDrawSurfList( drawSurf_t* drawSurfs, int numDrawSurfs )
 
 	for (i = 0, drawSurf = drawSurfs ; i < numDrawSurfs ; i++, drawSurf++)
     {
-		if ( (int)drawSurf->sort == oldSort ) {
+		qboolean rayPolys = r_rayTracing->integer == 2 && *drawSurf->surface == SF_POLY;
+		if ( (int)drawSurf->sort == oldSort && rayPolys == oldRayPolys ) {
 			// fast path, same as previous sort
 			rb_surfaceTable[ *drawSurf->surface ]( drawSurf->surface );
 			continue;
@@ -275,12 +282,14 @@ static void RB_RenderDrawSurfList( drawSurf_t* drawSurfs, int numDrawSurfs )
 		// change the tess parameters if needed
 		// a "entityMergable" shader is a shader that can have surfaces from seperate
 		// entities merged into a single batch, like smoke and blood puff sprites
-		if (shader != oldShader || fogNum != oldFogNum || dlighted != oldDlighted 
+		if (shader != oldShader || fogNum != oldFogNum || dlighted != oldDlighted || rayPolys != oldRayPolys
 			|| ( entityNum != oldEntityNum && (!shader->entityMergable || r_rayTracing->integer == 2) ) ) {
 			if (oldShader != NULL) {
 				RB_EndSurface();
 			}
 			RB_BeginSurface( shader, fogNum );
+			tess.rayDynamicPolys = rayPolys;
+			oldRayPolys = rayPolys;
 			oldShader = shader;
 			oldFogNum = fogNum;
 			oldDlighted = dlighted;
@@ -352,11 +361,12 @@ static void RB_RenderDrawSurfList( drawSurf_t* drawSurfs, int numDrawSurfs )
 
 void RB_StretchPic( const stretchPicCommand_t * const cmd )
 {
-
+	/* Projection mode can survive across menu-only frames, but the temporal
+	 * scene target starts anew each frame. Always select the full-resolution
+	 * UI target before batching 2D geometry; begin_ui is idempotent. */
+	vk_temporal_begin_ui();
 	if ( qfalse == backEnd.projection2D )
     {
-		vk_temporal_begin_ui();
-
 		backEnd.projection2D = qtrue;
 
         // set 2D virtual screen size
@@ -484,6 +494,8 @@ void R_IssueRenderCommands( qboolean runPerformanceCounters )
     // let it start on the new batch
     // RB_ExecuteRenderCommands( cmdList->cmds );
     int	t1 = ri.Milliseconds ();
+	if (vk_swapchain_restart_pending())
+		goto discard_commands;
 
     // add an end-of-list command
     *(int *)(BE_Commands.cmds + BE_Commands.used) = RC_END_OF_LIST;
@@ -513,7 +525,8 @@ void R_IssueRenderCommands( qboolean runPerformanceCounters )
             {
                 const stretchPicCommand_t * const cmd = data;
 
-                RB_StretchPic( cmd );
+                if (vk_frame_active())
+                    RB_StretchPic( cmd );
 
                 data += sizeof(stretchPicCommand_t);
             } break;
@@ -521,6 +534,10 @@ void R_IssueRenderCommands( qboolean runPerformanceCounters )
             case RC_DRAW_SURFS:
             {  
                 const drawSurfsCommand_t * const cmd = (const drawSurfsCommand_t *)data;
+                if (!vk_frame_active()) {
+                    data += sizeof(drawSurfsCommand_t);
+                    break;
+                }
 
                 // RB_DrawSurfs( cmd );
                 // finish any 2D drawing if needed
@@ -554,10 +571,9 @@ void R_IssueRenderCommands( qboolean runPerformanceCounters )
             {
                 // data = RB_DrawBuffer( data ); 
                 // const drawBufferCommand_t * const cmd = (const drawBufferCommand_t *)data;
+                if (!vk_begin_frame())
+                    goto discard_commands;
                 vk_resetGeometryBuffer();
-                
-                // VULKAN
-                vk_begin_frame();
 
                 data += sizeof(drawBufferCommand_t);
 
@@ -566,6 +582,8 @@ void R_IssueRenderCommands( qboolean runPerformanceCounters )
 
             case RC_SWAP_BUFFERS:
             {
+                if (!vk_frame_active())
+                    goto discard_commands;
                 // data = RB_SwapBuffers( data );
                 // finish any 2D drawing if needed
                 RB_EndSurface();
@@ -577,6 +595,8 @@ void R_IssueRenderCommands( qboolean runPerformanceCounters )
 
                 // VULKAN
                 vk_end_frame();
+                if (vk_swapchain_restart_pending())
+                    goto discard_commands;
 
                 data += sizeof(swapBuffersCommand_t);
             } break;
@@ -608,6 +628,15 @@ void R_IssueRenderCommands( qboolean runPerformanceCounters )
                 return;
         }
     }
+
+discard_commands:
+    // Never run remaining draws/readbacks/present after failed acquisition.
+    // Clear CPU batches too, so a later flush cannot revive the skipped frame.
+    tess.numIndexes = 0;
+    tess.numVertexes = 0;
+    BE_Commands.used = 0;
+    vk_reset_captures();
+    backEnd.pc.msec = ri.Milliseconds() - t1;
 }
 
 

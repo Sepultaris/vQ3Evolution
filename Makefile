@@ -1049,7 +1049,7 @@ ifneq ($(BUILD_CLIENT),0)
     TARGETS += $(B)/renderer_vulkan_$(SHLIBNAME)
     ifeq ($(USE_NVIDIA_DLSS),1)
       STREAMLINE_RUNTIME_NAMES = sl.interposer.dll sl.common.dll sl.dlss.dll \
-        nvngx_dlss.dll sl.dlss_g.dll nvngx_dlssg.dll sl.reflex.dll \
+        nvngx_dlss.dll sl.dlss_d.dll nvngx_dlssd.dll sl.dlss_g.dll nvngx_dlssg.dll sl.reflex.dll \
         sl.pcl.dll NvLowLatencyVk.dll
       STREAMLINE_RUNTIME_TARGETS = $(addprefix $(B)/,$(STREAMLINE_RUNTIME_NAMES))
       TARGETS += $(STREAMLINE_RUNTIME_TARGETS) \
@@ -1728,6 +1728,7 @@ $(B)/$(AUTOUPDATER_BIN): $(Q3AUTOUPDATEROBJ)
 #############################################################################
 
 Q3OBJ = \
+  $(B)/client/cl_options.o \
   $(B)/client/cl_cgame.o \
   $(B)/client/cl_cin.o \
   $(B)/client/cl_console.o \
@@ -1898,6 +1899,30 @@ Q3VKOBJ = \
   $(B)/renderer_vulkan/dlss_sharpen_comp.o \
 	$(B)/renderer_vulkan/rt_shadows_comp.o \
 	$(B)/renderer_vulkan/pathtrace_comp.o \
+	$(B)/renderer_vulkan/pt_profile_comp.o \
+	$(B)/renderer_vulkan/pt_brdf_comp.o \
+	$(B)/renderer_vulkan/pt_light_loop_comp.o \
+	$(B)/renderer_vulkan/pt_light_loop_brdf_comp.o \
+	$(B)/renderer_vulkan/pt_light_loop_profile_comp.o \
+	$(B)/renderer_vulkan/pt_light_loop_profile_brdf_comp.o \
+	$(B)/renderer_vulkan/pt_cached_materials_comp.o \
+	$(B)/renderer_vulkan/pt_cached_materials_brdf_comp.o \
+	$(B)/renderer_vulkan/pt_cached_materials_loop_comp.o \
+	$(B)/renderer_vulkan/pt_cached_materials_loop_brdf_comp.o \
+	$(B)/renderer_vulkan/pt_material_cache_comp.o \
+	$(B)/renderer_vulkan/pt_compact_transport_comp.o \
+	$(B)/renderer_vulkan/pt_rr_guides_comp.o \
+	$(B)/renderer_vulkan/pt_rr_pack_comp.o \
+	$(B)/renderer_vulkan/pt_rr_post_comp.o \
+	$(B)/renderer_vulkan/pt_rr_trace_comp.o \
+	$(B)/renderer_vulkan/pt_rr_spatial_comp.o \
+	$(B)/renderer_vulkan/pt_rr_fallback_comp.o \
+	$(B)/renderer_vulkan/pt_staged_0_comp.o \
+	$(B)/renderer_vulkan/pt_staged_1_comp.o \
+	$(B)/renderer_vulkan/pt_staged_2_comp.o \
+	$(B)/renderer_vulkan/pt_staged_3_comp.o \
+	$(B)/renderer_vulkan/pt_profile_brdf_comp.o \
+	$(B)/renderer_vulkan/pt_guides_comp.o \
 	$(B)/renderer_vulkan/pt_denoise_comp.o \
 	$(B)/renderer_vulkan/pt_temporal_comp.o \
   $(B)/renderer_vulkan/multi_texture_clipping_plane_vert.o \
@@ -1933,10 +1958,10 @@ Q3VKOBJ = \
   \
   $(B)/renderer_vulkan/vk_create_window_SDL.o
 
-ifeq ($(USE_NVIDIA_DLSS),1)
+# The C renderer calls this boundary on every platform. Without NVIDIA enabled,
+# these translation units provide SDK-free stubs instead of loading any DLLs.
   Q3VKOBJ += $(B)/renderer_vulkan/vk_streamline.o \
 	$(B)/renderer_vulkan/vk_dlssnr.o
-endif
 
 ######################################################
 

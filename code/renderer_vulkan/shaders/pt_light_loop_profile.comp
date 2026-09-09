@@ -1,0 +1,5 @@
+#version 460
+#extension GL_GOOGLE_include_directive : require
+#define PT_PROFILE_PASS 1
+#define PT_UNIFIED_LIGHTS 1
+#include "pt_integrator.glsl"

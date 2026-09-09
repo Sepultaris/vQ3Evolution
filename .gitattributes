@@ -15,6 +15,8 @@
 *.vert text eol=lf
 *.frag text eol=lf
 *.comp text eol=lf
+*.py text eol=lf
+*.cfg text eol=lf
 *.sh text eol=lf
 Makefile text eol=lf
 *.mk text eol=lf
@@ -54,7 +56,14 @@ Makefile text eol=lf
 *.ogg binary
 *.spv binary
 *.cspv binary
+*.vspv binary
+*.fspv binary
 *.zip binary
 *.7z binary
 *.gz binary
 *.bz2 binary
+
+# Embedded payloads are intentional build inputs; hide generated arrays in
+# default GitHub reviews while retaining GLSL sources as reviewable code.
+code/renderer_vulkan/shaders/Compiled/* linguist-generated=true
+code/renderer_vulkan/pt_blue_noise.h linguist-generated=true

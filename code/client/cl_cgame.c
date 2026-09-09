@@ -418,6 +418,7 @@ intptr_t CL_CgameSystemCalls( intptr_t *args ) {
 	case CG_MILLISECONDS:
 		return Sys_Milliseconds();
 	case CG_CVAR_REGISTER:
+		CL_OptionsRegisterScale(qfalse,VMA(2));
 		Cvar_Register( VMA(1), VMA(2), VMA(3), args[4] ); 
 		return 0;
 	case CG_CVAR_UPDATE:
@@ -569,13 +570,13 @@ intptr_t CL_CgameSystemCalls( intptr_t *args ) {
 		re.AddAdditiveLightToScene( VMA(1), VMF(2), VMF(3), VMF(4), VMF(5) );
 		return 0;
 	case CG_R_RENDERSCENE:
-		re.RenderScene( VMA(1) );
+		CL_OptionsRenderScene(qfalse,VMA(1));
 		return 0;
 	case CG_R_SETCOLOR:
 		re.SetColor( VMA(1) );
 		return 0;
 	case CG_R_DRAWSTRETCHPIC:
-		re.DrawStretchPic( VMF(1), VMF(2), VMF(3), VMF(4), VMF(5), VMF(6), VMF(7), VMF(8), args[9] );
+		CL_OptionsStretchPic(qfalse,VMF(1),VMF(2),VMF(3),VMF(4),VMF(5),VMF(6),VMF(7),VMF(8),args[9]);
 		return 0;
 	case CG_R_MODELBOUNDS:
 		re.ModelBounds( args[1], VMA(2), VMA(3) );
@@ -672,7 +673,7 @@ intptr_t CL_CgameSystemCalls( intptr_t *args ) {
 	  return CIN_RunCinematic(args[1]);
 
 	case CG_CIN_DRAWCINEMATIC:
-	  CIN_DrawCinematic(args[1]);
+	  CIN_DrawCinematicScaled(args[1],qfalse);
 	  return 0;
 
 	case CG_CIN_SETEXTENTS:
@@ -720,6 +721,7 @@ void CL_InitCGame( void ) {
 	int					t1, t2;
 	vmInterpret_t		interpret;
 	qboolean			localServer;
+	CL_OptionsResetModule(qfalse);
 
 	t1 = Sys_Milliseconds();
 

@@ -336,7 +336,7 @@ void vk_temporal_initialize(uint32_t render_width, uint32_t render_height,
 	if (r_rayTracing->integer && vk_rt_supported())
 		create_image(&temporal.raytraced_color, render_width, render_height,
 			VK_FORMAT_R8G8B8A8_UNORM, color_usage, VK_IMAGE_ASPECT_COLOR_BIT);
-	if (r_dlssNeuralRendering->integer && vk_sl_neural_rendering_supported())
+	if (r_dlssNeuralRendering->integer && vk_sl_neural_rendering_supported() && !vk_sl_ray_reconstruction_enabled())
 		create_image(&temporal.neural_color, render_width, render_height,
 			vk.surface_format.format, color_usage, VK_IMAGE_ASPECT_COLOR_BIT);
 	create_image(&temporal.output_color, output_width, output_height,
@@ -361,6 +361,8 @@ void vk_temporal_initialize(uint32_t render_width, uint32_t render_height,
 			temporal.scene_color.view, temporal.scene_color.format,
 			temporal.scene_depth.view, temporal.scene_depth.format,
 			temporal.raytraced_color.view, temporal.motion_vectors.view, temporal.path_depth.view);
+    if (r_rayTracing->integer == 2)
+        vk_pt_rr_initialize(output_width, output_height);
 
 	temporal.scene_render_pass = create_render_pass(VK_ATTACHMENT_LOAD_OP_CLEAR,
 		VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
@@ -388,6 +390,10 @@ void vk_temporal_initialize(uint32_t render_width, uint32_t render_height,
 
 void vk_temporal_shutdown(void)
 {
+	// Clear external references and release NGX features while tagged images
+	// still exist. RE_Shutdown drains GPU work before reaching this function;
+	// initialization-failure cleanup has not submitted a frame yet.
+	vk_sl_release_frame_resources();
 #ifdef USE_TEMPORAL_RENDER_TARGETS
 	if (temporal.scene_framebuffer) qvkDestroyFramebuffer(vk.device, temporal.scene_framebuffer, NULL);
 	if (temporal.scene_render_pass) qvkDestroyRenderPass(vk.device, temporal.scene_render_pass, NULL);
@@ -442,7 +448,6 @@ void vk_temporal_begin_frame(void)
 	temporal.jitter_x = halton(phase, 2) - 0.5f;
 	temporal.jitter_y = halton(phase, 3) - 0.5f;
 	}
-	vk_sl_begin_frame(temporal.frame_index);
 #endif
 	vk_rt_begin_frame();
 	if (temporal.scene_depth.layout != VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL) {
@@ -494,6 +499,8 @@ void vk_temporal_prepare_view(float *projection_matrix, const float *view_matrix
 
 void vk_temporal_begin_ui(void)
 {
+    temporal_image_t rr_color = {0};
+    qboolean rr_evaluated = qfalse;
 #ifdef USE_TEMPORAL_RENDER_TARGETS
 	if (!temporal.active || !temporal.scene_pass) return;
 	qvkCmdEndRenderPass(vk.command_buffer);
@@ -674,10 +681,19 @@ void vk_temporal_begin_ui(void)
             resources.camera_motion_included = qtrue;
             resources.reset = resources.reset || vk_pt_history_reset();
         }
-		evaluated = vk_sl_evaluate_dlss(&resources);
+        if (raytraced && r_rayTracing->integer == 2) {
+            rr_evaluated = vk_pt_rr_evaluate(&resources, &rr_color.image, &rr_color.view);
+            if (rr_evaluated) {
+                rr_color.format = VK_FORMAT_R8G8B8A8_UNORM;
+                rr_color.layout = VK_IMAGE_LAYOUT_GENERAL;
+                rr_color.usage = VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT |
+                    VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+            }
+        }
+		evaluated = rr_evaluated || vk_sl_evaluate_dlss(&resources);
 	}
 
-	if (evaluated && temporal.sharpen_ready && r_dlssSharpness->value > 0.0f) {
+	if (evaluated && !rr_evaluated && temporal.sharpen_ready && r_dlssSharpness->value > 0.0f) {
 		record_image_layout_transition(vk.command_buffer,
 			temporal.output_color.image, VK_IMAGE_ASPECT_COLOR_BIT,
 			VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_TRANSFER_WRITE_BIT,
@@ -689,10 +705,10 @@ void vk_temporal_begin_ui(void)
 			temporal.output_height);
 	}
 
-	temporal_image_t *source = sharpened ? &temporal.sharpened_color :
+	temporal_image_t *source = rr_evaluated ? &rr_color : (sharpened ? &temporal.sharpened_color :
 		(evaluated ? &temporal.output_color :
 		(neural_evaluated ? &temporal.neural_color :
-		(raytraced ? &temporal.raytraced_color : &temporal.scene_color)));
+		(raytraced ? &temporal.raytraced_color : &temporal.scene_color))));
 	const VkAccessFlags source_access = sharpened ? VK_ACCESS_SHADER_WRITE_BIT :
 		(evaluated || neural_evaluated || raytraced ?
 		(VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_TRANSFER_WRITE_BIT) :

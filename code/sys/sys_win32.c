@@ -52,6 +52,10 @@ static char steamPath[ MAX_OSPATH ] = { 0 };
 // Used to store the GOG Quake 3 installation path
 static char gogPath[ MAX_OSPATH ] = { 0 };
 
+qboolean Sys_ReplaceFile(const char *from,const char *to) {
+	return MoveFileExA(from,to,MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH) != 0;
+}
+
 #ifndef DEDICATED
 static UINT timerResolution = 0;
 #endif

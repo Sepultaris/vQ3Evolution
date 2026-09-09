@@ -1011,6 +1011,28 @@ qboolean UI_ConsoleCommand( int realTime ) {
 	// ensure minimum menu data is available
 	Menu_Cache();
 
+	/* Deterministic menu-only frames for render-target regression tests. This
+	 * goes through the normal native menu and hit-testing code, not a mock UI. */
+	if ( Q_stricmp( cmd, "ui_testMenu" ) == 0 ) {
+		char menu[MAX_QPATH];
+		if ( !trap_Cvar_VariableValue( "developer" ) ) {
+			trap_Print( "ui_testMenu requires developer 1\n" );
+			return qtrue;
+		}
+		Q_strncpyz( menu, UI_Argv( 1 ), sizeof(menu) );
+		if ( Q_stricmp(menu, "setup") && Q_stricmp(menu, "graphics") && Q_stricmp(menu, "close") ) {
+			trap_Print( "ui_testMenu: setup, graphics, or close\n" );
+			return qtrue;
+		}
+		UI_ForceMenuOff();
+		uis.cursorx = 320;
+		uis.cursory = 134;
+		if ( !Q_stricmp(menu, "setup") ) UI_SetupMenu();
+		if ( !Q_stricmp(menu, "graphics") ) UI_GraphicsOptionsMenu();
+		trap_Print( va("UI_TEST_MENU %s\n", menu) );
+		return qtrue;
+	}
+
 	if ( Q_stricmp (cmd, "levelselect") == 0 ) {
 		UI_SPLevelMenu_f();
 		return qtrue;

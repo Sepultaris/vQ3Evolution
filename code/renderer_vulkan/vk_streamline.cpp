@@ -23,6 +23,7 @@
 
 #include <sl.h>
 #include <sl_dlss.h>
+#include <sl_dlss_d.h>
 #include <sl_dlss_g.h>
 #include <sl_matrix_helpers.h>
 #include <sl_pcl.h>
@@ -39,13 +40,21 @@ struct StreamlineState {
 	PFun_slIsFeatureSupported *isFeatureSupported = nullptr;
 	PFun_slGetFeatureRequirements *getFeatureRequirements = nullptr;
 	PFun_slGetFeatureFunction *getFeatureFunction = nullptr;
+	PFun_slSetFeatureLoaded *setFeatureLoaded = nullptr;
 	PFun_slSetVulkanInfo *setVulkanInfo = nullptr;
 	PFun_slSetTagForFrame *setTagForFrame = nullptr;
 	PFun_slSetConstants *setConstants = nullptr;
 	PFun_slEvaluateFeature *evaluateFeature = nullptr;
+	PFun_slFreeResources *freeResources = nullptr;
 	PFun_slGetNewFrameToken *getNewFrameToken = nullptr;
 	PFun_slDLSSSetOptions *dlssSetOptions = nullptr;
 	PFun_slDLSSGetOptimalSettings *dlssGetOptimalSettings = nullptr;
+	PFun_slDLSSDSetOptions *rrSetOptions = nullptr;
+	PFun_slDLSSDGetOptimalSettings *rrGetOptimalSettings = nullptr;
+	bool rrRequirementsAvailable = false;
+	bool rrSupported = false, rrEnabled = false, rrAttempted = false;
+	uint32_t rrFrames = 0;
+	sl::DLSSDOptions rrOptions {};
 	PFun_slDLSSGSetOptions *dlssGSetOptions = nullptr;
 	PFun_slDLSSGGetState *dlssGGetState = nullptr;
 	PFun_slReflexSetOptions *reflexSetOptions = nullptr;
@@ -58,15 +67,29 @@ struct StreamlineState {
 	bool initialized = false;
 	bool dlssSupported = false;
 	bool frameGenerationSupported = false;
+	bool frameGenerationHooksUnloaded = false;
+	bool frameGenerationPresentationSupported = false;
 	bool reflexSupported = false;
 	bool dlssEnabled = false;
+	bool dlssEvaluationAttempted = false;
 	bool frameGenerationEnabled = false;
 	bool frameGenerationActive = false;
+	bool frameGenerationResourcesAllocated = false;
 	sl::FrameToken *frameToken = nullptr;
 	sl::float4x4 previousCameraToWorld {};
 	sl::float4x4 previousProjection {};
 	bool havePreviousCamera = false;
 	bool frameGenerationStateLogged = false;
+	uint32_t frameGenerationQueries = 0;
+	uint32_t frameGenerationPresented = 0;
+	uint32_t frameGenerationPeakPresented = 0;
+	uint32_t frameGenerationUnfocusedQueries = 0;
+	uint32_t frameGenerationMinimizedQueries = 0;
+	uint32_t frameGenerationFailedQueries = 0;
+	uint32_t constantFrames = 0;
+	uint32_t constantResets = 0;
+	sl::Result frameGenerationResult = sl::Result::eOk;
+	sl::DLSSGStatus frameGenerationStatus = sl::DLSSGStatus::eOk;
 	sl::DLSSGOptions dlssGOptions {};
 	std::string status = "Streamline is not initialized";
 };
@@ -154,7 +177,18 @@ void queryFrameGenerationState()
 
 	sl::DLSSGState state;
 	const sl::Result result = g_sl.dlssGGetState(sl::ViewportHandle(0), state,
-		&g_sl.dlssGOptions);
+		nullptr);
+	++g_sl.frameGenerationQueries;
+	g_sl.frameGenerationUnfocusedQueries += !!ri.Cvar_VariableIntegerValue("com_unfocused");
+	g_sl.frameGenerationMinimizedQueries += !!ri.Cvar_VariableIntegerValue("com_minimized");
+	g_sl.frameGenerationFailedQueries += result != sl::Result::eOk || state.status != sl::DLSSGStatus::eOk;
+	g_sl.frameGenerationResult = result;
+	g_sl.frameGenerationStatus = state.status;
+	if (result == sl::Result::eOk) {
+		g_sl.frameGenerationPresented += state.numFramesActuallyPresented;
+		g_sl.frameGenerationPeakPresented = std::max(g_sl.frameGenerationPeakPresented,
+			state.numFramesActuallyPresented);
+	}
 	if (!g_sl.frameGenerationStateLogged) {
 		if (result == sl::Result::eOk && state.status == sl::DLSSGStatus::eOk &&
 			state.numFramesActuallyPresented > 1)
@@ -187,6 +221,32 @@ bool collectRequirements(sl::Feature feature)
 		appendUnique(g_sl.deviceExtensions, requirements.vkDeviceExtensions[i]);
 	}
 	return true;
+}
+
+void unloadIdleFrameGenerationHooks()
+{
+	// This runs once on the newly created device, after support/interface queries
+	// and BEFORE the surface/swapchain or any rendered submissions exist. FG is
+	// latched: changing it already rebuilds the renderer/device and swapchain.
+	// Streamline's DLSS-G guide section 18 requires this unhooked swapchain when
+	// FG is off, otherwise an extra off-screen copy and presentation queue remain.
+	if (!g_sl.frameGenerationSupported || ri.Cvar_VariableIntegerValue("r_dlssFrameGeneration") ||
+		ri.Cvar_VariableIntegerValue("r_dlssFGIdleHooks")) return;
+	if (!g_sl.setFeatureLoaded) {
+		ri.Printf(PRINT_WARNING, "NVIDIA idle FG hooks retained: slSetFeatureLoaded is unavailable\n");
+		return;
+	}
+	const sl::Result result = g_sl.setFeatureLoaded(sl::kFeatureDLSS_G, false);
+	if (result != sl::Result::eOk) {
+		ri.Printf(PRINT_WARNING, "NVIDIA idle FG hooks retained: unload returned %d\n", (int)result);
+		return;
+	}
+	// Capability stays available in the menu; Apply restarts into a loaded FG
+	// plugin. Never invoke feature interfaces while that feature is unloaded.
+	g_sl.frameGenerationHooksUnloaded = true;
+	g_sl.dlssGSetOptions = nullptr;
+	g_sl.dlssGGetState = nullptr;
+	ri.Printf(PRINT_ALL, "NVIDIA idle FG presentation hooks unloaded before swapchain creation\n");
 }
 
 void clearState(bool unload)
@@ -298,6 +358,7 @@ extern "C" qboolean vk_sl_initialize(void)
 		!loadFunction(g_sl.setTagForFrame, "slSetTagForFrame") ||
 		!loadFunction(g_sl.setConstants, "slSetConstants") ||
 		!loadFunction(g_sl.evaluateFeature, "slEvaluateFeature") ||
+		!loadFunction(g_sl.freeResources, "slFreeResources") ||
 		!loadFunction(g_sl.getNewFrameToken, "slGetNewFrameToken") ||
 		!loadFunction(g_sl.setVulkanInfo, "slSetVulkanInfo")) {
 		clearState(true);
@@ -307,6 +368,8 @@ extern "C" qboolean vk_sl_initialize(void)
 		GetProcAddress(g_sl.module, "vkGetInstanceProcAddr"));
 	g_sl.getDeviceProcAddr = reinterpret_cast<PFN_vkGetDeviceProcAddr>(
 		GetProcAddress(g_sl.module, "vkGetDeviceProcAddr"));
+	g_sl.setFeatureLoaded = reinterpret_cast<PFun_slSetFeatureLoaded *>(
+		GetProcAddress(g_sl.module, "slSetFeatureLoaded"));
 	if (!g_sl.getInstanceProcAddr || !g_sl.getDeviceProcAddr) {
 		g_sl.status = "Streamline runtime does not export the Vulkan entry points";
 		clearState(true);
@@ -316,6 +379,7 @@ extern "C" qboolean vk_sl_initialize(void)
 	static const sl::Feature features[] = {
 		sl::kFeatureReflex,
 		sl::kFeatureDLSS,
+		sl::kFeatureDLSS_RR,
 		sl::kFeatureDLSS_G
 	};
 	sl::Preferences preferences;
@@ -342,7 +406,10 @@ extern "C" qboolean vk_sl_initialize(void)
 
 	bool requirementsOk = true;
 	for (const sl::Feature feature : features) {
-		requirementsOk = collectRequirements(feature) && requirementsOk;
+		const bool available = collectRequirements(feature);
+		// RR is optional: a missing RR plugin must not disable SR/Reflex.
+		if (feature == sl::kFeatureDLSS_RR) g_sl.rrRequirementsAvailable = available;
+		else requirementsOk = available && requirementsOk;
 	}
 	if (!requirementsOk) {
 		vk_sl_shutdown();
@@ -355,11 +422,76 @@ extern "C" qboolean vk_sl_initialize(void)
 	return qtrue;
 }
 
+extern "C" void vk_sl_release_frame_resources(void)
+{
+	// The engine has drained GPU work. Stop feature use before untagging inputs;
+	// keep the interposer alive through swapchain destruction (its hooks own it).
+	vk_sl_set_frame_generation_active(qfalse);
+	if (g_sl.initialized && g_sl.frameGenerationResourcesAllocated && g_sl.freeResources) {
+		const sl::Result result = g_sl.freeResources(sl::kFeatureDLSS_G, sl::ViewportHandle(0));
+		if (result != sl::Result::eOk)
+			ri.Printf(PRINT_WARNING, "Streamline Frame Generation resource release failed (result %d)\n", (int)result);
+		else {
+			ri.Printf(PRINT_ALL, "Streamline Frame Generation resources released before image destruction\n");
+			g_sl.frameGenerationResourcesAllocated = false;
+		}
+	}
+	// Release SR's NGX feature while the shared device runtime is still live.
+	if (g_sl.initialized && g_sl.rrAttempted && g_sl.freeResources) {
+		const sl::Result result = g_sl.freeResources(sl::kFeatureDLSS_RR, sl::ViewportHandle(0));
+		if (result != sl::Result::eOk && result != sl::Result::eErrorInvalidParameter)
+			ri.Printf(PRINT_WARNING, "Ray Reconstruction resource release failed (%d)\n", (int)result);
+		g_sl.rrAttempted = false;
+	}
+	// The separately initialized NR snippet must not shut it down first.
+	if (g_sl.initialized && g_sl.dlssEvaluationAttempted && g_sl.freeResources) {
+		const sl::Result result = g_sl.freeResources(sl::kFeatureDLSS, sl::ViewportHandle(0));
+		if (result != sl::Result::eOk && result != sl::Result::eErrorInvalidParameter)
+			ri.Printf(PRINT_WARNING, "Streamline DLSS resource release failed (result %d)\n", (int)result);
+		else
+			ri.Printf(PRINT_ALL, "Streamline DLSS resources released before Neural Rendering shutdown\n");
+		g_sl.dlssEvaluationAttempted = false;
+	}
+	vk_dlssnr_shutdown();
+	if (g_sl.initialized && g_sl.frameToken && g_sl.setTagForFrame) {
+		const sl::ResourceTag tags[] = {
+			sl::ResourceTag(nullptr, sl::kBufferTypeAlbedo, sl::ResourceLifecycle::eValidUntilPresent),
+			sl::ResourceTag(nullptr, sl::kBufferTypeSpecularAlbedo, sl::ResourceLifecycle::eValidUntilPresent),
+			sl::ResourceTag(nullptr, sl::kBufferTypeNormalRoughness, sl::ResourceLifecycle::eValidUntilPresent),
+			sl::ResourceTag(nullptr, sl::kBufferTypeSpecularHitDistance, sl::ResourceLifecycle::eValidUntilPresent),
+			sl::ResourceTag(nullptr, sl::kBufferTypeDepth, sl::ResourceLifecycle::eValidUntilPresent),
+			sl::ResourceTag(nullptr, sl::kBufferTypeMotionVectors, sl::ResourceLifecycle::eValidUntilPresent),
+			sl::ResourceTag(nullptr, sl::kBufferTypeScalingInputColor, sl::ResourceLifecycle::eValidUntilPresent),
+			sl::ResourceTag(nullptr, sl::kBufferTypeScalingOutputColor, sl::ResourceLifecycle::eValidUntilPresent),
+			sl::ResourceTag(nullptr, sl::kBufferTypeHUDLessColor, sl::ResourceLifecycle::eValidUntilPresent),
+			sl::ResourceTag(nullptr, sl::kBufferTypeBackbuffer, sl::ResourceLifecycle::eValidUntilPresent)
+		};
+		const sl::Result result = g_sl.setTagForFrame(*g_sl.frameToken, sl::ViewportHandle(0),
+			tags, static_cast<uint32_t>(std::size(tags)), nullptr);
+		if (result != sl::Result::eOk)
+			ri.Printf(PRINT_WARNING, "Streamline frame resource release failed (result %d)\n", (int)result);
+		else
+			ri.Printf(PRINT_ALL, "Streamline frame resource tags released before image destruction\n");
+	}
+	g_sl.frameToken = nullptr;
+	g_sl.havePreviousCamera = false;
+}
+
 extern "C" void vk_sl_shutdown(void)
 {
-	vk_dlssnr_shutdown();
+	// Release our module references as well as the feature BEFORE Streamline
+	// unloads its NGX/logging providers. DLL detach is part of the dependency
+	// lifetime too; deferring it until vk_sl_unload leaves providers dead first.
+	vk_dlssnr_unload();
 	if (g_sl.initialized && g_sl.shutdown) {
-		g_sl.shutdown();
+		const int shutdownStart = ri.Milliseconds();
+		ri.Printf(PRINT_ALL, "PT_SDK_SHUTDOWN_BEGIN time_ms=%d\n", shutdownStart);
+		const sl::Result result = g_sl.shutdown();
+		ri.Printf(PRINT_ALL, "PT_SDK_SHUTDOWN_END elapsed_ms=%d\n", ri.Milliseconds() - shutdownStart);
+		if (result != sl::Result::eOk)
+			ri.Printf(PRINT_WARNING, "Streamline shutdown failed (result %d)\n", (int)result);
+		else
+			ri.Printf(PRINT_ALL, "Streamline shutdown complete before device destruction\n");
 		g_sl.initialized = false;
 	}
 }
@@ -405,6 +537,8 @@ extern "C" void vk_sl_check_feature_support(VkInstance instance,
 	sl::AdapterInfo adapter;
 	adapter.vkPhysicalDevice = physicalDevice;
 	g_sl.dlssSupported = g_sl.isFeatureSupported(sl::kFeatureDLSS, adapter) == sl::Result::eOk;
+	g_sl.rrSupported = g_sl.rrRequirementsAvailable &&
+		g_sl.isFeatureSupported(sl::kFeatureDLSS_RR, adapter) == sl::Result::eOk;
 	g_sl.frameGenerationSupported =
 		g_sl.isFeatureSupported(sl::kFeatureDLSS_G, adapter) == sl::Result::eOk;
 	g_sl.reflexSupported = g_sl.isFeatureSupported(sl::kFeatureReflex, adapter) == sl::Result::eOk;
@@ -421,6 +555,16 @@ extern "C" void vk_sl_check_feature_support(VkInstance instance,
 	 * creating the Win32 surface so DLSS-G can associate it with the SDL HWND.
 	 */
 	void *function = nullptr;
+	if (g_sl.rrSupported) {
+		if (g_sl.getFeatureFunction(sl::kFeatureDLSS_RR, "slDLSSDSetOptions", function) == sl::Result::eOk)
+			g_sl.rrSetOptions = reinterpret_cast<PFun_slDLSSDSetOptions *>(function);
+		function = nullptr;
+		if (g_sl.getFeatureFunction(sl::kFeatureDLSS_RR, "slDLSSDGetOptimalSettings", function) == sl::Result::eOk)
+			g_sl.rrGetOptimalSettings = reinterpret_cast<PFun_slDLSSDGetOptimalSettings *>(function);
+		g_sl.rrSupported = g_sl.rrSetOptions && g_sl.rrGetOptimalSettings;
+		function = nullptr;
+	}
+	ri.Cvar_Set("r_dlssRayReconstructionAvailable", g_sl.rrSupported ? "1" : "0");
 	if (g_sl.dlssSupported &&
 		g_sl.getFeatureFunction(sl::kFeatureDLSS, "slDLSSSetOptions", function) == sl::Result::eOk) {
 		g_sl.dlssSetOptions = reinterpret_cast<PFun_slDLSSSetOptions *>(function);
@@ -447,6 +591,7 @@ extern "C" void vk_sl_check_feature_support(VkInstance instance,
 	function = nullptr;
 	if (g_sl.getFeatureFunction(sl::kFeaturePCL, "slPCLSetMarker", function) == sl::Result::eOk)
 		g_sl.pclSetMarker = reinterpret_cast<PFun_slPCLSetMarker *>(function);
+	unloadIdleFrameGenerationHooks();
 
 	g_sl.status = g_sl.dlssSupported
 		? "DLSS Super Resolution is supported"
@@ -491,6 +636,11 @@ extern "C" qboolean vk_sl_dlss_supported(void)
 	return g_sl.dlssSupported ? qtrue : qfalse;
 }
 
+extern "C" qboolean vk_sl_ray_reconstruction_enabled(void)
+{
+	return g_sl.rrEnabled ? qtrue : qfalse;
+}
+
 extern "C" qboolean vk_sl_neural_rendering_supported(void)
 {
 	return vk_dlssnr_supported();
@@ -501,6 +651,15 @@ extern "C" qboolean vk_sl_frame_generation_supported(void)
 	return g_sl.frameGenerationSupported ? qtrue : qfalse;
 }
 
+extern "C" void vk_sl_set_frame_generation_presentation_supported(qboolean supported)
+{
+	g_sl.frameGenerationPresentationSupported = supported != qfalse;
+	ri.Cvar_Set("r_dlssFrameGenerationAvailable",
+		g_sl.frameGenerationSupported && supported ? "1" : "0");
+	if (g_sl.frameGenerationSupported && !supported)
+		ri.Printf(PRINT_WARNING, "Frame Generation unavailable: this surface has no unsynchronized presentation mode\n");
+}
+
 extern "C" qboolean vk_sl_reflex_supported(void)
 {
 	return g_sl.reflexSupported ? qtrue : qfalse;
@@ -509,6 +668,30 @@ extern "C" qboolean vk_sl_reflex_supported(void)
 extern "C" const char *vk_sl_status(void)
 {
 	return g_sl.status.c_str();
+}
+
+extern "C" void vk_sl_info_f(void)
+{
+	ri.Printf(PRINT_ALL, "Ray Reconstruction: supported %d, enabled %d, evaluated frames %u\n",
+		g_sl.rrSupported, g_sl.rrEnabled, g_sl.rrFrames);
+	// Report cached results; querying here would consume presentation counters
+	// and interfere with the next frame's normal SDK status polling.
+	ri.Printf(PRINT_ALL, "NVIDIA: initialized %d, DLSS enabled %d, NR available %d\n",
+		g_sl.initialized, g_sl.dlssEnabled, vk_dlssnr_supported());
+	ri.Printf(PRINT_ALL, "NVIDIA idle FG hooks: unloaded %d, FG capability retained %d\n",
+		g_sl.frameGenerationHooksUnloaded, g_sl.frameGenerationSupported);
+	ri.Printf(PRINT_ALL, "Frame Generation: enabled %d, viewport active %d, queries %u, presented %u, peak %u, result %d, status 0x%x\n",
+		g_sl.frameGenerationEnabled, g_sl.frameGenerationActive, g_sl.frameGenerationQueries,
+		g_sl.frameGenerationPresented, g_sl.frameGenerationPeakPresented,
+		(int)g_sl.frameGenerationResult, (unsigned)g_sl.frameGenerationStatus);
+	ri.Printf(PRINT_ALL, "NVIDIA frame history: %u constant frames, %u resets\n",
+		g_sl.constantFrames, g_sl.constantResets);
+	ri.Printf(PRINT_ALL, "NVIDIA window state: focused %d, minimized %d\n",
+		!ri.Cvar_VariableIntegerValue("com_unfocused"),
+		ri.Cvar_VariableIntegerValue("com_minimized"));
+	ri.Printf(PRINT_ALL, "NVIDIA FG query history: unfocused %u, minimized %u, failed %u\n",
+		g_sl.frameGenerationUnfocusedQueries, g_sl.frameGenerationMinimizedQueries,
+		g_sl.frameGenerationFailedQueries);
 }
 
 extern "C" qboolean vk_sl_configure(int dlssMode, int frameGeneration, int reflexMode,
@@ -530,7 +713,12 @@ extern "C" qboolean vk_sl_configure(int dlssMode, int frameGeneration, int refle
 	};
 	dlssMode = std::max(0, std::min(dlssMode, 5));
 	g_sl.dlssEnabled = dlssMode != 0 && g_sl.dlssSupported;
-	g_sl.frameGenerationEnabled = frameGeneration && g_sl.frameGenerationSupported;
+	g_sl.rrEnabled = g_sl.dlssEnabled && g_sl.rrSupported &&
+		ri.Cvar_VariableIntegerValue("r_rayTracing") == 2 &&
+		ri.Cvar_VariableIntegerValue("r_dlssRayReconstruction") != 0;
+	frameGeneration = frameGeneration && g_sl.frameGenerationSupported &&
+		g_sl.frameGenerationPresentationSupported;
+	g_sl.frameGenerationEnabled = frameGeneration != 0;
 	g_sl.frameGenerationActive = false;
 	g_sl.havePreviousCamera = false;
 
@@ -552,6 +740,23 @@ extern "C" qboolean vk_sl_configure(int dlssMode, int frameGeneration, int refle
 				if (renderWidth) *renderWidth = settings.optimalRenderWidth;
 				if (renderHeight) *renderHeight = settings.optimalRenderHeight;
 			}
+		}
+	}
+
+	if (g_sl.rrEnabled) {
+		g_sl.rrOptions.mode = modes[dlssMode];
+		g_sl.rrOptions.outputWidth = outputWidth;
+		g_sl.rrOptions.outputHeight = outputHeight;
+		g_sl.rrOptions.normalRoughnessMode = sl::DLSSDNormalRoughnessMode::ePacked;
+		g_sl.rrOptions.colorBuffersHDR = sl::Boolean::eTrue;
+		sl::DLSSDOptimalSettings settings;
+		if (g_sl.rrGetOptimalSettings(g_sl.rrOptions, settings) == sl::Result::eOk &&
+			settings.optimalRenderWidth && settings.optimalRenderHeight) {
+			if (renderWidth) *renderWidth = settings.optimalRenderWidth;
+			if (renderHeight) *renderHeight = settings.optimalRenderHeight;
+		} else {
+			g_sl.rrEnabled = false;
+			ri.Printf(PRINT_WARNING, "Ray Reconstruction rejected this mode; native reconstruction retained\n");
 		}
 	}
 
@@ -586,14 +791,14 @@ extern "C" qboolean vk_sl_configure(int dlssMode, int frameGeneration, int refle
 	return qtrue;
 }
 
-extern "C" qboolean vk_sl_begin_frame(uint32_t frameIndex)
+extern "C" qboolean vk_sl_begin_frame(void)
 {
 	if (!g_sl.initialized || !g_sl.getNewFrameToken)
 		return qfalse;
 	/* DLSS-G presents asynchronously.  Query the completed previous present at
 	 * the start of the next application frame, as required by NVIDIA's sample. */
 	queryFrameGenerationState();
-	if (g_sl.getNewFrameToken(g_sl.frameToken, &frameIndex) != sl::Result::eOk || !g_sl.frameToken)
+	if (g_sl.getNewFrameToken(g_sl.frameToken, nullptr) != sl::Result::eOk || !g_sl.frameToken)
 		return qfalse;
 	if (g_sl.reflexSleep)
 		g_sl.reflexSleep(*g_sl.frameToken);
@@ -602,7 +807,7 @@ extern "C" qboolean vk_sl_begin_frame(uint32_t frameIndex)
 	return qtrue;
 }
 
-extern "C" qboolean vk_sl_evaluate_dlss(const vk_sl_frame_resources_t *r)
+static qboolean evaluateReconstruction(const vk_sl_frame_resources_t *r, bool rr)
 {
 	if (!r || !g_sl.frameToken || !g_sl.setConstants ||
 		!g_sl.setTagForFrame || !g_sl.evaluateFeature)
@@ -617,6 +822,14 @@ extern "C" qboolean vk_sl_evaluate_dlss(const vk_sl_frame_resources_t *r)
 	copyColumnMajorToRowMajor(worldToCamera, r->view_matrix);
 	sl::float4x4 cameraToWorld;
 	sl::matrixFullInvert(cameraToWorld, worldToCamera);
+	if (rr) {
+		g_sl.rrOptions.worldToCameraView = worldToCamera;
+		g_sl.rrOptions.cameraViewToWorld = cameraToWorld;
+		g_sl.rrOptions.preExposure = 1.0f;
+		g_sl.rrOptions.exposureScale = r->exposure;
+		if (g_sl.rrSetOptions(sl::ViewportHandle(0), g_sl.rrOptions) != sl::Result::eOk)
+			return qfalse;
+	}
 	if (g_sl.havePreviousCamera && !r->reset) {
 		sl::float4x4 cameraToPrevious;
 		sl::float4x4 clipToPreviousCamera;
@@ -629,7 +842,11 @@ extern "C" qboolean vk_sl_evaluate_dlss(const vk_sl_frame_resources_t *r)
 		setIdentity(constants.prevClipToClip);
 	}
 
-	constants.jitterOffset = sl::float2(r->jitter_x, r->jitter_y);
+	// The renderer adds +2*jitter/extent to projection[8:9]. With clip.w=-z
+	// this moves the image by -jitter pixels (and the primary ray sample by
+	// +jitter). NGX expects the IMAGE displacement, not the ray-sample offset.
+	// Passing +jitter made reconstruction double the visible Halton wobble.
+	constants.jitterOffset = sl::float2(-r->jitter_x, -r->jitter_y);
 	constants.mvecScale = sl::float2(1.0f, 1.0f);
 	constants.cameraPinholeOffset = sl::float2(0.0f, 0.0f);
 	constants.cameraPos = sl::float3(r->camera_origin[0], r->camera_origin[1], r->camera_origin[2]);
@@ -646,6 +863,8 @@ extern "C" qboolean vk_sl_evaluate_dlss(const vk_sl_frame_resources_t *r)
 	constants.motionVectors3D = sl::Boolean::eFalse;
 	constants.reset = (!g_sl.havePreviousCamera || r->reset) ? sl::Boolean::eTrue : sl::Boolean::eFalse;
 	constants.motionVectorsJittered = sl::Boolean::eFalse;
+	++g_sl.constantFrames;
+	if (constants.reset == sl::Boolean::eTrue) ++g_sl.constantResets;
 
 	const sl::ViewportHandle viewport(0);
 	if (g_sl.setConstants(constants, *g_sl.frameToken, viewport) != sl::Result::eOk)
@@ -668,9 +887,12 @@ extern "C" qboolean vk_sl_evaluate_dlss(const vk_sl_frame_resources_t *r)
 	describeResource(depth, r->render_width, r->render_height, r->depth_format, depthUsage);
 	describeResource(motion, r->render_width, r->render_height, r->motion_vectors_format, motionUsage);
 
+	// Resource dimensions describe the allocation; tags also describe the
+	// active viewport. Both reconstruction guides cover the full render extent.
+	const sl::Extent renderExtent{0, 0, r->render_width, r->render_height};
 	const sl::ResourceTag commonTags[] = {
-		sl::ResourceTag(&depth, sl::kBufferTypeDepth, sl::ResourceLifecycle::eValidUntilPresent),
-		sl::ResourceTag(&motion, sl::kBufferTypeMotionVectors, sl::ResourceLifecycle::eValidUntilPresent)
+		sl::ResourceTag(&depth, sl::kBufferTypeDepth, sl::ResourceLifecycle::eValidUntilPresent, &renderExtent),
+		sl::ResourceTag(&motion, sl::kBufferTypeMotionVectors, sl::ResourceLifecycle::eValidUntilPresent, &renderExtent)
 	};
 	sl::CommandBuffer *commandBuffer = reinterpret_cast<sl::CommandBuffer *>(r->command_buffer);
 	if (g_sl.setTagForFrame(*g_sl.frameToken, viewport, commonTags,
@@ -697,15 +919,62 @@ extern "C" qboolean vk_sl_evaluate_dlss(const vk_sl_frame_resources_t *r)
 		static_cast<uint32_t>(std::size(scalingTags)), commandBuffer) != sl::Result::eOk)
 		return qfalse;
 	const sl::BaseStructure *inputs[] = { &viewport };
+	if (rr) {
+		sl::Resource guides[4];
+		sl::ResourceTag tags[4];
+		const sl::BufferType types[] = { sl::kBufferTypeAlbedo, sl::kBufferTypeSpecularAlbedo,
+			sl::kBufferTypeNormalRoughness, sl::kBufferTypeSpecularHitDistance };
+		for (unsigned i = 0; i < 4; ++i) {
+			guides[i] = sl::Resource(sl::ResourceType::eTex2d, nativeHandle(r->rr_guides[i]), nullptr,
+				nativeHandle(r->rr_guide_views[i]), VK_IMAGE_LAYOUT_GENERAL);
+			describeResource(guides[i], r->render_width, r->render_height,
+				i == 3 ? VK_FORMAT_R32_SFLOAT : VK_FORMAT_R16G16B16A16_SFLOAT, colorUsage);
+			tags[i] = sl::ResourceTag(&guides[i], types[i], sl::ResourceLifecycle::eValidUntilPresent, &renderExtent);
+		}
+		if (g_sl.setTagForFrame(*g_sl.frameToken, viewport, tags, 4, commandBuffer) != sl::Result::eOk)
+			return qfalse;
+		g_sl.rrAttempted = true;
+		const sl::Result result = g_sl.evaluateFeature(sl::kFeatureDLSS_RR, *g_sl.frameToken, inputs, 1, commandBuffer);
+		if (result != sl::Result::eOk) {
+			ri.Printf(PRINT_WARNING, "Ray Reconstruction evaluation failed (%d); native reconstruction retained\n", (int)result);
+			return qfalse;
+		}
+		if (!g_sl.rrFrames++) ri.Printf(PRINT_ALL, "NVIDIA DLSS Ray Reconstruction active: %ux%u -> %ux%u\n",
+			r->render_width, r->render_height, r->output_width, r->output_height);
+		return qtrue;
+	}
+	g_sl.dlssEvaluationAttempted = true;
 	const bool ok = g_sl.evaluateFeature(sl::kFeatureDLSS, *g_sl.frameToken, inputs,
 		static_cast<uint32_t>(std::size(inputs)), commandBuffer) == sl::Result::eOk;
 	return ok ? qtrue : qfalse;
 }
 
+extern "C" qboolean vk_sl_evaluate_dlss(const vk_sl_frame_resources_t *r)
+{
+	if (g_sl.rrAttempted && g_sl.rrSetOptions) {
+		sl::DLSSDOptions off = g_sl.rrOptions;
+		off.mode = sl::DLSSMode::eOff;
+		g_sl.rrSetOptions(sl::ViewportHandle(0), off);
+	}
+	return evaluateReconstruction(r, false);
+}
+
+extern "C" qboolean vk_sl_evaluate_ray_reconstruction(const vk_sl_frame_resources_t *r)
+{
+	if (!g_sl.rrEnabled) return qfalse;
+	if (evaluateReconstruction(r, true)) return qtrue;
+	g_sl.rrEnabled = false; // No repeated failing initialization/evaluation every frame.
+	g_sl.havePreviousCamera = false;
+	sl::DLSSDOptions off = g_sl.rrOptions;
+	off.mode = sl::DLSSMode::eOff;
+	g_sl.rrSetOptions(sl::ViewportHandle(0), off);
+	return qfalse;
+}
+
 extern "C" void vk_sl_configure_neural_rendering(int mode, uint32_t width,
 	uint32_t height)
 {
-	vk_dlssnr_configure(mode, width, height);
+	vk_dlssnr_configure(g_sl.rrEnabled ? 0 : mode, width, height);
 }
 
 extern "C" qboolean vk_sl_prepare_neural_rendering(VkCommandBuffer commandBuffer)
@@ -764,6 +1033,8 @@ extern "C" void vk_sl_set_frame_generation_active(qboolean active)
 		ri.Printf(PRINT_WARNING, "NVIDIA DLSS Frame Generation could not be %s (result %d)\n",
 			enable ? "enabled" : "disabled", (int)result);
 		g_sl.frameGenerationActive = false;
+	} else if (enable) {
+		g_sl.frameGenerationResourcesAllocated = true;
 	}
 }
 
@@ -790,8 +1061,11 @@ extern "C" void vk_sl_mark_present(qboolean start)
 
 extern "C" qboolean vk_sl_initialize(void) { return qfalse; }
 extern "C" qboolean vk_sl_verify_nvidia_signature(const wchar_t *) { return qfalse; }
+extern "C" void vk_sl_release_frame_resources(void) {}
 extern "C" void vk_sl_shutdown(void) {}
 extern "C" void vk_sl_unload(void) {}
+extern "C" void vk_sl_info_f(void) { ri.Printf(PRINT_ALL, "NVIDIA support is not compiled into this renderer\n"); }
+extern "C" void vk_sl_set_frame_generation_presentation_supported(qboolean) {}
 extern "C" qboolean vk_sl_is_initialized(void) { return qfalse; }
 extern "C" uint32_t vk_sl_instance_extension_count(void) { return 0; }
 extern "C" const char *vk_sl_instance_extension(uint32_t) { return nullptr; }
@@ -801,6 +1075,7 @@ extern "C" void vk_sl_check_feature_support(VkInstance, VkPhysicalDevice, VkDevi
 extern "C" void *vk_sl_get_instance_proc_addr(VkInstance, const char *) { return nullptr; }
 extern "C" void *vk_sl_get_device_proc_addr(VkDevice, const char *) { return nullptr; }
 extern "C" qboolean vk_sl_dlss_supported(void) { return qfalse; }
+extern "C" qboolean vk_sl_ray_reconstruction_enabled(void) { return qfalse; }
 extern "C" qboolean vk_sl_neural_rendering_supported(void) { return qfalse; }
 extern "C" qboolean vk_sl_frame_generation_supported(void) { return qfalse; }
 extern "C" qboolean vk_sl_reflex_supported(void) { return qfalse; }
@@ -808,8 +1083,9 @@ extern "C" const char *vk_sl_status(void) { return "NVIDIA Streamline was not in
 extern "C" qboolean vk_sl_configure(int, int, int, uint32_t w, uint32_t h, uint32_t *rw, uint32_t *rh) {
 	if (rw) *rw = w; if (rh) *rh = h; return qfalse;
 }
-extern "C" qboolean vk_sl_begin_frame(uint32_t) { return qfalse; }
+extern "C" qboolean vk_sl_begin_frame(void) { return qfalse; }
 extern "C" qboolean vk_sl_evaluate_dlss(const vk_sl_frame_resources_t *) { return qfalse; }
+extern "C" qboolean vk_sl_evaluate_ray_reconstruction(const vk_sl_frame_resources_t *) { return qfalse; }
 extern "C" void vk_sl_configure_neural_rendering(int, uint32_t, uint32_t) {}
 extern "C" qboolean vk_sl_prepare_neural_rendering(VkCommandBuffer) { return qfalse; }
 extern "C" qboolean vk_sl_evaluate_neural_rendering(const vk_sl_frame_resources_t *) { return qfalse; }

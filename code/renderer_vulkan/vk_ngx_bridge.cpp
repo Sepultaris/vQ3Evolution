@@ -15,6 +15,7 @@ typedef uint32_t (__cdecl *ngx_populate_t)(void *);
 typedef uint32_t (__cdecl *ngx_create_t)(void *, int, void *, void **);
 typedef uint32_t (__cdecl *ngx_evaluate_t)(void *, const void *, const void *, void *);
 typedef uint32_t (__cdecl *ngx_release_t)(void *);
+typedef uint32_t (__cdecl *ngx_shutdown_vk_t)(void *);
 
 #if defined(__GNUC__)
 #define BRIDGE_NOINLINE __attribute__((noinline, optimize("O0")))
@@ -71,6 +72,15 @@ NVNGXBridge_VULKAN_ReleaseFeature(ngx_release_t release, void *handle)
 {
 	if (!release || !handle) return 0xBAD00005UL;
 	volatile uint32_t result = release(handle);
+	MemoryBarrier();
+	return result;
+}
+
+extern "C" __declspec(dllexport) BRIDGE_NOINLINE uint32_t __cdecl
+NVNGXBridge_VULKAN_Shutdown1(ngx_shutdown_vk_t shutdown, void *device)
+{
+	if (!shutdown || !device) return 0xBAD00005UL;
+	volatile uint32_t result = shutdown(device);
 	MemoryBarrier();
 	return result;
 }

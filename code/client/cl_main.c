@@ -133,6 +133,8 @@ qboolean			cl_oldGameSet;
 
 // Structure containing functions exported from refresh DLL
 refexport_t	re;
+static qboolean videoRestartPending;
+static int videoRestartNotBefore;
 #ifdef USE_RENDERER_DLOPEN
 static void	*rendererLib = NULL;
 #endif
@@ -1928,6 +1930,9 @@ doesn't know what graphics to reload
 =================
 */
 void CL_Vid_Restart_f( void ) {
+	// A manual restart also satisfies an outstanding recovery/resize request.
+	videoRestartPending = qfalse;
+	videoRestartNotBefore = 0;
 
 	// Settings may have changed so stop recording now
 	if( CL_VideoRecording( ) ) {
@@ -1993,11 +1998,30 @@ void CL_Vid_Restart_f( void ) {
 
 /*
 =================
-CL_Snd_Restart
+Deferred video recovery
 
-Restart the sound subsystem
+Only CL_CheckVideoRestart, at the outer engine frame boundary, consumes requests.
 =================
 */
+void CL_RequestVideoRestart( int delayMsec )
+{
+	// Never run commands here: this import can be called from inside a VM's
+	// screen update, image acquisition, or presentation on the renderer stack.
+	if (!videoRestartPending || delayMsec > 0)
+		videoRestartNotBefore = Sys_Milliseconds() + MAX(0, delayMsec);
+	videoRestartPending = qtrue;
+}
+
+void CL_CheckVideoRestart( void )
+{
+	if (!videoRestartPending || !com_cl_running || !com_cl_running->integer ||
+		Cvar_VariableIntegerValue("com_minimized") ||
+		Sys_Milliseconds() - videoRestartNotBefore < 0)
+		return;
+	Com_Printf("Video recovery: restarting at engine frame boundary\n");
+	CL_Vid_Restart_f();
+}
+
 void CL_Snd_Shutdown(void)
 {
 	S_Shutdown();
@@ -3101,6 +3125,9 @@ CL_ShutdownRef
 ============
 */
 void CL_ShutdownRef( void ) {
+	// Requests belong to the old renderer/window, not its replacement.
+	videoRestartPending = qfalse;
+	videoRestartNotBefore = 0;
 	if ( re.Shutdown ) {
 		re.Shutdown( qtrue );
 	}
@@ -3238,6 +3265,7 @@ void CL_InitRef( void ) {
 	ri.Cmd_Argc = Cmd_Argc;
 	ri.Cmd_Argv = Cmd_Argv;
 	ri.Cmd_ExecuteText = Cbuf_ExecuteText;
+	ri.RequestVideoRestart = CL_RequestVideoRestart;
 	ri.Printf = CL_RefPrintf;
 	ri.Error = Com_Error;
 	ri.Milliseconds = CL_ScaledMilliseconds;
@@ -3663,6 +3691,7 @@ void CL_Init( void ) {
 	//
 	// register our commands
 	//
+	CL_OptionsInit();
 	Cmd_AddCommand ("cmd", CL_ForwardToServer_f);
 	Cmd_AddCommand ("configstrings", CL_Configstrings_f);
 	Cmd_AddCommand ("clientinfo", CL_Clientinfo_f);
@@ -3731,6 +3760,8 @@ void CL_Shutdown(char *finalmsg, qboolean disconnect, qboolean quit)
 	recursive = qtrue;
 
 	noGameRestart = quit;
+	CL_OptionsSaveGlobal();
+	CL_OptionsShutdown();
 
 	if(disconnect)
 		CL_Disconnect(qtrue);

@@ -1,0 +1,3 @@
+// A data-only shared profile used to verify precedence over per-game scales.
+ui_scale 0.75
+cg_hudScale 0.75

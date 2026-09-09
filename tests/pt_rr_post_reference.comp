@@ -1,0 +1,36 @@
+// Frozen pre-tile display/sharpening math for same-input GPU equivalence tests.
+#version 460
+#extension GL_GOOGLE_include_directive : require
+layout(local_size_x=8,local_size_y=8) in;
+#include "pt_rr_images.glsl"
+#include "pt_rr_sampling_buffers.glsl"
+layout(push_constant) uniform Constants {
+    vec4 originNear, forwardFar, rightProjection, upProjection;
+    vec4 sunExposure, parameters, sunRadiance, sampling;
+} pc;
+vec3 displayColor(ivec2 p) {
+    vec3 x=imageLoad(rrOutput,clamp(p,ivec2(0),imageSize(rrOutput)-1)).rgb;
+    if(any(isnan(x)) || any(isinf(x))) x=vec3(0);
+    x=max(x*pc.sunExposure.w,0);
+    return pow(clamp((x*(2.51*x+0.03))/(x*(2.43*x+0.59)+0.14),0,1),vec3(1.0/2.2));
+}
+void main() {
+    ivec2 p=ivec2(gl_GlobalInvocationID.xy);
+    if(any(greaterThanEqual(p,imageSize(rrOutput)))) return;
+    vec3 c=displayColor(p);
+    if(pc.parameters.x>0) {
+        vec3 n=displayColor(p+ivec2(0,-1)), s=displayColor(p+ivec2(0,1));
+        vec3 e=displayColor(p+ivec2(1,0)), w=displayColor(p+ivec2(-1,0));
+        vec3 lo=min(c,min(min(n,s),min(e,w))), hi=max(c,max(max(n,s),max(e,w)));
+        vec3 a=sqrt(clamp(min(lo,1-hi)/max(hi,vec3(1.0/65535.0)),0,1));
+        vec3 weight=a*(-0.2*clamp(pc.parameters.x,0,1));
+        c=(c+weight*(n+s+e+w))/(1+4*weight);
+    }
+    imageStore(rrDisplay,p,vec4(clamp(c,0,1),1));
+    if(pc.parameters.y!=0) {
+        ivec2 size=imageSize(rrNoisy);
+        ivec2 inputPixel=min(ivec2((vec2(p)+0.5)*vec2(size)/vec2(imageSize(rrOutput))),size-1);
+        float fraction=rrAdaptive[inputPixel.y*size.x+inputPixel.x].w/pc.sampling.x;
+        imageStore(rrDisplay,p,vec4(fraction>0.75 ? vec3(1,0,0):vec3(0,1,0),1));
+    }
+}

@@ -107,9 +107,10 @@ void vk_shutdown(void)
 
 	vk_temporal_shutdown();
 
-    vk_destroyDepthAttachment();
-
     vk_destroyFrameBuffers();
+
+    // Framebuffers reference the depth view; destroy their owner first.
+    vk_destroyDepthAttachment();
 
     vk_destroy_shading_data();
 
@@ -122,6 +123,13 @@ void vk_shutdown(void)
 //
     vk_destroy_commands();
 
+	/* Surface hooks own the HWND association; remove it before unloading the
+	 * plugins. All swapchains using the surface have already been destroyed. */
+	if (vk.surface) {
+		ri.Printf(PRINT_ALL, " Destroy routed surface before Streamline shutdown\n");
+		qvkDestroySurfaceKHR(vk.instance, vk.surface, NULL);
+		vk.surface = VK_NULL_HANDLE;
+	}
 	/* Streamline owns Vulkan-side objects and must stop before the device. */
 	vk_sl_shutdown();
 	vk_clearProcAddress();

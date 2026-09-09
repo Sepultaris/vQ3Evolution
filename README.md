@@ -2,7 +2,7 @@
 
 VQ3 Evolution is a modernized Quake III Arena source port centered on a native
 Vulkan renderer, correct widescreen presentation, scalable interface rendering,
-and optional NVIDIA neural-rendering features. Engine and interface changes are
+and optional NVIDIA rendering/reconstruction features. Engine and interface changes are
 implemented in source code; they are not shipped as replacement PK3 files.
 
 The project is derived from vkQuake3 and ioquake3 and remains compatible with
@@ -14,24 +14,49 @@ network protocols.
 - Vulkan, OpenGL 1, and OpenGL 2 renderers
 - Hor+ widescreen and ultrawide field of view without stretching
 - Edge-aware HUD placement and independent 50%-150% HUD and UI scaling
+- Engine-owned rendering/interface options available in Team Arena and mods,
+  with shared settings and compatibility scaling for older modules
 - NVIDIA DLSS Super Resolution and DLAA
-- DLSS Frame Generation and NVIDIA Reflex
+- Experimental DLSS Frame Generation integration and NVIDIA Reflex
 - Experimental DLSS Neural Rendering with live strength controls
 - NVIDIA RTX ray-query shadows cast by live world and model geometry
-- Experimental native path-traced world lighting (unfinished; see [status](docs/PATH_TRACING.md))
+- Experimental native path-traced world lighting (unfinished; see [current status](docs/STATUS.md))
+- DLSS Ray Reconstruction, including native-resolution DLAA; requested by default
+  when supported path tracing and DLSS/DLAA are selected
 - Separate diffuse/reflection reconstruction, texture-driven PBR materials, and native refractive glass/water
 - Native surface-aware denoising with camera/object history and path-hit DLSS inputs
+- Local lighting-change reconstruction, planar-mirror target motion, and native blue-noise/spatial light sampling
 - Animated path materials, layered additive emitters, cutouts and thin transparency (experimental)
 - Native Vulkan post-DLSS contrast-adaptive sharpening
 - Bilinear, trilinear, and 2x/4x/8x/16x anisotropic texture filtering
 - Native source-built game, cgame, and UI modules
 - OpenAL audio, Ogg Vorbis/Opus, VoIP, Mumble integration, and SDL 2 input
 
+The path tracer defaults to **two fixed samples**, adaptive sampling off, and
+four bounces; saved values are preserved. Ray Reconstruction and experimental
+Neural Rendering are different features: NR is bypassed while RR runs.
+
+NVIDIA shutdown, Frame Generation/restart reliability, some Vulkan validation
+paths and complex material/motion cases remain open. Recent performance results
+include timed-out diagnostics and are not general FPS guarantees. See
+[current status](docs/STATUS.md) and the [documentation index](docs/README.md).
+
 ## Game data
 
 VQ3 Evolution does not include Quake III Arena assets. A legal copy of the game
 is required. Place the required `pak*.pk3` files in the `baseq3` directory beside
-the built executable. Team Arena data belongs in `missionpack`.
+the built executable. Team Arena requires its own `missionpack/pak0.pk3` plus
+`missionpack/pak1.pk3`, `pak2.pk3`, and `pak3.pk3`. The latter three are the
+Team Arena point-release updates; a Steam installation may contain only `pak0`.
+Obtain the missing updates from the [official patch-data page](https://ioquake3.org/extras/patch-data/)
+after accepting its license, and copy only the archive's `missionpack` packs
+into the `missionpack` directory beside `vQ3Evolution.exe`. Do not put the
+`baseq3` update packs in `missionpack` or rename them to satisfy the check.
+
+Launch **TEAM ARENA** from the main menu, or start
+`vQ3Evolution.exe +set fs_game missionpack`. The source-built Team Arena modules
+are included in the normal build; the original game/update assets remain
+separate from engine and renderer changes.
 
 Game data, local configurations, screenshots, demos, logs, downloaded SDKs, and
 compiled build trees are excluded from Git.
@@ -79,6 +104,12 @@ a legitimately obtained, NVIDIA-signed `nvngx_dlssnr.dll` beside
 See [docs/DLSS.md](docs/DLSS.md) for architecture, settings, runtime requirements,
 and verification details.
 
+For a build without NVIDIA integration, omit the fetch step and set
+`USE_NVIDIA_DLSS=0` in the build command. Raster and hardware-capable native
+path-tracing paths do not require the optional NVIDIA runtime. The Vulkan SDK
+is needed to regenerate shaders, not to link the checked-in embedded payloads;
+see [testing/build checks](docs/TESTING.md).
+
 ## Selecting the renderer
 
 Open the in-game console and enter:
@@ -93,7 +124,18 @@ and driver information.
 
 ## Graphics and interface settings
 
-The Graphics Options menu exposes these controls directly:
+Press **Shift+F10** or enter `/vq3e_options` for the engine-owned options panel.
+It works in loaded games, Team Arena and mods without replacing their menus.
+Display, Lighting, NVIDIA and Interface settings are staged until **Apply**,
+and are shared across game folders. Existing menus and console commands remain
+available. See [Universal options](docs/UNIVERSAL_OPTIONS.md) for persistence,
+legacy scaling, controls and compatibility limits.
+
+True Combat 0.45 has a separate bug in its own widescreen menu calculations.
+An optional, version-checked [mod UI patch](docs/TRUECOMBAT_PATCH.md) restores its
+cursor and map thumbnails without changing the engine or gameplay modules.
+
+The original base-game Graphics Options menu also exposes these controls:
 
 | Control | Console setting | Range |
 | --- | --- | --- |
@@ -102,7 +144,9 @@ The Graphics Options menu exposes these controls directly:
 | Texture Filtering | `r_textureMode`, `r_ext_max_anisotropy` | Bilinear through anisotropic 16x |
 | NVIDIA RTX Mode | `r_rayTracing` | Off / Shadows / Path tracing (WIP) |
 | RTX Shadow Strength | `r_rayTracingShadowStrength` | 0.0-1.0 |
+| RTX Exposure (Path tracing mode) | `r_pathTracingExposure` | 0.0625x-16x, quarter-stop slider; Reset = 1x |
 | DLSS Mode | `r_dlss` | Off, Quality, Balanced, Performance, Ultra Performance, DLAA |
+| DLSS Ray Reconstruction | `r_dlssRayReconstruction` | Off/On; path tracing plus supported DLSS/DLAA required |
 | DLSS Sharpness | `r_dlssSharpness` | 0.0-1.0 |
 | Neural Rendering | `r_dlssNeuralRendering` | Off or model 1-3 |
 | NR Intensity | `r_dlssNRIntensity` | 0.0-2.0 |
@@ -112,10 +156,16 @@ The Graphics Options menu exposes these controls directly:
 | Frame Generation | `r_dlssFrameGeneration` | Off/On |
 | NVIDIA Reflex | `r_reflex` | Off, On, On + Boost |
 
-HUD, UI, sharpening, RTX shadow strength, and Neural Rendering strength controls
+HUD, UI, sharpening, RTX exposure/shadow strength, and Neural Rendering strength controls
 update live. Renderer mode changes, including enabling RTX shadows, apply after a
 renderer restart. See [docs/RTX.md](docs/RTX.md) for hardware requirements,
 architecture, controls, and current scope.
+
+In Path tracing mode, **RTX Exposure** occupies the shadow-strength row. Raise it
+to brighten the scene (2x is one stop brighter, 4x is two); **Reset** restores 1x.
+It affects scene tone mapping, not the HUD or menu brightness, and is saved
+automatically. You can also enter `/r_pathTracingExposure 2` in the console for
+an immediate adjustment, with no renderer restart.
 
 ## Linux and macOS
 
@@ -132,10 +182,15 @@ platforms. NVIDIA Streamline integration is currently limited to Windows x64.
 - `code/game`: server-side game code
 - `docs`: VQ3 Evolution feature documentation and third-party notices
 - `tools`: project build and dependency helpers
+- `tests`: offline fixtures, shader checks and opt-in GPU scenarios
 - `misc`: inherited platform and packaging support
 
-Generated files belong under `build` or a `build-*` directory and must not be
-committed. `Makefile.local` is reserved for developer-specific build settings.
+Build output belongs under `build` or a `build-*` directory and must not be
+committed. The deliberate exceptions are the embedded shader payloads under
+`code/renderer_vulkan/shaders/Compiled` and the generated blue-noise source
+header: they are build inputs kept in sync with their generators/sources.
+`Makefile.local` is reserved for developer-specific build settings. Follow the
+[commit checks](docs/TESTING.md#repository-checks) before staging changes.
 
 ## Upstream lineage and licensing
 

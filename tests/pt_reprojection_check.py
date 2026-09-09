@@ -25,6 +25,30 @@ def compatible(previous, world, old_normal, normal, old_material, material, foot
 
 
 class ReprojectionTests(unittest.TestCase):
+    def test_virtual_mirror_target_matches_reflection_law_and_motion(self):
+        plane, n = [300, 0, 0], [-1, 0, 0]
+        def mirror(p):
+            distance = dot([a-b for a,b in zip(p,plane)], n)
+            return [a-2*distance*b for a,b in zip(p,n)]
+        for size in ((640, 360), (3440, 1440)):
+            camera = ([0, 0, 0], [1, 0, 0], [0, -1, 0], [0, 0, 1], [1, -size[0]/size[1]], [0, 0], size)
+            target, previous = [-100, 40, 20], [-100, 15, 25]
+            virtual, old_virtual = mirror(target), mirror(previous)
+            self.assertEqual(virtual, [700, 40, 20])
+            hit = [p*300/virtual[0] for p in virtual]
+            incoming = [p/math.sqrt(dot(hit,hit)) for p in hit]
+            reflected = [a-2*dot(incoming,n)*b for a,b in zip(incoming,n)]
+            to_target = [a-b for a,b in zip(target,hit)]
+            for a,b in zip(reflected,to_target):
+                self.assertAlmostEqual(a,b/math.sqrt(dot(to_target,to_target)))
+            new_pixel, old_pixel = project(virtual,*camera), project(old_virtual,*camera)
+            self.assertGreater(abs(new_pixel[0]-old_pixel[0]), 10)
+            # A stationary mirror-interface vector is zero for a fixed camera;
+            # it cannot represent this moving reflection.
+            self.assertNotEqual(new_pixel,old_pixel)
+            np = project(mirror(mirror(target)),*camera)
+            self.assertIsNone(np)  # Real object is behind the camera.
+
     def test_deforming_triangle_uses_previous_barycentric_position(self):
         old = [[100, -10, 0], [100, 10, 0], [100, 0, 20]]
         # Translation plus a non-rigid pose change cannot be represented by

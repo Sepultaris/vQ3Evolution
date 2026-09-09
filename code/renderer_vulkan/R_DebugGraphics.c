@@ -1,4 +1,5 @@
 #include "tr_globals.h"
+#include "vk_frame.h"
 #include "vk_shade_geometry.h"
 #include "vk_instance.h"
 #include "vk_image.h"
@@ -103,6 +104,7 @@ void R_DebugGraphics( void )
 	if ( tr.registered ) {
 		R_IssueRenderCommands( qfalse );
 	}
+	if (!vk_frame_active()) return;
 
 	updateCurDescriptor( tr.whiteImage->descriptor_set, 0);
 	ri.CM_DrawDebugSurface( R_DebugPolygon );

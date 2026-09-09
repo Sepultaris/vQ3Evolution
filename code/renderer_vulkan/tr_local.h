@@ -802,6 +802,8 @@ typedef struct shaderCommands_s
 	vec2_t		texCoords[SHADER_MAX_VERTEXES][2];
 	color4ub_t	vertexColors[SHADER_MAX_VERTEXES];
 	int			vertexDlightBits[SHADER_MAX_VERTEXES];
+	uint32_t    rayPolyIds[SHADER_MAX_VERTEXES];
+	qboolean    rayDynamicPolys; // Submitted scene polygons, not cached BSP surfaces.
 
 	stageVars_t	svars;
 

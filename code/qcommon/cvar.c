@@ -147,6 +147,11 @@ char *Cvar_VariableString( const char *var_name ) {
 Cvar_VariableStringBuffer
 ============
 */
+const char *Cvar_PendingString(const char *var_name) {
+	cvar_t *var=Cvar_FindVar(var_name);
+	return var ? (var->latchedString ? var->latchedString:var->string):"";
+}
+
 void Cvar_VariableStringBuffer( const char *var_name, char *buffer, int bufsize ) {
 	cvar_t *var;
 	

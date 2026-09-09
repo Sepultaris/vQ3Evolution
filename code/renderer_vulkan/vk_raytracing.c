@@ -6,6 +6,8 @@
 #include "vk_image.h"
 #include "vk_raytracing.h"
 #include "vk_pathtrace.h"
+#include "R_Parser.h"
+#include <float.h>
 #include <string.h>
 
 #define RT_MAX_VERTICES (768u * 1024u)
@@ -51,6 +53,8 @@ typedef struct {
 	rt_acceleration_structure_t blas;
 	rt_acceleration_structure_t world_blas, weapon_blas;
 	qboolean world_built;
+	qboolean world_upload_pending;
+	VkDeviceSize scene_upload_bytes;
 	uint32_t world_opaque_indices;
 	rt_acceleration_structure_t tlas;
 	VkSampler sampler;
@@ -72,6 +76,10 @@ static VkPhysicalDeviceBufferDeviceAddressFeatures rt_bda_features;
 static VkPhysicalDeviceAccelerationStructureFeaturesKHR rt_as_features;
 static VkPhysicalDeviceRayQueryFeaturesKHR rt_query_features;
 static VkPhysicalDeviceDescriptorIndexingFeatures rt_texture_features;
+static VkPhysicalDeviceShaderClockFeaturesKHR rt_clock_features;
+static qboolean rt_shader_clock;
+static VkPhysicalDevicePipelineExecutablePropertiesFeaturesKHR rt_executable_features;
+static qboolean rt_pipeline_statistics;
 
 static const char *rt_extensions[] = {
 	VK_KHR_DEFERRED_HOST_OPERATIONS_EXTENSION_NAME,
@@ -100,6 +108,9 @@ qboolean vk_rt_configure_device(VkPhysicalDevice physical_device,
 
 	rt.device_supported = qfalse;
 	rt.path_supported = qfalse;
+	rt_shader_clock = qfalse;
+	rt_pipeline_statistics = qfalse;
+	memset(&rt_executable_features, 0, sizeof(rt_executable_features));
 	if (device_features)
 		*device_features = NULL;
 	if (!get_features2)
@@ -126,6 +137,11 @@ qboolean vk_rt_configure_device(VkPhysicalDevice physical_device,
 	rt_bda_features.pNext = &rt_as_features;
 	rt_as_features.pNext = &rt_query_features;
 	rt_query_features.pNext = &rt_texture_features;
+	memset(&rt_clock_features, 0, sizeof(rt_clock_features));
+	if (has_extension(extensions, extension_count, VK_KHR_SHADER_CLOCK_EXTENSION_NAME)) {
+		rt_clock_features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_CLOCK_FEATURES_KHR;
+		rt_texture_features.pNext = &rt_clock_features;
+	}
 	get_features2(physical_device, &features);
 	qvkGetPhysicalDeviceProperties(physical_device, &properties);
 	rt.path_supported = rt_texture_features.shaderSampledImageArrayNonUniformIndexing &&
@@ -133,16 +149,23 @@ qboolean vk_rt_configure_device(VkPhysicalDevice physical_device,
 		properties.limits.maxPerStageDescriptorSampledImages >= PT_MAX_TEXTURES + 2 &&
 		properties.limits.maxDescriptorSetSamplers >= PT_MAX_TEXTURES + 2 &&
 		properties.limits.maxDescriptorSetSampledImages >= PT_MAX_TEXTURES + 2 &&
-		properties.limits.maxPerStageDescriptorStorageBuffers >= 27 &&
-		properties.limits.maxDescriptorSetStorageBuffers >= 27 &&
+		properties.limits.maxPerStageDescriptorStorageBuffers >= 41 &&
+		properties.limits.maxDescriptorSetStorageBuffers >= 41 &&
 		properties.limits.maxPerStageDescriptorStorageImages >= 3 &&
 		properties.limits.maxDescriptorSetStorageImages >= 3 &&
-		properties.limits.maxPerStageResources >= PT_MAX_TEXTURES + 33;
+		properties.limits.maxPerStageResources >= PT_MAX_TEXTURES + 47;
 	if (!rt_bda_features.bufferDeviceAddress ||
 		!rt_as_features.accelerationStructure || !rt_query_features.rayQuery)
 		return qfalse;
 
 	/* Request the ray capabilities and, when supported, nonuniform material textures. */
+	/* Diagnostics are optional and need one extra storage descriptor/set. */
+	rt_shader_clock = rt.path_supported && rt_clock_features.shaderSubgroupClock &&
+		properties.limits.maxPerStageDescriptorStorageBuffers >= 42 &&
+		properties.limits.maxDescriptorSetStorageBuffers >= 42 &&
+		properties.limits.maxBoundDescriptorSets >= 2 &&
+		properties.limits.maxPerStageResources >= PT_MAX_TEXTURES + 48;
+	memset(&rt_clock_features, 0, sizeof(rt_clock_features));
 	memset(&rt_bda_features, 0, sizeof(rt_bda_features));
 	memset(&rt_as_features, 0, sizeof(rt_as_features));
 	memset(&rt_query_features, 0, sizeof(rt_query_features));
@@ -163,9 +186,22 @@ qboolean vk_rt_configure_device(VkPhysicalDevice physical_device,
 		rt_texture_features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DESCRIPTOR_INDEXING_FEATURES;
 		rt_texture_features.shaderSampledImageArrayNonUniformIndexing = VK_TRUE;
 		rt_query_features.pNext = &rt_texture_features;
+		if (rt_shader_clock) {
+			rt_clock_features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_CLOCK_FEATURES_KHR;
+			rt_clock_features.shaderSubgroupClock = VK_TRUE;
+			rt_texture_features.pNext = &rt_clock_features;
+		}
 	}
+	if (has_extension(extensions, extension_count, VK_KHR_PIPELINE_EXECUTABLE_PROPERTIES_EXTENSION_NAME)) {
+		VkPhysicalDeviceFeatures2 executable_query = { .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2 };
+		rt_executable_features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PIPELINE_EXECUTABLE_PROPERTIES_FEATURES_KHR;
+		executable_query.pNext = &rt_executable_features;
+		get_features2(physical_device, &executable_query);
+		rt_pipeline_statistics = rt_executable_features.pipelineExecutableInfo != 0;
+	}
+	if (rt_pipeline_statistics) rt_executable_features.pNext = &rt_bda_features;
 	if (device_features)
-		*device_features = &rt_bda_features;
+		*device_features = rt_pipeline_statistics ? (void *)&rt_executable_features : (void *)&rt_bda_features;
 	rt.device_supported = qtrue;
 	return qtrue;
 }
@@ -173,12 +209,26 @@ qboolean vk_rt_configure_device(VkPhysicalDevice physical_device,
 uint32_t vk_rt_device_extension_count(void)
 {
 	return rt.device_supported ?
-		(uint32_t)(sizeof(rt_extensions) / sizeof(rt_extensions[0])) : 0;
+		(uint32_t)(sizeof(rt_extensions) / sizeof(rt_extensions[0])) + (rt_shader_clock ? 1 : 0) + (rt_pipeline_statistics ? 1 : 0) : 0;
 }
 
 const char *vk_rt_device_extension(uint32_t index)
 {
-	return index < vk_rt_device_extension_count() ? rt_extensions[index] : NULL;
+	if (index >= vk_rt_device_extension_count()) return NULL;
+	if (index < ARRAY_LEN(rt_extensions)) return rt_extensions[index];
+	index -= ARRAY_LEN(rt_extensions);
+	if (rt_shader_clock && index == 0) return VK_KHR_SHADER_CLOCK_EXTENSION_NAME;
+	return VK_KHR_PIPELINE_EXECUTABLE_PROPERTIES_EXTENSION_NAME;
+}
+
+qboolean vk_rt_pipeline_statistics_supported(void)
+{
+	return rt_pipeline_statistics;
+}
+
+qboolean vk_rt_shader_clock_supported(void)
+{
+	return rt_shader_clock;
 }
 
 qboolean vk_rt_supported(void)
@@ -253,14 +303,17 @@ static void free_world_geometry(void)
 	rt.world_vertex_count = 0;
 	rt.world_index_count = 0;
 	rt.world_built = qfalse;
+	rt.world_upload_pending = qtrue;
 	rt.world_ray_distance = 8192.0f;
 }
+
+#include "pt_world_mirror.h"
 
 static qboolean world_surface_counts(const msurface_t *surface,
 	uint32_t *vertices, uint32_t *indices)
 {
 	if (!surface || !surface->data || !surface->shader ||
-		(r_rayTracing->integer == 2 ? (surface->shader->sort == SS_PORTAL ||
+		(r_rayTracing->integer == 2 ? ((surface->shader->sort == SS_PORTAL && !world_surface_is_mirror(surface)) ||
             surface->shader->sort == SS_FOG || surface->shader->sort == SS_STENCIL_SHADOW) :
 		(surface->shader->sort > SS_OPAQUE || surface->shader->isSky)))
 		return qfalse;
@@ -301,6 +354,7 @@ void vk_rt_load_world(void)
 	uint32_t index_count = 0;
 	uint32_t vertex_cursor = 0;
 	uint32_t index_cursor = 0;
+	uint32_t mirror_surfaces = 0;
 	int i;
 
 	free_world_geometry();
@@ -348,6 +402,7 @@ void vk_rt_load_world(void)
 		if (!world_surface_counts(surface, &vertices, &indices))
 			continue;
 		vk_pt_world_surface(index_cursor, indices, surface->shader);
+		if (surface->shader->sort == SS_PORTAL) ++mirror_surfaces;
 		switch (*surface->data) {
 		case SF_FACE: {
 			const srfSurfaceFace_t *face = (const srfSurfaceFace_t *)surface->data;
@@ -356,7 +411,8 @@ void vk_rt_load_world(void)
 			for (j = 0; j < vertices; ++j) {
 				memcpy(&rt.world_vertices[(vertex_cursor + j) * 3],
 					face->points[j], sizeof(float) * 3);
-				vk_pt_world_vertex(vertex_cursor + j, face->plane.normal, &face->points[j][3]);
+				vk_pt_world_vertex(vertex_cursor + j, face->plane.normal, &face->points[j][3],
+					((const byte *)&face->points[j][7])[3]);
 			}
 			for (j = 0; j < indices; ++j)
 				rt.world_indices[index_cursor + j] = base + source_indices[j];
@@ -368,7 +424,8 @@ void vk_rt_load_world(void)
 			for (j = 0; j < vertices; ++j) {
 				memcpy(&rt.world_vertices[(vertex_cursor + j) * 3],
 					grid->verts[j].xyz, sizeof(float) * 3);
-				vk_pt_world_vertex(vertex_cursor + j, grid->verts[j].normal, grid->verts[j].st);
+				vk_pt_world_vertex(vertex_cursor + j, grid->verts[j].normal, grid->verts[j].st,
+					grid->verts[j].color[3]);
 			}
 			for (y = 0; y < grid->height - 1; ++y) {
 				for (x = 0; x < grid->width - 1; ++x) {
@@ -392,7 +449,8 @@ void vk_rt_load_world(void)
 			for (j = 0; j < vertices; ++j) {
 				memcpy(&rt.world_vertices[(vertex_cursor + j) * 3],
 					triangles->verts[j].xyz, sizeof(float) * 3);
-				vk_pt_world_vertex(vertex_cursor + j, triangles->verts[j].normal, triangles->verts[j].st);
+				vk_pt_world_vertex(vertex_cursor + j, triangles->verts[j].normal, triangles->verts[j].st,
+					triangles->verts[j].color[3]);
 			}
 			for (j = 0; j < indices; ++j)
 				rt.world_indices[index_cursor + j] = base +
@@ -405,6 +463,8 @@ void vk_rt_load_world(void)
 		vertex_cursor += vertices;
 		index_cursor += indices;
 	}
+	if (r_rayTracing->integer == 2)
+		ri.Printf(PRINT_ALL, "Path tracing: %u static BSP mirror surfaces loaded\n", mirror_surfaces);
 	if (material_test) vk_pt_test_scene(rt.world_vertices, rt.world_indices, &vertex_cursor, &index_cursor);
 	if (r_rayTracing->integer == 2)
 		rt.world_opaque_indices = vk_pt_partition_world(rt.world_indices, index_cursor);
@@ -729,14 +789,17 @@ void vk_rt_begin_frame(void)
 	rt.path_frozen = qfalse;
 	rt.vertex_count = rt.world_vertex_count;
 	rt.index_count = rt.world_index_count;
-	if (rt.world_vertex_count)
+	if (rt.world_upload_pending && rt.world_vertex_count)
 		memcpy(rt.vertices.mapped, rt.world_vertices,
 			rt.world_vertex_count * 3 * sizeof(float));
-	if (rt.world_index_count)
+	if (rt.world_upload_pending && rt.world_index_count)
 		memcpy(rt.indices.mapped, rt.world_indices,
 			rt.world_index_count * sizeof(uint32_t));
 	rt.overflow_warned = qfalse;
 	vk_pt_begin_frame();
+	if (r_rayTracing->integer == 2 && r_pathTracingTestScene->integer == 2 &&
+		rt.vertex_count + 4 <= RT_MAX_VERTICES && rt.index_count + 6 <= RT_MAX_INDICES)
+		vk_pt_test_motion(rt.vertices.mapped, rt.indices.mapped, &rt.vertex_count, &rt.index_count);
 }
 
 void vk_rt_capture_geometry(const float (*vertices)[4], uint32_t vertex_count,
@@ -786,22 +849,41 @@ void vk_rt_capture_geometry(const float (*vertices)[4], uint32_t vertex_count,
 	rt.index_count += index_count;
 }
 
+VkDeviceSize vk_rt_scene_upload_bytes(void)
+{
+	return rt.scene_upload_bytes;
+}
+
 static void upload_scene(VkCommandBuffer cmd, uint32_t instance_count)
 {
 	rt_buffer_t *buffers[3] = {&rt.vertices, &rt.indices, &rt.instances};
 	VkDeviceSize sizes[3] = {rt.vertex_count*3*sizeof(float), rt.index_count*sizeof(uint32_t),
 		instance_count*sizeof(VkAccelerationStructureInstanceKHR)};
+	/* The completed-frame fence protects these persistent staging buffers.
+	 * Map replacement invalidates the immutable prefix, independently of BLAS
+	 * build state. Dynamic/weapon indices are repartitioned and sent every frame. */
+	VkDeviceSize offsets[3] = {
+		rt.world_upload_pending ? 0 : rt.world_vertex_count*3*sizeof(float),
+		rt.world_upload_pending ? 0 : rt.world_index_count*sizeof(uint32_t), 0};
 	VkMemoryBarrier barrier = { .sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER };
 	barrier.srcAccessMask = VK_ACCESS_HOST_WRITE_BIT;
 	barrier.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
 	qvkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_HOST_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
 		0, 1, &barrier, 0, NULL, 0, NULL);
+	rt.scene_upload_bytes = 0;
 	for (uint32_t i = 0; i < 3; ++i) {
-		VkBufferCopy copy = {0, 0, sizes[i]};
-		if (!sizes[i]) continue;
-		memcpy(buffers[i]->upload_mapped, buffers[i]->mapped, (size_t)sizes[i]);
+		if (offsets[i] > sizes[i] || sizes[i] > buffers[i]->size) {
+			ri.Error(ERR_DROP, "RTX scene upload range exceeds captured geometry");
+			return;
+		}
+		VkBufferCopy copy = {offsets[i], offsets[i], sizes[i]-offsets[i]};
+		if (!copy.size) continue;
+		memcpy((byte *)buffers[i]->upload_mapped+copy.srcOffset,
+			(byte *)buffers[i]->mapped+copy.srcOffset, (size_t)copy.size);
 		qvkCmdCopyBuffer(cmd, buffers[i]->upload, buffers[i]->buffer, 1, &copy);
+		rt.scene_upload_bytes += copy.size;
 	}
+	rt.world_upload_pending = qfalse;
 	barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
 	barrier.dstAccessMask = VK_ACCESS_ACCELERATION_STRUCTURE_READ_BIT_KHR | VK_ACCESS_SHADER_READ_BIT;
 	qvkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT,
@@ -879,7 +961,7 @@ static qboolean record_path_scene(VkCommandBuffer command_buffer,
 		instances[instance_count].transform.matrix[1][1] = 1;
 		instances[instance_count].transform.matrix[2][2] = 1;
 		instances[instance_count].instanceCustomIndex = starts[i]/3;
-		instances[instance_count].mask = i == 2 ? 8 : 7;
+		instances[instance_count].mask = i == 2 ? 8 : (i == 1 ? 23 : 7); // Bit 16 queries dynamic decals only.
 		instances[instance_count].flags = VK_GEOMETRY_INSTANCE_TRIANGLE_FACING_CULL_DISABLE_BIT_KHR;
 		instances[instance_count].accelerationStructureReference = rt.get_as_address(vk.device, &address);
 		++instance_count;

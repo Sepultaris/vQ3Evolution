@@ -49,7 +49,6 @@ static cvar_t *in_joystickThreshold = NULL;
 static cvar_t *in_joystickNo        = NULL;
 static cvar_t *in_joystickUseAnalog = NULL;
 
-static int vidRestartTime = 0;
 
 static int in_eventTime = 0;
 
@@ -992,7 +991,7 @@ static void IN_ProcessEvents( void )
 		switch( e.type )
 		{
 			case SDL_KEYDOWN:
-				if ( e.key.repeat && Key_GetCatcher( ) == 0 )
+				if ( e.key.repeat && Key_GetCatcher( ) == 0 && !CL_OptionsActive() )
 					break;
 
 				if( ( key = IN_TranslateSDLToQ3Key( &e.key.keysym, qtrue ) ) )
@@ -1114,6 +1113,9 @@ static void IN_ProcessEvents( void )
 				break;
 
 			case SDL_WINDOWEVENT:
+				// Events from a destroyed window must not resize its replacement.
+				if (!SDL_window || e.window.windowID != SDL_GetWindowID(SDL_window))
+					break;
 				switch( e.window.event )
 				{
 					case SDL_WINDOWEVENT_RESIZED:
@@ -1122,6 +1124,8 @@ static void IN_ProcessEvents( void )
 
 							width = e.window.data1;
 							height = e.window.data2;
+							if (width <= 0 || height <= 0)
+								break;
 
 							// ignore this event on fullscreen
 							if( cls.glconfig.isFullscreen )
@@ -1142,7 +1146,7 @@ static void IN_ProcessEvents( void )
 							// Wait until user stops dragging for 1 second, so
 							// we aren't constantly recreating the GL context while
 							// he tries to drag...
-							vidRestartTime = Sys_Milliseconds( ) + 1000;
+							CL_RequestVideoRestart(1000);
 						}
 						break;
 
@@ -1200,12 +1204,6 @@ void IN_Frame( void )
 	// Set event time for next frame to earliest possible time an event could happen
 	in_eventTime = Sys_Milliseconds( );
 
-	// In case we had to delay actual restart of video system
-	if( ( vidRestartTime != 0 ) && ( vidRestartTime < Sys_Milliseconds( ) ) )
-	{
-		vidRestartTime = 0;
-		Cbuf_AddText( "vid_restart\n" );
-	}
 }
 
 /*

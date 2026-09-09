@@ -1,13 +1,17 @@
 #include "vk_pathtrace.h"
+#include "vk_raytracing.h"
 #include "vk_instance.h"
+#include "vk_streamline.h"
 #include "vk_shaders.h"
 #include "vk_image.h"
+#include "vk_image_sampler.h"
 #include "tr_globals.h"
 #include "tr_backend.h"
 #include "tr_shader.h"
 #include "tr_light.h"
 #include "tr_cvar.h"
 #include "R_Parser.h"
+#include "pt_blue_noise.h"
 
 #define PT_MAX_EMITTERS 8192
 #define PT_MAX_LIGHTS 32
@@ -15,8 +19,10 @@
 #define PT_POINT_CAPACITY (PT_MAX_LIGHTS + PT_MAX_MAP_LIGHTS)
 #define PT_MAX_MOTION_SURFACES 4096
 #define PT_MOTION_BUCKETS 2048
+#define PT_LIGHT_CELLS 512
 
-/* std430 layouts shared with pathtrace.comp. No baked vertex/lightmap color. */
+/* std430 layouts shared with pathtrace.comp. World RGB lighting is excluded;
+ * authored vertex alpha is material data (including terrain blend weights). */
 typedef struct { float normal[4], uv[4], previous[4], meta[4], color[4], local[4]; } pt_vertex_t;
 typedef struct {
     uint32_t key[7], topology, first, count, ordinal;
@@ -29,12 +35,27 @@ typedef struct {
     pt_texmod_t mods[TR_MAX_TEXMODS];
 } pt_layer_t;
 typedef struct {
-    float surface[4], emission[4], tint[4], params[4];
+    /* composition: ordered layer count, base index, additive mask, overlay count. */
+    float surface[4], emission[4], composition[4], params[4];
     float maps[4], optical[4], absorption[4];
     pt_layer_t layers[1 + MAX_SHADER_STAGES];
+    /* Six outerbox texture IDs (-1 absent), cloud height, authored layer count. */
+    float skybox[2][4];
 } pt_material_t;
 typedef struct { uint32_t primitive; float cumulative_power; } pt_emitter_t;
+#include "pt_emitter_search.h"
+#include "pt_alias_pdf.h"
+#include "pt_emitter_geometry.h"
+typedef struct {
+    float origin_cell[4];
+    uint32_t dimensions[4];
+    float entries[PT_LIGHT_CELLS * PT_MAX_MAP_LIGHTS][4];
+} pt_light_grid_t;
 typedef struct { uint32_t first, count; float ior; vec3_t absorption; } pt_medium_t;
+/* Separate immutable, map-sized buffer; no fog planes in per-ray local arrays. */
+typedef struct { float mins[4], maxs[4], albedo[4], emission[4]; uint32_t planes[4]; } pt_fog_t;
+typedef struct { uint32_t control[4]; float mins[4], maxs[4]; pt_fog_t volumes[MAX_MAP_FOGS]; } pt_fog_header_t;
+typedef char pt_fog_layout_check[(sizeof(pt_fog_t) == 80 && sizeof(pt_fog_header_t) == 20528) ? 1 : -1];
 /* std430 vec4 blocks, shared with both reconstruction shaders. */
 typedef struct {
     float origin[4], forward[4], right[4], up[4];
@@ -51,11 +72,18 @@ typedef struct {
     float colors[PT_POINT_CAPACITY][4];
     float cones[PT_POINT_CAPACITY][4];
     pt_emitter_t emitters[PT_MAX_EMITTERS];
+    float previous_positions[PT_MAX_LIGHTS][4], previous_colors[PT_MAX_LIGHTS][4];
+    float decal_bounds[2][4]; // Aggregate rejection bounds; mins.w is triangle count.
+    float sky_environment[4]; // x: sky ID + 1; y: ambient; z: sun half-angle radians; w: point source radius.
+    uint32_t emitter_search_control[4]; // x: conservative search enabled; y: bucket count.
+    uint32_t emitter_search_ranges[PT_EMITTER_SEARCH_BUCKETS][2]; // std430 uvec4[32].
+    pt_emitter_geometry_t emitter_geometry[PT_MAX_EMITTERS];
 } pt_lights_t;
 typedef char pt_vertex_layout_check[(sizeof(pt_vertex_t) == 96) ? 1 : -1];
 typedef char pt_layer_layout_check[(sizeof(pt_layer_t) == 352) ? 1 : -1];
-typedef char pt_material_layout_check[(sizeof(pt_material_t) == 3280) ? 1 : -1];
-typedef char pt_lights_layout_check[(sizeof(pt_lights_t) == 32 + PT_POINT_CAPACITY * 48 + 8192 * 8) ? 1 : -1];
+typedef char pt_material_layout_check[(sizeof(pt_material_t) == 3312) ? 1 : -1];
+typedef char pt_emitter_geometry_layout_check[(sizeof(pt_emitter_geometry_t) == 48 && offsetof(pt_lights_t, emitter_geometry) == 117856) ? 1 : -1];
+typedef char pt_lights_layout_check[(sizeof(pt_lights_t) == 80 + PT_POINT_CAPACITY * 48 + 8192 * 8 + PT_MAX_LIGHTS * 32 + 16 + 64 * 8 + PT_MAX_EMITTERS * 48) ? 1 : -1];
 typedef struct {
     VkBuffer buffer;
     VkDeviceMemory memory;
@@ -85,8 +113,11 @@ static struct {
     float map_cones[PT_MAX_MAP_LIGHTS][4];
     float previous_camera[32];
     vec3_t sun_color, sun_direction;
+    int sky_material;
     pt_vertex_t *world_attributes;
     uint32_t *world_materials;
+    qboolean world_upload_pending;
+    VkDeviceSize geometry_upload_bytes;
     shader_t *material_shaders[MAX_SHADERS];
     image_t *textures[PT_MAX_TEXTURES];
     pt_buffer_t attributes, triangle_materials, materials, lights, accumulation;
@@ -95,15 +126,27 @@ static struct {
     pt_buffer_t motion_guides[2];
     pt_buffer_t specular, visible_emission, spec_history[2], spec_filter[2];
     pt_buffer_t shading_guide, previous_shading_guide;
+    pt_buffer_t light_grid, blue_noise;
+    pt_buffer_t fog;
+    qboolean fog_dirty;
+    pt_buffer_t reflection_guide, previous_reflection_guide, reflection_motion;
+    pt_buffer_t moments[2], light_change;
+    uint32_t local_light_updates;
+    int previous_sampling;
+    float test_previous_y;
+    qboolean test_motion_valid;
+    qboolean sampling_dirty;
+    uint32_t light_cells;
     vec3_t *motion_positions[2];
     pt_motion_surface_t motion_surfaces[2][PT_MAX_MOTION_SURFACES];
     int motion_buckets[2][PT_MOTION_BUCKETS];
     uint32_t motion_frame, motion_count[2], motion_vertices;
     uint32_t motion_matched, motion_rejected;
-    float material_time;
+    float material_time, previous_material_time;
     uint32_t animated_materials, effect_materials;
     uint32_t material_count;
     qboolean materials_dirty;
+    int material_program_mode;
     pt_medium_t *media;
     vec4_t *medium_planes;
     uint32_t medium_count;
@@ -116,19 +159,183 @@ static struct {
     uint64_t timestamp_mask;
     uint32_t profile_mask;
     int profile_time;
+    qboolean profile_instrumented;
     VkDescriptorSetLayout set_layout;
     VkDescriptorPool pool;
     VkDescriptorSet set;
     VkPipelineLayout layout;
-    VkPipeline pipeline;
+    VkPipeline lighting_pipelines[64]; // bits: BRDF reuse, early rejection, alias PDF, packed emitters, unified light loop, cached materials.
+    uint32_t lighting_mode;
+    qboolean lighting_failed[64], brdf_active, map_light_cull_active, alias_pdf_active, emitter_geometry_active, light_loop_active;
+    VkPipeline guide_pipeline;
+    VkPipeline material_cache_pipeline;
+    qboolean material_cache_failed, material_cache_active;
+    VkPipeline compact_transport_pipeline;
+    uint32_t compact_transport_rows;
+    qboolean compact_transport_failed, compact_transport_active;
+    struct {
+        pt_buffer_t state;
+        VkBuffer comparison;
+        VkDeviceMemory comparison_memory;
+        uint32_t *mapped;
+        VkDescriptorSetLayout set_layout;
+        VkDescriptorPool pool;
+        VkDescriptorSet set;
+        VkPipelineLayout layout;
+        VkPipeline pipelines[4];
+        uint32_t rows;
+        VkQueryPool profile_pool;
+        uint32_t profile_capacity, profile_written;
+        uint64_t *profile_ticks;
+        unsigned char *profile_stages;
+        int record_ms;
+        qboolean ready, failed, active, compared;
+    } staged;
     VkPipeline denoise_pipeline;
     VkPipeline temporal_pipeline;
-    VkSampler sampler, clamp_sampler;
+    VkSampler sampler;
+    int texture_mode_revision;
+    pt_buffer_t transmission, transmission_history[2];
+    pt_buffer_t transmission_guide, previous_transmission_guide, transmission_motion;
 } pt;
+#include "pt_ray_reconstruction.h"
 static uint32_t hash_bytes(uint32_t hash, const void *data, size_t size);
+#include "pt_shader_profile.h"
+#include "pt_pipeline_stats.h"
+#include "pt_material_cache.h"
+#include "pt_compact_transport.h"
+#include "pt_gpu_labels.h"
+
+static qboolean lighting_pipeline_initialize(uint32_t mode)
+{
+    if (mode >= ARRAY_LEN(pt.lighting_pipelines)) return qfalse;
+    if (pt.lighting_pipelines[mode]) return qtrue;
+    if (pt.lighting_failed[mode]) return qfalse;
+    extern unsigned char pt_brdf_comp_spv[];
+    extern int pt_brdf_comp_spv_size;
+    extern unsigned char pathtrace_comp_spv[];
+    extern int pathtrace_comp_spv_size;
+    extern unsigned char pt_light_loop_comp_spv[], pt_light_loop_brdf_comp_spv[];
+    extern int pt_light_loop_comp_spv_size, pt_light_loop_brdf_comp_spv_size;
+    const unsigned char *code = (mode & 16) ? ((mode & 1) ? pt_light_loop_brdf_comp_spv : pt_light_loop_comp_spv) :
+        ((mode & 1) ? pt_brdf_comp_spv : pathtrace_comp_spv);
+    size_t code_size = (mode & 16) ? ((mode & 1) ? pt_light_loop_brdf_comp_spv_size : pt_light_loop_comp_spv_size) :
+        ((mode & 1) ? pt_brdf_comp_spv_size : pathtrace_comp_spv_size);
+    if (mode & 32) {
+        extern unsigned char pt_cached_materials_comp_spv[], pt_cached_materials_brdf_comp_spv[];
+        extern unsigned char pt_cached_materials_loop_comp_spv[], pt_cached_materials_loop_brdf_comp_spv[];
+        extern int pt_cached_materials_comp_spv_size, pt_cached_materials_brdf_comp_spv_size;
+        extern int pt_cached_materials_loop_comp_spv_size, pt_cached_materials_loop_brdf_comp_spv_size;
+        code = (mode & 16) ? ((mode & 1) ? pt_cached_materials_loop_brdf_comp_spv : pt_cached_materials_loop_comp_spv) :
+            ((mode & 1) ? pt_cached_materials_brdf_comp_spv : pt_cached_materials_comp_spv);
+        code_size = (mode & 16) ? ((mode & 1) ? pt_cached_materials_loop_brdf_comp_spv_size : pt_cached_materials_loop_comp_spv_size) :
+            ((mode & 1) ? pt_cached_materials_brdf_comp_spv_size : pt_cached_materials_comp_spv_size);
+    }
+    VkShaderModule module;
+    VkShaderModuleCreateInfo shader = { .sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,
+        .codeSize = code_size, .pCode = (const uint32_t *)code };
+    if (qvkCreateShaderModule(vk.device, &shader, NULL, &module) != VK_SUCCESS) goto fail;
+    VkBool32 map_light_cull = (mode & 2) ? VK_TRUE : VK_FALSE;
+    VkBool32 options[3] = { map_light_cull, (mode & 4) ? VK_TRUE : VK_FALSE, (mode & 8) ? VK_TRUE : VK_FALSE };
+    VkSpecializationMapEntry entries[3] = { { 0, 0, sizeof(VkBool32) },
+        { 1, sizeof(VkBool32), sizeof(VkBool32) }, { 2, 2*sizeof(VkBool32), sizeof(VkBool32) } };
+    VkSpecializationInfo specialization = { 3, entries, sizeof(options), options };
+    VkComputePipelineCreateInfo pipeline = { .sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO,
+        .flags = pipeline_statistics_flags(),
+        .layout = pt.layout,
+        .stage = { .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+            .stage = VK_SHADER_STAGE_COMPUTE_BIT, .module = module, .pName = "main",
+            .pSpecializationInfo = &specialization } };
+    // CPU compilation can dominate a cold, time-bounded test. Record it apart
+    // from the GPU timestamps; cached selections never re-enter this path.
+    ri.Printf(PRINT_ALL, "PT_LIGHTING_PIPELINE_BEGIN mode=%u\n", mode);
+    int pipeline_started = ri.Milliseconds();
+    VkResult result = qvkCreateComputePipelines(vk.device, VK_NULL_HANDLE, 1, &pipeline, NULL, &pt.lighting_pipelines[mode]);
+    ri.Printf(PRINT_ALL, "PT_LIGHTING_PIPELINE_END mode=%u cpu_ms=%d result=%d\n",
+        mode, ri.Milliseconds() - pipeline_started, (int)result);
+    qvkDestroyShaderModule(vk.device, module, NULL);
+    if (result == VK_SUCCESS) {
+        pipeline_statistics_print(pt.lighting_pipelines[mode], mode, pipeline.flags);
+        return qtrue;
+    }
+    if (pt.lighting_pipelines[mode]) qvkDestroyPipeline(vk.device, pt.lighting_pipelines[mode], NULL);
+    pt.lighting_pipelines[mode] = VK_NULL_HANDLE;
+fail:
+    pt.lighting_failed[mode] = qtrue;
+    ri.Printf(PRINT_WARNING, "PT_LIGHTING_UNAVAILABLE mode=%u: pipeline creation failed; safe fallback retained\n", mode);
+    return qfalse;
+}
+
+static qboolean lighting_material_cache_eligible(void)
+{
+    // Shader-clock diagnostics intentionally measure the original material program.
+    return !r_pathTracingShaderProfile->integer;
+}
+
+static uint32_t lighting_pipeline_requested(void)
+{
+    return (r_pathTracingBRDFReuse->integer ? 1u : 0u) |
+        (r_pathTracingMapLightCull->integer ? 2u : 0u) |
+        (r_pathTracingAliasPDF->integer ? 4u : 0u) |
+        (r_pathTracingEmitterGeometry->integer ? 8u : 0u) |
+        (r_pathTracingLightLoop->integer ? 16u : 0u) |
+        (r_pathTracingMaterialCache->integer && lighting_material_cache_eligible() ? 32u : 0u);
+}
+
+static qboolean lighting_pipeline_select(uint32_t requested)
+{
+    if (requested >= ARRAY_LEN(pt.lighting_pipelines)) return qfalse;
+    // Do not compile an unused reference integrator at normal startup.
+    if (compact_transport_select(requested)) {
+        pt.lighting_mode = requested;
+        return qtrue;
+    }
+    if (lighting_pipeline_initialize(requested)) {
+        pt.lighting_mode = requested;
+        return qtrue;
+    }
+    if (requested & 32) return lighting_pipeline_select(requested & 31);
+    if (requested & 16) return lighting_pipeline_select(requested & 15);
+    if (requested & 8) return lighting_pipeline_select(requested & 7);
+    // Remove only the failed alias candidate, retaining the requested older mode.
+    if (requested & 4) return lighting_pipeline_select(requested & 3);
+    // An optional combined candidate must not discard proven BRDF reuse.
+    if (requested == 3 && lighting_pipeline_initialize(1)) {
+        pt.lighting_mode = 1;
+        return qtrue;
+    }
+    if (requested != 0 && lighting_pipeline_initialize(0)) {
+        pt.lighting_mode = 0;
+        return qtrue;
+    }
+    // A failed debug-mode switch must never bind a null handle. During initial
+    // setup no pipeline exists yet, so failure propagates to normal cleanup.
+    return (pt.lighting_pipelines[pt.lighting_mode] != VK_NULL_HANDLE &&
+        (!(pt.lighting_mode & 32) || lighting_material_cache_eligible())) ||
+        compact_transport_select(pt.lighting_mode);
+}
+
+static void lighting_pipeline_shutdown(void)
+{
+    for (uint32_t mode = 0; mode < ARRAY_LEN(pt.lighting_pipelines); ++mode) {
+        if (pt.lighting_pipelines[mode]) qvkDestroyPipeline(vk.device, pt.lighting_pipelines[mode], NULL);
+        pt.lighting_pipelines[mode] = VK_NULL_HANDLE;
+        pt.lighting_failed[mode] = qfalse;
+    }
+    pt.lighting_mode = 0;
+}
 
 void vk_pt_profile(VkCommandBuffer cmd, uint32_t point)
 {
+    gpu_label_point(cmd, point);
+    if (!point && pt_gpu_labels.name) {
+        gpu_label_pipeline(0, pt.compact_transport_pipeline, "VQ3E Path tracing - compact transport");
+        gpu_label_pipeline(1, pt.guide_pipeline, "VQ3E Surface guides");
+        gpu_label_pipeline(2, pt.material_cache_pipeline, "VQ3E Material preprocessing");
+        gpu_label_pipeline(3, pt.temporal_pipeline, "VQ3E Temporal reconstruction");
+        gpu_label_pipeline(4, pt.denoise_pipeline, "VQ3E Spatial reconstruction");
+    }
+    if (pt.active && point == 0) shader_profile_read();
     if (!pt.active || !r_pathTracingProfile->integer) { pt.profile_mask = 0; return; }
     if (!pt.profile_pool) {
         VkPhysicalDeviceProperties properties;
@@ -151,27 +358,32 @@ void vk_pt_profile(VkCommandBuffer cmd, uint32_t point)
         pt.reset_queries = (PFN_vkCmdResetQueryPool)qvkGetDeviceProcAddr(vk.device, "vkCmdResetQueryPool");
         pt.write_timestamp = (PFN_vkCmdWriteTimestamp)qvkGetDeviceProcAddr(vk.device, "vkCmdWriteTimestamp");
         VkQueryPoolCreateInfo info = { .sType = VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO,
-            .queryType = VK_QUERY_TYPE_TIMESTAMP, .queryCount = 7 };
+            .queryType = VK_QUERY_TYPE_TIMESTAMP, .queryCount = 8 };
         if (!create || !pt.destroy_queries || !pt.get_queries || !pt.reset_queries || !pt.write_timestamp ||
             create(vk.device, &info, NULL, &pt.profile_pool) != VK_SUCCESS) return;
     }
     if (point == 0) {
         int now = ri.Milliseconds();
-        uint64_t ticks[7];
+        uint64_t ticks[8];
         /* The existing render fence has completed. Never introduce a profiling
          * wait: unavailable/incomplete query sets are simply discarded. */
-        if (pt.profile_mask == 127 && pt.get_queries(vk.device, pt.profile_pool, 0, 7,
+        if (pt.profile_mask == 255 && pt.get_queries(vk.device, pt.profile_pool, 0, 8,
             sizeof(ticks), ticks, sizeof(uint64_t), VK_QUERY_RESULT_64_BIT) == VK_SUCCESS) {
-            double ms[6];
-            for (int i = 0; i < 6; ++i) ms[i] = ((ticks[i+1]-ticks[i]) & pt.timestamp_mask)*pt.timestamp_period/1000000.0;
-            ri.Printf(PRINT_ALL, "PT_PROFILE frame=%d raster=%.3f as=%.3f trace=%.3f temporal=%.3f spatial=%.3f post=%.3f\n",
-                now-pt.profile_time, ms[0], ms[1], ms[2], ms[3], ms[4], ms[5]);
+            double ms[7];
+            for (int i = 0; i < 7; ++i) ms[i] = ((ticks[i+1]-ticks[i]) & pt.timestamp_mask)*pt.timestamp_period/1000000.0;
+            // The direct RR writer has no packing/filter dispatch here.
+            // Report no work instead of subtracting adjacent empty intervals.
+            if (pt_rr.direct_profile_frame) ms[4] = ms[5] = 0;
+            ri.Printf(PRINT_ALL, "%s frame=%d raster=%.3f as=%.3f guides=%.3f trace=%.3f temporal=%.3f spatial=%.3f post=%.3f\n",
+                (pt.profile_instrumented || pt.staged.profile_written) ? "PT_PROFILE_DIAGNOSTIC" : "PT_PROFILE",
+                now-pt.profile_time, ms[0], ms[1], ms[2], ms[3], ms[4], ms[5], ms[6]);
         }
         pt.profile_time = now;
+        pt_rr.direct_profile_frame = qfalse;
         pt.profile_mask = 0;
-        pt.reset_queries(cmd, pt.profile_pool, 0, 7);
+        pt.reset_queries(cmd, pt.profile_pool, 0, 8);
     }
-    if (point > 6 || (point && !(pt.profile_mask & 1))) return;
+    if (point > 7 || (point && !(pt.profile_mask & 1))) return;
     pt.write_timestamp(cmd, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, pt.profile_pool, point);
     pt.profile_mask |= 1u << point;
 }
@@ -220,6 +432,8 @@ static void buffer_destroy(pt_buffer_t *b)
     memset(b, 0, sizeof(*b));
 }
 
+#include "pt_staged.h"
+
 static void bind_buffer(uint32_t binding, VkBuffer buffer, VkDeviceSize size)
 {
     VkDescriptorBufferInfo info = { buffer, 0, size };
@@ -232,13 +446,25 @@ static void bind_buffer(uint32_t binding, VkBuffer buffer, VkDeviceSize size)
     qvkUpdateDescriptorSets(vk.device, 1, &write, 0, NULL);
 }
 
-static void buffer_upload(VkCommandBuffer cmd, pt_buffer_t *b, VkDeviceSize size)
+static void buffer_upload_range(VkCommandBuffer cmd, pt_buffer_t *b,
+    VkDeviceSize offset, VkDeviceSize size)
 {
-    VkBufferCopy copy = {0, 0, size};
+    VkBufferCopy copy = {offset, offset, size};
+    if (offset > b->size || size > b->size-offset) {
+        ri.Error(ERR_DROP, "Path tracing upload range exceeds buffer capacity");
+        return;
+    }
     if (!size) return;
-    memcpy(b->upload_mapped, b->mapped, (size_t)size);
+    memcpy((byte *)b->upload_mapped+offset, (byte *)b->mapped+offset, (size_t)size);
     qvkCmdCopyBuffer(cmd, b->upload, b->buffer, 1, &copy);
 }
+
+static void buffer_upload(VkCommandBuffer cmd, pt_buffer_t *b, VkDeviceSize size)
+{
+    buffer_upload_range(cmd, b, 0, size);
+}
+
+#include "pt_fog.h"
 
 static uint32_t texture_id(image_t *image)
 {
@@ -264,6 +490,7 @@ static qboolean layer_initialize(pt_layer_t *out, const shaderStage_t *stage,
 {
     int i;
     qboolean animated = qfalse;
+    qboolean texture_only = qtrue;
     memset(out, 0, sizeof(*out));
     out->params[0] = bundle ? MAX(bundle->numImageAnimations, 1) : 1;
     for (i = 0; i < 8; ++i)
@@ -286,13 +513,16 @@ static qboolean layer_initialize(pt_layer_t *out, const shaderStage_t *stage,
     out->generators[1] = stage->alphaWave.func;
     out->generators[2] = (stage->stateBits & GLS_ATEST_GT_0) ? 1 :
         ((stage->stateBits & GLS_ATEST_LT_80) ? 2 : ((stage->stateBits & GLS_ATEST_GE_80) ? 3 : 0));
-    out->generators[3] = (stage->stateBits & GLS_SRCBLEND_BITS) == GLS_SRCBLEND_SRC_ALPHA ? 1 : 0;
+    out->generators[3] = stage->stateBits & (GLS_SRCBLEND_BITS | GLS_DSTBLEND_BITS);
     for (i = 0; i < 4; ++i) out->color[i] = stage->constantColor[i] / 255.0f;
     copy_wave(out->rgb_wave, &stage->rgbWave);
     copy_wave(out->alpha_wave, &stage->alphaWave);
     memcpy(out->vectors[0], bundle->tcGenVectors[0], sizeof(vec3_t));
     memcpy(out->vectors[1], bundle->tcGenVectors[1], sizeof(vec3_t));
-    animated = bundle->numImageAnimations > 1 || stage->rgbGen == CGEN_WAVEFORM || stage->alphaGen == AGEN_WAVEFORM;
+    // Environment artwork changes with the observing ray even without a time
+    // modifier. It cannot reuse fixed-albedo history as if it were immutable.
+    animated = bundle->tcGen == TCGEN_ENVIRONMENT_MAPPED || bundle->numImageAnimations > 1 ||
+        stage->rgbGen == CGEN_WAVEFORM || stage->alphaGen == AGEN_WAVEFORM;
     for (i = 0; i < bundle->numTexMods && i < TR_MAX_TEXMODS; ++i) {
         const texModInfo_t *m = &bundle->texMods[i];
         pt_texmod_t *dst = &out->mods[i];
@@ -304,6 +534,8 @@ static qboolean layer_initialize(pt_layer_t *out, const shaderStage_t *stage,
         if (m->type == TMOD_SCROLL) { dst->a[1] = m->scroll[0]; dst->a[2] = m->scroll[1]; }
         if (m->type == TMOD_ROTATE) dst->a[1] = m->rotateSpeed;
         if (m->type != TMOD_NONE && m->type != TMOD_SCALE && m->type != TMOD_TRANSFORM) animated = qtrue;
+        if (m->type == TMOD_TURBULENT || m->type < TMOD_NONE || m->type > TMOD_ENTITY_TRANSLATE)
+            texture_only = qfalse;
     }
     // Compile the common immutable texture/color stage. Vector coordinates are
     // unused with TCGEN_TEXTURE, so their spare lanes hold the fast-path data.
@@ -314,6 +546,16 @@ static qboolean layer_initialize(pt_layer_t *out, const shaderStage_t *stage,
         out->vectors[0][3] = 1;
         for (i = 0; i < 3; ++i) out->vectors[1][i] = stage->rgbGen == CGEN_CONST ? out->color[i] : 1;
         out->vectors[1][3] = stage->alphaGen == AGEN_CONST ? out->color[3] : 1;
+    } else if (texture_only && bundle->tcGen == TCGEN_TEXTURE &&
+        (stage->rgbGen == CGEN_IDENTITY || stage->rgbGen == CGEN_IDENTITY_LIGHTING ||
+         stage->rgbGen == CGEN_LIGHTING_DIFFUSE || stage->rgbGen == CGEN_CONST || stage->rgbGen == CGEN_WAVEFORM) &&
+        (stage->alphaGen == AGEN_IDENTITY || stage->alphaGen == AGEN_SKIP ||
+         stage->alphaGen == AGEN_CONST || stage->alphaGen == AGEN_WAVEFORM)) {
+        // Animated UV-only stages still use the exact shared stage program,
+        // but need only UVs/derivatives and entity shader-time/scroll metadata.
+        // No world/model positions, normals or vertex colors are consumed.
+        // 1 remains the immutable one-texture shortcut; 2 is NOT that shortcut.
+        out->vectors[0][3] = 2;
     }
     return animated;
 }
@@ -324,6 +566,8 @@ static uint32_t material_id(shader_t *shader)
     int s, b;
     shaderStage_t *stage = NULL;
     textureBundle_t *base_bundle = NULL, *emissive_bundle = NULL;
+    qboolean has_surface_base = qfalse;
+    qboolean independent_glow = qfalse;
     image_t *base = NULL;
     pt_material_t *m;
     if (shader->remappedShader) shader = shader->remappedShader;
@@ -335,27 +579,67 @@ static uint32_t material_id(shader_t *shader)
     pt.materials_dirty = qtrue;
     m = (pt_material_t *)pt.materials.mapped + id;
     memset(m, 0, sizeof(*m));
+    m->composition[1] = -1;
+    // An environment-mapped opaque stage can be the ONLY color source on a
+    // pickup. Conversely a purely additive environment shader is a glow shell,
+    // not an opaque fallback and not a reflective coat over another base.
+    for (s = 0; s < shader->numUnfoggedPasses; ++s) {
+        const shaderStage_t *candidate = shader->stages[s];
+        if (!candidate) continue;
+        unsigned blend = candidate->stateBits & (GLS_SRCBLEND_BITS | GLS_DSTBLEND_BITS);
+        qboolean additive = (blend & GLS_DSTBLEND_BITS) == GLS_DSTBLEND_ONE &&
+            (blend & GLS_SRCBLEND_BITS) != GLS_SRCBLEND_ZERO;
+        for (b = 0; b < NUM_TEXTURE_BUNDLES; ++b)
+            if (!additive && !candidate->bundle[b].isLightmap && candidate->bundle[b].image[0])
+                has_surface_base = qtrue;
+    }
     for (s = 0; s < shader->numUnfoggedPasses; ++s) {
         shaderStage_t *candidate = shader->stages[s];
         if (!candidate) continue;
         for (b = 0; b < NUM_TEXTURE_BUNDLES; ++b) {
             if (!candidate->bundle[b].isLightmap && candidate->bundle[b].image[0]) {
                 textureBundle_t *bundle = &candidate->bundle[b];
-                qboolean additive = ((candidate->stateBits & GLS_DSTBLEND_BITS) == GLS_DSTBLEND_ONE &&
-                    (candidate->stateBits & GLS_SRCBLEND_BITS) != GLS_SRCBLEND_ZERO) ||
-                    (b == 1 && shader->multitextureEnv == GL_ADD);
-                // Legacy environment-map stages are raster reflection tricks,
-                // not light emitters. Specular response belongs to the BRDF.
-                if (bundle->tcGen == TCGEN_ENVIRONMENT_MAPPED) continue;
-                if (additive) {
-                    emissive_bundle = bundle;
-                    int layer = (int)m->params[2] + 1;
-                    if (layer <= MAX_SHADER_STAGES) {
-                        if (layer_initialize(&m->layers[layer], candidate, bundle, shader)) m->params[3] = 1;
-                        m->params[2] = layer;
-                    }
+                unsigned blend = candidate->stateBits & (GLS_SRCBLEND_BITS | GLS_DSTBLEND_BITS);
+                /* Only stage zero can be collapsed by CollapseMultitexture.
+                 * Its second non-lightmap bundle is a texture combine, not a
+                 * second application of the surviving framebuffer blend. */
+                if (s == 0 && b == 1 && !candidate->bundle[0].isLightmap) {
+                    blend = shader->multitextureEnv == GL_ADD ?
+                        (GLS_SRCBLEND_ONE | GLS_DSTBLEND_ONE) :
+                        (GLS_SRCBLEND_DST_COLOR | GLS_DSTBLEND_ZERO);
                 }
-                if (!additive && !base_bundle) { base_bundle = bundle; stage = candidate; base = bundle->image[0]; }
+                qboolean additive = (blend & GLS_DSTBLEND_BITS) == GLS_DSTBLEND_ONE &&
+                    (blend & GLS_SRCBLEND_BITS) != GLS_SRCBLEND_ZERO;
+                // Retain color-bearing environment bases and unbacked additive
+                // shells. Deformed shaders also use environment coordinates
+                // for authored glow (e.g. a scrolling hologram), not a static
+                // reflective coat. Keep those stages, consistent with the
+                // deformed-aura rule below. Ordinary solid reflective coats
+                // and dielectric reflection maps remain BRDF-owned.
+                if (bundle->tcGen == TCGEN_ENVIRONMENT_MAPPED &&
+                    ((additive && has_surface_base && !shader->numDeforms) || shader->rtDielectricDefined ||
+                     (shader->contentFlags & CONTENTS_WATER) ||
+                     (strstr(shader->name, "glass") && (shader->contentFlags & CONTENTS_TRANSLUCENT)))) continue;
+                int layer = (int)m->composition[0];
+                if (layer >= ARRAY_LEN(m->layers)) {
+                    ri.Error(ERR_DROP, "Path tracing: too many material layers in %s", shader->name);
+                    return id;
+                }
+                if (layer_initialize(&m->layers[layer], candidate, bundle, shader)) m->params[3] = 1;
+                m->layers[layer].generators[3] = blend | (candidate->stateBits & GLS_DEPTHFUNC_EQUAL);
+                m->composition[0] = layer+1;
+                if (additive) {
+                    if (shader->numDeforms && bundle->tcGen == TCGEN_ENVIRONMENT_MAPPED &&
+                        !(candidate->stateBits & GLS_DEPTHFUNC_EQUAL)) independent_glow = qtrue;
+                    emissive_bundle = bundle;
+                    m->composition[2] = (uint32_t)m->composition[2] | (1u << layer);
+                    ++m->params[2];
+                } else if (!base_bundle) {
+                    base_bundle = bundle; stage = candidate; base = bundle->image[0];
+                    m->composition[1] = layer;
+                } else {
+                    ++m->composition[3];
+                }
             }
         }
     }
@@ -373,11 +657,21 @@ static uint32_t material_id(shader_t *shader)
      * explicit; exposure is independent and never derived from a lightmap. */
     m->emission[1] = shader->rtSurfaceLight / 1000.0f;
     m->emission[2] = shader->isSky ? 1.0f : (shader->surfaceFlags & SURF_SKY ? 2.0f : 0.0f);
-    m->tint[0] = m->tint[1] = m->tint[2] = m->tint[3] = 1;
-    if (stage && stage->rgbGen == CGEN_CONST)
-        for (s = 0; s < 3; ++s) m->tint[s] = stage->constantColor[s] / 255.0f;
     m->params[1] = base_bundle != NULL;
-    if (layer_initialize(&m->layers[0], stage, base_bundle, shader)) m->params[3] = 1;
+    for (s = 0; s < 6; ++s) m->skybox[s/4][s%4] = -1;
+    if (shader->isSky) {
+        for (s = 0; s < 6; ++s) {
+            image_t *face = shader->sky.outerbox[s];
+            if (face && face != tr.defaultImage) m->skybox[s/4][s%4] = texture_id(face);
+        }
+        m->skybox[1][2] = shader->sky.cloudHeight;
+        m->skybox[1][3] = m->composition[0]; // Before the no-stage white fallback.
+    }
+    if (m->composition[0] == 0) {
+        layer_initialize(&m->layers[0], NULL, NULL, shader);
+        m->composition[0] = 1;
+        m->composition[1] = 0;
+    }
     if (emissive_bundle && m->emission[1] <= 0) m->emission[1] = 1;
     if (!base_bundle && emissive_bundle) m->params[0] = 2; // additive, no opaque backing
     else if (stage && shader->sort > SS_OPAQUE) {
@@ -385,8 +679,11 @@ static uint32_t material_id(shader_t *shader)
         if (blend == (GLS_SRCBLEND_SRC_ALPHA | GLS_DSTBLEND_ONE_MINUS_SRC_ALPHA)) m->params[0] = 1;
         else if (blend == (GLS_SRCBLEND_DST_COLOR | GLS_DSTBLEND_ZERO) ||
                  blend == (GLS_SRCBLEND_ZERO | GLS_DSTBLEND_SRC_COLOR)) m->params[0] = 3;
+        else if (blend == (GLS_SRCBLEND_ZERO | GLS_DSTBLEND_ONE_MINUS_SRC_COLOR)) {
+            m->params[0] = 3;
+            m->absorption[3] = 1; // Complementary source-color filter (burn/impact marks).
+        }
     }
-    if (m->params[3] != 0) ++pt.animated_materials;
     /* Native legacy classification. Coverage sprites and additive effects stay
      * coverage/additive; only actual water contents and glass shader surfaces
      * are dielectric. Explicit author properties always override defaults. */
@@ -409,7 +706,8 @@ static uint32_t material_id(shader_t *shader)
         m->absorption[2] = water ? 0.0007f : 0.0002f;
     }
     if (!shader->rtMaterialDefined && !water && !glass) {
-        if (strstr(shader->name, "metal") || strstr(shader->name, "chrome")) {
+        if ((base_bundle && base_bundle->tcGen == TCGEN_ENVIRONMENT_MAPPED) ||
+            strstr(shader->name, "metal") || strstr(shader->name, "chrome")) {
             m->surface[1] = 0.3f; m->surface[2] = 0.85f;
         }
         if (strstr(shader->name, "stone") || strstr(shader->name, "concrete")) m->surface[1] = 0.85f;
@@ -421,7 +719,81 @@ static uint32_t material_id(shader_t *shader)
     if (shader->rtORMImage) m->maps[2] = texture_id(shader->rtORMImage);
     m->optical[3] = shader->rtNormalImage ? shader->rtNormalScale : 1;
     if (shader->rtAbsorptionDefined) VectorCopy(shader->rtAbsorption, m->absorption);
+    // An animated cutout body can carry a glow stage that does not require
+    // depth equality with the body. In its holes only the glow is present;
+    // preserve transparent continuation there, not an opaque glowing patch.
+    // Other color-overlay programs retain their existing coverage semantics.
+    if (independent_glow && m->params[0] == 0 && m->surface[3] != 0 && m->composition[3] == 0)
+        m->maps[3] = 3;
+    // Health-cross bases use colored reflection artwork in place of a painted
+    // diffuse texture. Keep its uniform pigment, but obtain the reflected image
+    // from scene rays. Restrict this legacy conversion to health pickup bases;
+    // ordinary environment artwork, authored PBR, alpha overlays and the separate
+    // additive orb shells retain their own material rules.
+    if (!strncmp(shader->name, "models/powerups/health/", sizeof("models/powerups/health/")-1) &&
+        !shader->rtMaterialDefined && !shader->rtBaseColorImage && !shader->rtORMImage &&
+        !shader->numDeforms && shader->rtSurfaceLight <= 0 && !shader->rtLightImage &&
+        m->params[0] == 0 && m->surface[3] == 0 && m->composition[3] == 0 &&
+        base_bundle && base_bundle->tcGen == TCGEN_ENVIRONMENT_MAPPED) {
+        int base_layer = (int)m->composition[1];
+        m->layers[base_layer].vectors[0][3] = 3; // Uniform-pigment stage, not a UV program.
+        m->surface[1] = 0.12f; m->surface[2] = 1;
+        m->params[3] = 0;
+        for (s = 0; s < (int)m->composition[0]; ++s) {
+            const pt_layer_t *layer = &m->layers[s];
+            if (layer->params[0] > 1 || layer->meta[0] == CGEN_WAVEFORM ||
+                layer->meta[1] == AGEN_WAVEFORM) m->params[3] = 1;
+            // The base's reflected-picture coordinates are discarded. Genuine
+            // electrical/glow overlays still keep their original UV animation.
+            if (s != base_layer && (layer->params[2] == TCGEN_ENVIRONMENT_MAPPED || layer->params[3] > 0))
+                m->params[3] = 1;
+        }
+    }
+    // Pure environment-only additive geometry is a transparent reflective
+    // envelope, not a lamp displaying a painted reflection image. Negative
+    // optical thickness is the native zero-thickness sheet mode; no volume is
+    // entered and transmission leaves in the incident direction. Vertex-deformed
+    // power-up auras are authored animated glow, not reflective envelopes.
+    if (m->params[0] == 2 && m->composition[0] > 0 && shader->numDeforms == 0 &&
+        shader->rtSurfaceLight <= 0 && !shader->rtLightImage) {
+        qboolean shell = qtrue;
+        for (s = 0; s < (int)m->composition[0]; ++s)
+            if (m->layers[s].params[2] != TCGEN_ENVIRONMENT_MAPPED) shell = qfalse;
+        if (shell) {
+            m->params[0] = 4;
+            m->params[2] = 0;
+            m->params[3] = 0;
+            m->emission[1] = 0;
+            m->surface[3] = 0;
+            m->surface[1] = 0.02f; m->surface[2] = 0;
+            m->optical[0] = 1.5f; m->optical[1] = -1; m->optical[2] = 0;
+            // Spatial UV animation belongs to the discarded reflection picture.
+            // Frame/color/alpha animation can still animate the uniform tint.
+            for (s = 0; s < (int)m->composition[0]; ++s)
+                if (m->layers[s].params[0] > 1 || m->layers[s].meta[0] == CGEN_WAVEFORM ||
+                    m->layers[s].meta[1] == AGEN_WAVEFORM) m->params[3] = 1;
+        }
+    }
+    if (shader->sort == SS_PORTAL) {
+        // Only entity-confirmed static mirrors enter the PT scene. A portal
+        // texture is a coating over reflected radiance, not an opaque wall.
+        // maps.w=2 selects that layer composition in both transport and guides.
+        m->maps[3] = 2;
+        m->params[0] = 0;
+        m->surface[3] = 0;
+        if (!shader->rtMaterialDefined) {
+            m->surface[1] = 0.02f;
+            m->surface[2] = 1;
+        }
+    }
+    if (m->emission[2] != 0) {
+        // Cloud blend/alpha stages describe radiance at infinity, not holes or
+        // transmissive geometry in the BSP sky boundary.
+        m->params[0] = 0;
+        m->surface[3] = 0;
+    }
     if (m->params[0] != 0) ++pt.effect_materials;
+    if (m->params[3] != 0) ++pt.animated_materials;
     return id;
 }
 
@@ -508,6 +880,62 @@ static void load_map_lights(void)
         ri.Printf(PRINT_WARNING, "Path tracing: %d legacy styled/linear lights currently use steady inverse-square emission\n", legacy);
 }
 
+static void build_light_grid(void)
+{
+    pt_light_grid_t *grid = pt.light_grid.mapped;
+    const bmodel_t *world = tr.world->bmodels;
+    vec3_t extent;
+    double scaled[PT_MAX_MAP_LIGHTS], weights[PT_MAX_MAP_LIGHTS];
+    uint32_t small[PT_MAX_MAP_LIGHTS], large[PT_MAX_MAP_LIGHTS];
+    uint32_t n = pt.map_light_count, cells = 1;
+    VectorSubtract(world->bounds[1], world->bounds[0], extent);
+    grid->origin_cell[3] = fmaxf(512, fmaxf(extent[0], fmaxf(extent[1], extent[2]))/8);
+    for (uint32_t j = 0; j < 3; ++j) {
+        grid->origin_cell[j] = world->bounds[0][j];
+        grid->dimensions[j] = MAX(1, MIN(8, (uint32_t)ceilf(extent[j]/grid->origin_cell[3])));
+        cells *= grid->dimensions[j];
+    }
+    grid->dimensions[3] = n;
+    pt.light_cells = cells;
+    for (uint32_t cell = 0; cell < cells && n; ++cell) {
+        vec3_t center;
+        uint32_t coordinate = cell, ns = 0, nl = 0;
+        double sum = 0;
+        for (uint32_t j = 0; j < 3; ++j) {
+            center[j] = grid->origin_cell[j]+(coordinate%grid->dimensions[j]+0.5f)*grid->origin_cell[3];
+            coordinate /= grid->dimensions[j];
+        }
+        for (uint32_t i = 0; i < n; ++i) {
+            vec3_t delta;
+            VectorSubtract(pt.map_positions[i], center, delta);
+            double power = pt.map_positions[i][3]*(pt.map_colors[i][0]*0.2126+
+                pt.map_colors[i][1]*0.7152+pt.map_colors[i][2]*0.0722);
+            weights[i] = fmax(0, power)/fmax(DotProduct(delta, delta),
+                grid->origin_cell[3]*grid->origin_cell[3]*0.25);
+            sum += weights[i];
+        }
+        for (uint32_t i = 0; i < n; ++i) {
+            float *entry = grid->entries[cell*n+i];
+            // Twenty percent uniform probability is an explicit support floor.
+            // No PVS/camera/occlusion decision can silently remove a light.
+            entry[2] = sum > 0 ? 0.2/n+0.8*weights[i]/sum : 1.0/n;
+            scaled[i] = entry[2]*n;
+            if (scaled[i] < 1) small[ns++] = i; else large[nl++] = i;
+        }
+        while (ns && nl) {
+            uint32_t s = small[--ns], l = large[--nl];
+            grid->entries[cell*n+s][0] = scaled[s];
+            grid->entries[cell*n+s][1] = l;
+            scaled[l] += scaled[s]-1;
+            if (scaled[l] < 1) small[ns++] = l; else large[nl++] = l;
+        }
+        while (ns) { uint32_t i = small[--ns]; grid->entries[cell*n+i][0] = 1; grid->entries[cell*n+i][1] = i; }
+        while (nl) { uint32_t i = large[--nl]; grid->entries[cell*n+i][0] = 1; grid->entries[cell*n+i][1] = i; }
+        cache_alias_probabilities(&grid->entries[cell*n], n);
+    }
+    pt.sampling_dirty = qtrue;
+}
+
 void vk_pt_begin_world(uint32_t vertices, uint32_t indices)
 {
     int surface;
@@ -523,9 +951,11 @@ void vk_pt_begin_world(uint32_t vertices, uint32_t indices)
     }
     pt.world_vertices = vertices;
     pt.world_indices = indices;
+    pt.world_upload_pending = qtrue;
     memset(pt.material_shaders, 0, sizeof(pt.material_shaders));
     pt.texture_count = pt.history = 0;
     pt.material_count = 0;
+    pt.sky_material = -1;
     pt.animated_materials = pt.effect_materials = 0;
     pt.frozen = qfalse;
     pt.logged = qfalse;
@@ -533,14 +963,21 @@ void vk_pt_begin_world(uint32_t vertices, uint32_t indices)
     pt.motion_count[0] = pt.motion_count[1] = 0;
     memset(pt.motion_buckets, -1, sizeof(pt.motion_buckets));
     load_map_lights();
+    build_light_grid();
     VectorClear(pt.sun_color);
     VectorSet(pt.sun_direction, 0, 0, 1);
+    qboolean sun_selected = qfalse;
     for (surface = 0; surface < tr.world->bmodels[0].numSurfaces; ++surface) {
-        const shader_t *shader = tr.world->bmodels[0].firstSurface[surface].shader;
-        if (!shader->rtSunDefined || !(shader->isSky || (shader->surfaceFlags & SURF_SKY))) continue;
-        VectorCopy(shader->rtSunColor, pt.sun_color);
-        VectorCopy(shader->rtSunDirection, pt.sun_direction);
-        break;
+        shader_t *shader = tr.world->bmodels[0].firstSurface[surface].shader;
+        if (shader->remappedShader) shader = shader->remappedShader;
+        if (!(shader->isSky || (shader->surfaceFlags & SURF_SKY))) continue;
+        if (pt.sky_material < 0 || (shader->isSky && !pt.material_shaders[pt.sky_material]->isSky))
+            pt.sky_material = material_id(shader);
+        if (!sun_selected && shader->rtSunDefined) {
+            VectorCopy(shader->rtSunColor, pt.sun_color);
+            VectorCopy(shader->rtSunDirection, pt.sun_direction);
+            sun_selected = qtrue;
+        }
     }
 }
 
@@ -591,6 +1028,7 @@ void vk_pt_load_media(const byte *file, int length, const dheader_t *header)
         }
     }
     ri.Printf(PRINT_ALL, "Path tracing: %u BSP water volumes loaded for underwater transport\n", pt.medium_count);
+    fog_load(brushes, brushCount, sides, sideCount, planes, planeCount);
 }
 
 static void camera_medium(const float *origin, float *out)
@@ -609,12 +1047,15 @@ static void camera_medium(const float *origin, float *out)
     }
 }
 
-void vk_pt_world_vertex(uint32_t vertex, const float *normal, const float *uv)
+void vk_pt_world_vertex(uint32_t vertex, const float *normal, const float *uv, byte alpha)
 {
     if (!pt.active) return;
     memcpy(pt.world_attributes[vertex].normal, normal, 3 * sizeof(float));
     memcpy(pt.world_attributes[vertex].uv, uv, 2 * sizeof(float));
-    for (int i = 0; i < 4; ++i) pt.world_attributes[vertex].color[i] = 1;
+    // RGB holds baked lighting on BSP surfaces, but alpha is independent
+    // material data. The shared shader interpolates it for alphaGen vertex.
+    for (int i = 0; i < 3; ++i) pt.world_attributes[vertex].color[i] = 1;
+    pt.world_attributes[vertex].color[3] = alpha / 255.0f;
 }
 
 void vk_pt_world_surface(uint32_t first_index, uint32_t index_count, shader_t *shader)
@@ -679,7 +1120,12 @@ const char *vk_pt_builtin_shader(const char *name)
         { "vqe/test/pane", "{\nrt_dielectric 1.5 18\nrt_absorption 0.003 0.0005 0.0002\n{ map $whiteimage }\n}" },
         { "vqe/test/control", "{\nrt_dielectric 1 18\nrt_absorption 0 0 0\n{ map $whiteimage }\n}" },
         { "vqe/test/pbr", "{\nrt_material 0.5 0\nrt_basecolormap *pt_base\nrt_normalmap *pt_normal\nrt_ormmap *pt_orm\n{ map $whiteimage }\n}" },
-        { "vqe/test/flat", "{\nrt_material 0.5 0\nrt_basecolormap *pt_base\nrt_normalmap *pt_normal\nrt_normalscale 0\nrt_ormmap *pt_orm\n{ map $whiteimage }\n}" }
+        { "vqe/test/flat", "{\nrt_material 0.5 0\nrt_basecolormap *pt_base\nrt_normalmap *pt_normal\nrt_normalscale 0\nrt_ormmap *pt_orm\n{ map $whiteimage }\n}" },
+        { "vqe/test/mirror", "{\nrt_material 0.02 1\n{ map $whiteimage }\n}" },
+        { "vqe/test/moving", "{\nq3map_surfacelight 1500\n{ map *pt_base }\n}" },
+        { "vqe/test/effect_backing", "{\nq3map_surfacelight 20\n{ map *pt_checker }\n}" },
+        { "vqe/test/clear_add", "{\n{ map $whiteimage\nblendFunc add\nrgbGen const ( 0 0 0 ) }\n}" },
+        { "vqe/test/clear_filter", "{\n{ map $whiteimage\nblendFunc filter }\n}" }
     };
     for (int i = 0; i < ARRAY_LEN(definitions); ++i)
         if (!Q_stricmp(name, definitions[i].name)) return definitions[i].text;
@@ -696,7 +1142,7 @@ static void test_quad(float *positions, uint32_t *indices, uint32_t *vc, uint32_
     for (int i = 0; i < 4; ++i) {
         vec2_t uv = {(corners[i][0]+1)*0.5f, (corners[i][1]+1)*0.5f};
         for (int j = 0; j < 3; ++j) positions[(*vc+i)*3+j] = origin[j]+corners[i][0]*u[j]+corners[i][1]*v[j];
-        vk_pt_world_vertex(*vc+i, normal, uv);
+        vk_pt_world_vertex(*vc+i, normal, uv, 255);
     }
     for (int i = 0; i < 6; ++i) indices[*ic+i] = *vc+triangles[i];
     vk_pt_world_surface(*ic, 6, R_FindShader(material, LIGHTMAP_NONE, qtrue));
@@ -720,6 +1166,25 @@ void vk_pt_test_scene(float *positions, uint32_t *indices, uint32_t *vc, uint32_
     R_CreateImage("*pt_normal", normal, 64, 64, qtrue, qfalse, GL_REPEAT);
     R_CreateImage("*pt_orm", orm, 64, 64, qtrue, qfalse, GL_REPEAT);
     R_CreateImage("*pt_base", base, 64, 64, qtrue, qfalse, GL_REPEAT);
+    if (r_pathTracingTestScene->integer == 3) {
+        // Both effects are visually neutral. Their backing must stay visible,
+        // even closer than the shadow bias/near plane and through intersections.
+        test_quad(positions, indices, vc, ic, (vec3_t){10300,0,64}, (vec3_t){0,-280,0}, (vec3_t){0,0,155}, "vqe/test/effect_backing");
+        test_quad(positions, indices, vc, ic, (vec3_t){10299.875f,130,64}, (vec3_t){0,-75,0}, (vec3_t){0,0,105}, "vqe/test/clear_add");
+        test_quad(positions, indices, vc, ic, (vec3_t){10299.875f,-130,64}, (vec3_t){2,-75,0}, (vec3_t){0,0,105}, "vqe/test/clear_filter");
+        pt.world_vertices = *vc; pt.world_indices = *ic;
+        ri.Printf(PRINT_ALL, "Path tracing native effect fixture: 0.125-unit gap and intersecting neutral layers\n");
+        return;
+    }
+    if (r_pathTracingTestScene->integer == 2) {
+        test_quad(positions, indices, vc, ic, (vec3_t){10300,0,64}, (vec3_t){0,-210,0}, (vec3_t){0,0,125}, "vqe/test/mirror");
+        test_quad(positions, indices, vc, ic, (vec3_t){9800,0,64}, (vec3_t){0,700,0}, (vec3_t){0,0,450}, "vqe/test/checker");
+        material_id(R_FindShader("vqe/test/moving", LIGHTMAP_NONE, qtrue));
+        pt.test_motion_valid = qfalse;
+        pt.world_vertices = *vc; pt.world_indices = *ic;
+        ri.Printf(PRINT_ALL, "Path tracing native mirror fixture: static plane and tracked moving reflected target\n");
+        return;
+    }
     // Camera: noclip; setviewpos 10000 0 64 0. Right on screen is -Y.
     test_quad(positions, indices, vc, ic, (vec3_t){10480,0,64}, (vec3_t){0,-300,0}, (vec3_t){0,0,185}, "vqe/test/checker");
     test_quad(positions, indices, vc, ic, (vec3_t){9970,0,220}, (vec3_t){0,95,0}, (vec3_t){0,0,70}, "vqe/test/light");
@@ -754,15 +1219,42 @@ void vk_pt_test_scene(float *positions, uint32_t *indices, uint32_t *vc, uint32_
     pt.world_indices = *ic;
 }
 
+void vk_pt_test_motion(float *positions, uint32_t *indices, uint32_t *vc, uint32_t *ic)
+{
+    if (!pt.active) return;
+    if (r_pathTracingTestMotion->integer == 2) { pt.test_motion_valid = qfalse; return; }
+    float y = r_pathTracingTestMotion->integer ? 120*sinf(backEnd.refdef.rd.time*0.0015f) : 0;
+    static const float corners[4][2] = {{-1,-1},{1,-1},{1,1},{-1,1}};
+    static const uint32_t order[6] = {0,1,2,0,2,3};
+    pt_vertex_t *vertices = pt.attributes.mapped;
+    uint32_t *materials = pt.triangle_materials.mapped;
+    uint32_t material = material_id(R_FindShader("vqe/test/moving", LIGHTMAP_NONE, qtrue));
+    for (uint32_t i = 0; i < 4; ++i) {
+        float *p = positions+(*vc+i)*3;
+        VectorSet(p, 9900, y+corners[i][0]*45, 64+corners[i][1]*65);
+        pt_vertex_t *v = vertices+*vc+i;
+        memset(v, 0, sizeof(*v));
+        VectorSet(v->normal, 1, 0, 0); v->normal[3] = 65534;
+        v->uv[0] = (corners[i][0]+1)*0.5f; v->uv[1] = (corners[i][1]+1)*0.5f;
+        VectorCopy(p, v->previous); v->previous[1] += pt.test_previous_y-y;
+        v->previous[3] = pt.test_motion_valid ? 1 : 0;
+        for (int j = 0; j < 4; ++j) v->color[j] = 1;
+    }
+    for (uint32_t i = 0; i < 6; ++i) indices[*ic+i] = *vc+order[i];
+    materials[*ic/3] = materials[*ic/3+1] = material;
+    *vc += 4; *ic += 6;
+    pt.test_previous_y = y; pt.test_motion_valid = qtrue;
+}
+
 void vk_pt_begin_frame(void)
 {
     if (!pt.active) return;
     pt.motion_count[pt.motion_frame] = pt.motion_vertices = 0;
     pt.motion_matched = pt.motion_rejected = 0;
     memset(pt.motion_buckets[pt.motion_frame], -1, sizeof(pt.motion_buckets[pt.motion_frame]));
-    if (pt.world_vertices) memcpy(pt.attributes.mapped, pt.world_attributes,
+    if (pt.world_upload_pending && pt.world_vertices) memcpy(pt.attributes.mapped, pt.world_attributes,
         pt.world_vertices * sizeof(pt_vertex_t));
-    if (pt.world_indices) memcpy(pt.triangle_materials.mapped, pt.world_materials,
+    if (pt.world_upload_pending && pt.world_indices) memcpy(pt.triangle_materials.mapped, pt.world_materials,
         (pt.world_indices / 3) * sizeof(uint32_t));
 }
 
@@ -779,6 +1271,10 @@ void vk_pt_capture(uint32_t first_vertex, uint32_t first_index,
     uint32_t motion_id = entity->motionId ? entity->motionId : 65535u;
     if (!pt.active) return;
     id = material_id(shader);
+    const pt_material_t *material = (const pt_material_t *)pt.materials.mapped + id;
+    if (tess.rayDynamicPolys && shader->polygonOffset && material->params[2] == 0 &&
+        material->emission[1] == 0 && (material->params[0] <= 1 || material->params[0] == 3))
+        id |= 0x08000000u; // Attached world decal: shading layer, never a floating blocker.
     /* Legacy/untracked submissions never borrow another object's history. */
     id |= 0x10000000u;
     if (entity != &tr.worldEntity && entity->motionId &&
@@ -846,6 +1342,7 @@ void vk_pt_capture(uint32_t first_vertex, uint32_t first_index,
         }
         for (k = 0; k < 4; ++k) vertices[i].color[k] = tess.vertexColors[i][k] / 255.0f;
         memcpy(vertices[i].local, tess.xyz[i], sizeof(vec3_t));
+        vertices[i].local[3] = tess.rayDynamicPolys ? (float)tess.rayPolyIds[i] : 0;
         if (previous) {
             memcpy(vertices[i].previous, pt.motion_positions[pt.motion_frame ^ 1][previous->first + i], sizeof(vec3_t));
             vertices[i].previous[3] = 1;
@@ -859,15 +1356,16 @@ qboolean vk_pt_initialize(uint32_t width, uint32_t height,
     VkImageView color, VkImageView depth, VkImageView output,
     VkImageView motion, VkImageView path_depth)
 {
+    gpu_labels_initialize();
     uint32_t i;
-    VkDescriptorSetLayoutBinding bindings[34] = {0};
+    VkDescriptorSetLayoutBinding bindings[49] = {0};
     VkPhysicalDeviceProperties properties;
     VkDescriptorSetLayoutCreateInfo set_info = { .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO };
     VkDescriptorPoolSize sizes[] = {
         { VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR, 1 },
         { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, PT_MAX_TEXTURES + 2 },
         { VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 3 },
-        { VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 27 }
+        { VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 42 }
     };
     VkDescriptorPoolCreateInfo pool = { .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO };
     VkDescriptorSetAllocateInfo allocation = { .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO };
@@ -879,23 +1377,26 @@ qboolean vk_pt_initialize(uint32_t width, uint32_t height,
     VkSamplerCreateInfo sampler = { .sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO };
     VkDescriptorImageInfo images[3];
     VkWriteDescriptorSet writes[3] = {0};
-    extern unsigned char pathtrace_comp_spv[];
-    extern int pathtrace_comp_spv_size;
+    extern unsigned char pt_guides_comp_spv[];
+    extern int pt_guides_comp_spv_size;
     extern unsigned char pt_denoise_comp_spv[];
     extern int pt_denoise_comp_spv_size;
     extern unsigned char pt_temporal_comp_spv[];
     extern int pt_temporal_comp_spv_size;
     qvkGetPhysicalDeviceProperties(vk.physical_device, &properties);
-    if ((VkDeviceSize)width * height * sizeof(float) * 4 > properties.limits.maxStorageBufferRange ||
+    if ((VkDeviceSize)width * height * 48 > properties.limits.maxStorageBufferRange ||
         max_vertices * sizeof(pt_vertex_t) > properties.limits.maxStorageBufferRange ||
         MAX_SHADERS * sizeof(pt_material_t) > properties.limits.maxStorageBufferRange) {
         ri.Printf(PRINT_WARNING, "Path tracing: resolution/scene exceeds device storage-buffer range\n");
         return qfalse;
     }
     if (!buffer_create(&pt.attributes, max_vertices * sizeof(pt_vertex_t), qtrue) ||
+        !buffer_create(&pt.light_grid, sizeof(pt_light_grid_t), qtrue) ||
+        !buffer_create(&pt.blue_noise, sizeof(pt_blue_noise), qtrue) ||
         !buffer_create(&pt.triangle_materials, (max_indices / 3) * sizeof(uint32_t), qtrue) ||
         !buffer_create(&pt.materials, MAX_SHADERS * sizeof(pt_material_t), qtrue) ||
         !buffer_create(&pt.lights, sizeof(pt_lights_t), qtrue) ||
+        !buffer_create(&pt.fog, sizeof(pt_fog_header_t), qtrue) ||
         !buffer_create(&pt.accumulation, (VkDeviceSize)width * height * sizeof(float) * 4, qfalse) ||
         !buffer_create(&pt.guides[0], (VkDeviceSize)width * height * sizeof(float) * 4, qfalse) ||
         !buffer_create(&pt.guides[1], (VkDeviceSize)width * height * sizeof(float) * 4, qfalse) ||
@@ -914,12 +1415,22 @@ qboolean vk_pt_initialize(uint32_t width, uint32_t height,
     pt.partition_indices = malloc(max_indices*sizeof(uint32_t));
     pt.partition_materials = malloc(max_indices/3*sizeof(uint32_t));
     if (!pt.partition_indices || !pt.partition_materials) goto fail;
-    if (!buffer_create(&pt.specular, (VkDeviceSize)width * height * 16, qfalse) ||
+    if (!buffer_create(&pt.transmission, (VkDeviceSize)width * height * 16, qfalse) ||
+        !buffer_create(&pt.transmission_guide, (VkDeviceSize)width * height * 32, qfalse) ||
+        !buffer_create(&pt.previous_transmission_guide, (VkDeviceSize)width * height * 32, qfalse) ||
+        !buffer_create(&pt.transmission_motion, (VkDeviceSize)width * height * 48, qfalse) ||
+        !buffer_create(&pt.specular, (VkDeviceSize)width * height * 16, qfalse) ||
+        !buffer_create(&pt.reflection_guide, (VkDeviceSize)width * height * 32, qfalse) ||
+        !buffer_create(&pt.previous_reflection_guide, (VkDeviceSize)width * height * 32, qfalse) ||
+        !buffer_create(&pt.reflection_motion, (VkDeviceSize)width * height * 32, qfalse) ||
+        !buffer_create(&pt.light_change, (VkDeviceSize)width * height * 16, qfalse) ||
         !buffer_create(&pt.visible_emission, (VkDeviceSize)width * height * 16, qfalse) ||
         !buffer_create(&pt.shading_guide, (VkDeviceSize)width * height * 16, qfalse) ||
         !buffer_create(&pt.previous_shading_guide, (VkDeviceSize)width * height * 16, qfalse)) goto fail;
     for (i = 0; i < 2; ++i)
-        if (!buffer_create(&pt.spec_history[i], (VkDeviceSize)width * height * 16, qfalse) ||
+        if (!buffer_create(&pt.transmission_history[i], (VkDeviceSize)width * height * 16, qfalse) ||
+            !buffer_create(&pt.spec_history[i], (VkDeviceSize)width * height * 16, qfalse) ||
+            !buffer_create(&pt.moments[i], (VkDeviceSize)width * height * 16, qfalse) ||
             !buffer_create(&pt.spec_filter[i], (VkDeviceSize)width * height * 16, qfalse)) goto fail;
     pt.motion_positions[1] = malloc(max_vertices * sizeof(vec3_t));
     if (!pt.motion_positions[0] || !pt.motion_positions[1]) goto fail;
@@ -951,15 +1462,18 @@ qboolean vk_pt_initialize(uint32_t width, uint32_t height,
     layout.pushConstantRangeCount = 1;
     layout.pPushConstantRanges = &push;
     VK_CHECK(qvkCreatePipelineLayout(vk.device, &layout, NULL, &pt.layout));
-    module_info.codeSize = pathtrace_comp_spv_size;
-    module_info.pCode = (const uint32_t *)pathtrace_comp_spv;
-    VK_CHECK(qvkCreateShaderModule(vk.device, &module_info, NULL, &module));
+    // Build the selected integrator once, before the first rendered map frame.
+    // The original is an on-demand fallback, not an unused startup compile.
+    if (!lighting_pipeline_select(lighting_pipeline_requested())) goto fail;
     pipeline.stage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
     pipeline.stage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
-    pipeline.stage.module = module;
     pipeline.stage.pName = "main";
     pipeline.layout = pt.layout;
-    VK_CHECK(qvkCreateComputePipelines(vk.device, VK_NULL_HANDLE, 1, &pipeline, NULL, &pt.pipeline));
+    module_info.codeSize = pt_guides_comp_spv_size;
+    module_info.pCode = (const uint32_t *)pt_guides_comp_spv;
+    VK_CHECK(qvkCreateShaderModule(vk.device, &module_info, NULL, &module));
+    pipeline.stage.module = module;
+    VK_CHECK(qvkCreateComputePipelines(vk.device, VK_NULL_HANDLE, 1, &pipeline, NULL, &pt.guide_pipeline));
     qvkDestroyShaderModule(vk.device, module, NULL);
     module_info.codeSize = pt_denoise_comp_spv_size;
     module_info.pCode = (const uint32_t *)pt_denoise_comp_spv;
@@ -978,8 +1492,6 @@ qboolean vk_pt_initialize(uint32_t width, uint32_t height,
     sampler.addressModeU = sampler.addressModeV = sampler.addressModeW = VK_SAMPLER_ADDRESS_MODE_REPEAT;
     sampler.maxLod = VK_LOD_CLAMP_NONE;
     VK_CHECK(qvkCreateSampler(vk.device, &sampler, NULL, &pt.sampler));
-    sampler.addressModeU = sampler.addressModeV = sampler.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
-    VK_CHECK(qvkCreateSampler(vk.device, &sampler, NULL, &pt.clamp_sampler));
     images[0] = (VkDescriptorImageInfo){ pt.sampler, color, VK_IMAGE_LAYOUT_GENERAL };
     images[1] = (VkDescriptorImageInfo){ pt.sampler, depth, VK_IMAGE_LAYOUT_GENERAL };
     images[2] = (VkDescriptorImageInfo){ VK_NULL_HANDLE, output, VK_IMAGE_LAYOUT_GENERAL };
@@ -1019,6 +1531,15 @@ qboolean vk_pt_initialize(uint32_t width, uint32_t height,
     bind_buffer(27, pt.visible_emission.buffer, pt.visible_emission.size);
     bind_buffer(30, pt.spec_filter[0].buffer, pt.spec_filter[0].size);
     bind_buffer(31, pt.spec_filter[1].buffer, pt.spec_filter[1].size);
+    bind_buffer(34, pt.light_grid.buffer, pt.light_grid.size);
+    bind_buffer(35, pt.blue_noise.buffer, pt.blue_noise.size);
+    bind_buffer(38, pt.reflection_motion.buffer, pt.reflection_motion.size);
+    bind_buffer(41, pt.light_change.buffer, pt.light_change.size);
+    bind_buffer(42, pt.transmission.buffer, pt.transmission.size);
+    bind_buffer(47, pt.transmission_motion.buffer, pt.transmission_motion.size);
+    bind_buffer(48, pt.fog.buffer, pt.fog.size);
+    pt.fog_dirty = qtrue;
+    memcpy(pt.blue_noise.mapped, pt_blue_noise, sizeof(pt_blue_noise));
     pt.width = width;
     pt.height = height;
     pt.max_vertices = max_vertices;
@@ -1033,15 +1554,30 @@ fail:
 
 void vk_pt_shutdown(void)
 {
+    rr_shutdown();
+    memset(&pt_gpu_labels, 0, sizeof(pt_gpu_labels));
+    staged_shutdown();
+    shader_profile_shutdown();
     free(pt.partition_indices); free(pt.partition_materials);
     if (pt.profile_pool) pt.destroy_queries(vk.device, pt.profile_pool, NULL);
     free(pt.media); free(pt.medium_planes);
     free(pt.world_attributes);
     free(pt.world_materials);
     buffer_destroy(&pt.attributes);
+    buffer_destroy(&pt.light_grid);
+    buffer_destroy(&pt.blue_noise);
+    buffer_destroy(&pt.reflection_guide);
+    buffer_destroy(&pt.previous_reflection_guide);
+    buffer_destroy(&pt.reflection_motion);
+    buffer_destroy(&pt.light_change);
+    buffer_destroy(&pt.transmission);
+    buffer_destroy(&pt.transmission_guide);
+    buffer_destroy(&pt.previous_transmission_guide);
+    buffer_destroy(&pt.transmission_motion);
     buffer_destroy(&pt.triangle_materials);
     buffer_destroy(&pt.materials);
     buffer_destroy(&pt.lights);
+    buffer_destroy(&pt.fog);
     buffer_destroy(&pt.accumulation);
     buffer_destroy(&pt.guides[0]);
     buffer_destroy(&pt.guides[1]);
@@ -1060,19 +1596,23 @@ void vk_pt_shutdown(void)
     buffer_destroy(&pt.shading_guide);
     buffer_destroy(&pt.previous_shading_guide);
     for (int i = 0; i < 2; ++i) {
+        buffer_destroy(&pt.transmission_history[i]);
         buffer_destroy(&pt.spec_history[i]);
+        buffer_destroy(&pt.moments[i]);
         buffer_destroy(&pt.spec_filter[i]);
     }
     free(pt.motion_positions[0]);
     free(pt.motion_positions[1]);
-    if (pt.pipeline) qvkDestroyPipeline(vk.device, pt.pipeline, NULL);
+    lighting_pipeline_shutdown();
+    if (pt.compact_transport_pipeline) qvkDestroyPipeline(vk.device, pt.compact_transport_pipeline, NULL);
+    if (pt.material_cache_pipeline) qvkDestroyPipeline(vk.device, pt.material_cache_pipeline, NULL);
+    if (pt.guide_pipeline) qvkDestroyPipeline(vk.device, pt.guide_pipeline, NULL);
     if (pt.denoise_pipeline) qvkDestroyPipeline(vk.device, pt.denoise_pipeline, NULL);
     if (pt.temporal_pipeline) qvkDestroyPipeline(vk.device, pt.temporal_pipeline, NULL);
     if (pt.layout) qvkDestroyPipelineLayout(vk.device, pt.layout, NULL);
     if (pt.pool) qvkDestroyDescriptorPool(vk.device, pt.pool, NULL);
     if (pt.set_layout) qvkDestroyDescriptorSetLayout(vk.device, pt.set_layout, NULL);
     if (pt.sampler) qvkDestroySampler(vk.device, pt.sampler, NULL);
-    if (pt.clamp_sampler) qvkDestroySampler(vk.device, pt.clamp_sampler, NULL);
     memset(&pt, 0, sizeof(pt));
 }
 
@@ -1096,19 +1636,70 @@ qboolean vk_pt_record(VkCommandBuffer cmd, VkAccelerationStructureKHR scene,
     float c[32] = {0};
     pt_temporal_params_t *reconstruction = pt.temporal_params.mapped;
     pt_lights_t *lights = pt.lights.mapped;
+    const float ambient = r_pathTracingAmbient->value;
+    const qboolean ambient_changed = lights->sky_environment[1] != ambient;
+    const float sun_angle = r_pathTracingSunAngle->value * (float)(M_PI / 360.0);
+    const float light_radius = r_pathTracingLightRadius->value;
+    const qboolean penumbra_changed = lights->sky_environment[2] != sun_angle ||
+        lights->sky_environment[3] != light_radius;
+    float previous_positions[PT_MAX_LIGHTS][4], previous_colors[PT_MAX_LIGHTS][4];
+    uint32_t previous_count = lights->counts[1];
+    memcpy(previous_positions, lights->positions, sizeof(previous_positions));
+    memcpy(previous_colors, lights->colors, sizeof(previous_colors));
     const uint32_t *triangle_materials = pt.triangle_materials.mapped;
     const pt_material_t *materials = pt.materials.mapped;
     VkWriteDescriptorSetAccelerationStructureKHR as = { .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET_ACCELERATION_STRUCTURE_KHR };
     VkWriteDescriptorSet write = { .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET };
     VkMemoryBarrier barrier = { .sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER };
     if (!pt.active || !pt.world_vertices) return qfalse;
+    if (!lighting_pipeline_select(lighting_pipeline_requested())) return qfalse;
+    qboolean material_cache_active = r_pathTracingMaterialCache->integer && lighting_material_cache_eligible() &&
+        (pt.lighting_mode & 32) && material_cache_initialize();
+    if (material_cache_active != pt.material_cache_active) {
+        // Upload the original records on either transition: no stale GPU cache
+        // may survive a switch off. The next enabled dispatch repopulates it.
+        pt.materials_dirty = qtrue;
+        pt.material_cache_active = material_cache_active;
+        ri.Printf(PRINT_ALL, "PT_MATERIAL_CACHE enabled=%d requested=%d\n", material_cache_active, r_pathTracingMaterialCache->integer);
+    }
+    qboolean staged_active = material_cache_active && r_pathTracingCompactTransport->integer &&
+        !r_pathTracingShaderProfile->integer && pt.lighting_mode == 57 &&
+        r_pathTracingStaged->integer && staged_initialize();
+    if (staged_active != pt.staged.active) {
+        pt.history = 0;
+        pt.temporal_valid = qfalse;
+        pt.staged.active = staged_active;
+        ri.Printf(PRINT_ALL, "PT_STAGED enabled=%d requested=%d\n", staged_active, r_pathTracingStaged->integer);
+    }
+    if (pt.materials_dirty || pt.material_program_mode != r_pathTracingMaterialFastPath->integer) {
+        // Diagnostic A/B switch changes only unused-input elimination, not
+        // texture programs, light transport, random sequences or history.
+        pt_material_t *programs = pt.materials.mapped;
+        for (uint32_t material = 0; material < pt.material_count; ++material) if (pt.material_shaders[material])
+            for (int layer = 0; layer < (int)programs[material].composition[0]; ++layer) {
+                float *program = &programs[material].layers[layer].vectors[0][3];
+                if (*program == 2 || *program == -2)
+                    *program = r_pathTracingMaterialFastPath->integer ? 2 : -2;
+            }
+        pt.material_program_mode = r_pathTracingMaterialFastPath->integer;
+        pt.materials_dirty = qtrue;
+    }
     if (!r_pathTracingReference->integer || !pt.frozen) pt.material_time = backEnd.refdef.rd.time * 0.001f;
     (void)sun;
+    if (pt.texture_mode_revision != r_textureMode->modificationCount) {
+        pt.textures_dirty = qtrue;
+        reset_history = qtrue;
+        pt.history = 0;
+        pt.texture_mode_revision = r_textureMode->modificationCount;
+    }
     if (pt.textures_dirty) {
         VkDescriptorImageInfo textures[PT_MAX_TEXTURES];
         for (i = 0; i < PT_MAX_TEXTURES; ++i) {
             image_t *texture = i < pt.texture_count ? pt.textures[i] : tr.whiteImage;
-            textures[i] = (VkDescriptorImageInfo){ texture->wrapClampMode == GL_REPEAT ? pt.sampler : pt.clamp_sampler,
+            // Share the native filtering policy (including mip/no-mip,
+            // clamp/repeat and the device-limited anisotropy setting).
+            // The image subsystem owns these cached samplers, not PT.
+            textures[i] = (VkDescriptorImageInfo){ vk_find_sampler(texture->mipmap, texture->wrapClampMode == GL_REPEAT),
                 texture->view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
         }
         write.dstSet = pt.set;
@@ -1121,11 +1712,23 @@ qboolean vk_pt_record(VkCommandBuffer cmd, VkAccelerationStructureKHR scene,
     }
     if (!r_pathTracingReference->integer || !pt.frozen) {
         memset(lights, 0, sizeof(*lights));
+        lights->sky_environment[0] = pt.sky_material+1;
         lights->selection[1] = pt.world_opaque_indices/3;
         for (i = 0; i < index_count / 3; ++i) {
             vec3_t e1, e2, cross;
             float power = materials[triangle_materials[i] & 0xffffu].emission[1];
             const float *a, *b, *c;
+            if (triangle_materials[i] & 0x08000000u) {
+                for (uint32_t v = 0; v < 3; ++v) {
+                    const float *point = cpu_positions + cpu_indices[i * 3 + v] * 3;
+                    if (lights->decal_bounds[0][3] == 0 && v == 0) {
+                        VectorCopy(point, lights->decal_bounds[0]);
+                        VectorCopy(point, lights->decal_bounds[1]);
+                    } else AddPointToBounds(point, lights->decal_bounds[0], lights->decal_bounds[1]);
+                }
+                lights->decal_bounds[0][3] += 1;
+                continue;
+            }
             if (triangle_materials[i] & 0x20000000u) ++lights->counts[2];
             if (power <= 0 || materials[triangle_materials[i] & 0xffffu].emission[2] != 0) continue;
             a = cpu_positions + cpu_indices[i * 3] * 3;
@@ -1141,9 +1744,13 @@ qboolean vk_pt_record(VkCommandBuffer cmd, VkAccelerationStructureKHR scene,
             /* Area * declared emission is an importance proxy, independent of
              * camera visibility. Both NEE and BSDF-hit MIS use this same PDF. */
             lights->selection[0] += power;
+            cache_emitter_geometry(&lights->emitter_geometry[lights->counts[0]], a, b, c,
+                materials[triangle_materials[i] & 0xffffu].emission[1]);
             lights->emitters[lights->counts[0]].primitive = i;
             lights->emitters[lights->counts[0]++].cumulative_power = lights->selection[0];
         }
+        if (r_pathTracingEmitterSearch->integer)
+            build_emitter_search(lights->emitters, lights->counts[0], lights->selection[0], lights->emitter_search_ranges);
         lights->counts[1] = MIN(backEnd.refdef.num_dlights, PT_MAX_LIGHTS);
         for (i = 0; i < lights->counts[1]; ++i) {
             const dlight_t *light = &backEnd.refdef.dlights[i];
@@ -1156,7 +1763,19 @@ qboolean vk_pt_record(VkCommandBuffer cmd, VkAccelerationStructureKHR scene,
         memcpy(lights->colors + PT_MAX_LIGHTS, pt.map_colors, pt.map_light_count * sizeof(pt.map_colors[0]));
         memcpy(lights->cones + PT_MAX_LIGHTS, pt.map_cones, pt.map_light_count * sizeof(pt.map_cones[0]));
     }
+    // A diagnostic toggle can enable the index after reference geometry froze.
+    // Normal rendering with the candidate disabled does not build the index.
+    if (r_pathTracingEmitterSearch->integer && r_pathTracingReference->integer && pt.frozen &&
+        !lights->emitter_search_control[0])
+        build_emitter_search(lights->emitters, lights->counts[0], lights->selection[0], lights->emitter_search_ranges);
+    lights->emitter_search_control[0] = r_pathTracingEmitterSearch->integer != 0;
+    lights->emitter_search_control[1] = PT_EMITTER_SEARCH_BUCKETS;
     pt.frozen = r_pathTracingReference->integer != 0;
+    // Keep the live control outside the frozen-reference geometry/light build.
+    // Reuse a reserved scalar in the existing light buffer, without changing ABI.
+    lights->sky_environment[1] = ambient;
+    lights->sky_environment[2] = sun_angle;
+    lights->sky_environment[3] = light_radius;
     c[0] = origin[0]; c[1] = origin[1]; c[2] = origin[2]; c[3] = near_distance;
     for (i = 0; i < 3; ++i) {
         c[4+i] = axis[i]; c[8+i] = -axis[3+i]; c[12+i] = axis[6+i];
@@ -1175,21 +1794,36 @@ qboolean vk_pt_record(VkCommandBuffer cmd, VkAccelerationStructureKHR scene,
     hash = hash_bytes(hash, triangle_materials + pt.world_indices / 3,
         ((index_count - pt.world_indices) / 3) * sizeof(uint32_t));
     geometry_changed = hash != pt.previous_hash;
-    light_hash = hash_bytes(2166136261u, lights, sizeof(*lights));
+    lights->selection[2] = lights->selection[3] = 0;
+    light_hash = hash_bytes(2166136261u, lights, offsetof(pt_lights_t, previous_positions));
     lights_changed = light_hash != pt.previous_lights_hash;
     /* The emitter CDF contains animated triangle indices/areas and visibility
      * counts. Changes there are geometry motion, not a global lighting cut.
      * Moving emitters/occluders use short, locally clipped history instead.
-     * Game point-light changes (including muzzle flashes) invalidate globally.
+     * Game lights are compared at actual shaded surfaces by the guide pass.
      * Map/material/sky data is static for a world; begin_world invalidates it. */
-    radiance_hash = hash_bytes(2166136261u, lights->counts + 1, sizeof(uint32_t));
-    radiance_hash = hash_bytes(radiance_hash, lights->positions, sizeof(lights->positions));
-    radiance_hash = hash_bytes(radiance_hash, lights->colors, sizeof(lights->colors));
-    radiance_hash = hash_bytes(radiance_hash, lights->cones, sizeof(lights->cones));
+    lights->selection[2] = previous_count;
+    lights->selection[3] = previous_count != lights->counts[1] ||
+        memcmp(previous_positions, lights->positions, sizeof(previous_positions)) ||
+        memcmp(previous_colors, lights->colors, sizeof(previous_colors));
+    if (lights->selection[3] != 0) ++pt.local_light_updates;
+    memcpy(lights->previous_positions, previous_positions, sizeof(previous_positions));
+    memcpy(lights->previous_colors, previous_colors, sizeof(previous_colors));
     float current_medium[4];
     camera_medium(origin, current_medium);
-    radiance_hash = hash_bytes(radiance_hash, current_medium, sizeof(current_medium));
-    temporal_enabled = c[27] != 0 && r_pathTracingTemporal->integer;
+    radiance_hash = hash_bytes(2166136261u, current_medium, sizeof(current_medium));
+    radiance_hash = hash_bytes(radiance_hash, &ambient, sizeof(ambient));
+    radiance_hash = hash_bytes(radiance_hash, &sun_angle, sizeof(sun_angle));
+    radiance_hash = hash_bytes(radiance_hash, &light_radius, sizeof(light_radius));
+    pt_rr.frame_ready = rr_requested();
+    if (pt_rr.frame_ready != pt_rr.previous_active) pt.temporal_valid = qfalse;
+    uint32_t rr_sampling = pt_rr.frame_ready && pt.lighting_mode == 57 &&
+        r_pathTracingCompactTransport->integer && !r_pathTracingStaged->integer ?
+        (r_pathTracingLightReuse->integer ? 1u : 0u) | (r_pathTracingAdaptive->integer ? 2u : 0u) : 0;
+    if (rr_sampling != pt_rr.sampling_flags) pt.temporal_valid = qfalse;
+    pt_rr.sampling_flags = rr_sampling;
+    pt_rr.previous_active = pt_rr.frame_ready;
+    temporal_enabled = (c[27] != 0 && r_pathTracingTemporal->integer) || pt_rr.frame_ready;
     reset_reasons = (reset_history ? 1u : 0u) | (!pt.temporal_valid ? 2u : 0u) |
         (radiance_hash != pt.previous_radiance_hash ? 4u : 0u) |
         ((backEnd.refdef.rd.time < pt.previous_time ||
@@ -1203,7 +1837,8 @@ qboolean vk_pt_record(VkCommandBuffer cmd, VkAccelerationStructureKHR scene,
             fabsf(c[11] - previous[11]) > 0.0001f ||
             fabsf(c[15] - previous[15]) > 0.0001f ||
             c[19] != previous[19] || c[21] != previous[21] ||
-            c[28] != previous[28] || c[29] != previous[29])
+            c[28] != previous[28] || c[29] != previous[29] ||
+            pt.previous_sampling != r_pathTracingSampling->integer)
             reset_reasons |= 16u;
     }
     reject_history = reset_reasons != 0;
@@ -1220,9 +1855,12 @@ qboolean vk_pt_record(VkCommandBuffer cmd, VkAccelerationStructureKHR scene,
     reconstruction->options[0] = temporal_enabled ? 1 : 0;
     reconstruction->options[1] = r_pathTracingTemporalDebug->integer;
     reconstruction->options[2] = r_pathTracingDebug->integer;
+    reconstruction->options[3] = r_pathTracingSampling->integer;
     reconstruction->depth_projection[0] = projection[10];
     reconstruction->depth_projection[1] = projection[14];
     reconstruction->depth_projection[2] = pt.material_time;
+    reconstruction->depth_projection[3] = pt.previous_material_time;
+    pt.previous_material_time = pt.material_time;
     memcpy(reconstruction->camera_medium, current_medium, sizeof(current_medium));
     if (temporal_enabled && reject_history) {
         ++pt.temporal_resets;
@@ -1231,11 +1869,12 @@ qboolean vk_pt_record(VkCommandBuffer cmd, VkAccelerationStructureKHR scene,
     }
     pt.previous_lights_hash = light_hash;
     pt.previous_radiance_hash = radiance_hash;
+    pt.previous_sampling = r_pathTracingSampling->integer;
     pt.previous_time = backEnd.refdef.rd.time;
     memcpy(pt.previous_temporal_camera, c, sizeof(c));
     /* The fixed-view reference and the live temporal estimator must not feed
      * accumulated samples into each other. Live input is always this frame. */
-    if (geometry_changed || lights_changed) { pt.history = 0; ++pt.scene_resets; }
+    if (geometry_changed || lights_changed || ambient_changed || penumbra_changed) { pt.history = 0; ++pt.scene_resets; }
     if (memcmp(c, pt.previous_camera, sizeof(c))) { pt.history = 0; ++pt.camera_resets; }
     memcpy(pt.previous_camera, c, sizeof(c));
     pt.previous_hash = hash;
@@ -1270,28 +1909,124 @@ qboolean vk_pt_record(VkCommandBuffer cmd, VkAccelerationStructureKHR scene,
         pt.spec_history[pt.reconstruction_index].size);
     bind_buffer(32, pt.shading_guide.buffer, pt.shading_guide.size);
     bind_buffer(33, pt.previous_shading_guide.buffer, pt.previous_shading_guide.size);
+    bind_buffer(36, pt.reflection_guide.buffer, pt.reflection_guide.size);
+    bind_buffer(37, pt.previous_reflection_guide.buffer, pt.previous_reflection_guide.size);
+    bind_buffer(39, pt.moments[pt.reconstruction_index ^ 1].buffer, pt.moments[pt.reconstruction_index ^ 1].size);
+    bind_buffer(40, pt.moments[pt.reconstruction_index].buffer, pt.moments[pt.reconstruction_index].size);
+    bind_buffer(43, pt.transmission_history[pt.reconstruction_index ^ 1].buffer,
+        pt.transmission_history[pt.reconstruction_index ^ 1].size);
+    bind_buffer(44, pt.transmission_history[pt.reconstruction_index].buffer,
+        pt.transmission_history[pt.reconstruction_index].size);
+    bind_buffer(45, pt.transmission_guide.buffer, pt.transmission_guide.size);
+    bind_buffer(46, pt.previous_transmission_guide.buffer, pt.previous_transmission_guide.size);
     barrier.srcAccessMask = VK_ACCESS_HOST_WRITE_BIT;
     barrier.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
     qvkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_HOST_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
         0, 1, &barrier, 0, NULL, 0, NULL);
-    buffer_upload(cmd, &pt.attributes, vertex_count*sizeof(pt_vertex_t));
-    buffer_upload(cmd, &pt.triangle_materials, index_count/3*sizeof(uint32_t));
+    /* Static vertex attributes and triangle-to-material IDs are immutable
+     * between map loads. Animated material records have their own dirty flag;
+     * never cache the moving surfaces/marks appended after this prefix. */
+    VkDeviceSize attribute_offset = pt.world_upload_pending ? 0 : pt.world_vertices*sizeof(pt_vertex_t);
+    VkDeviceSize triangle_offset = pt.world_upload_pending ? 0 : pt.world_indices/3*sizeof(uint32_t);
+    VkDeviceSize attribute_bytes = vertex_count*sizeof(pt_vertex_t)-attribute_offset;
+    VkDeviceSize triangle_bytes = index_count/3*sizeof(uint32_t)-triangle_offset;
+    buffer_upload_range(cmd, &pt.attributes, attribute_offset, attribute_bytes);
+    buffer_upload_range(cmd, &pt.triangle_materials, triangle_offset, triangle_bytes);
+    pt.geometry_upload_bytes = attribute_bytes+triangle_bytes;
+    pt.world_upload_pending = qfalse;
     if (pt.materials_dirty) {
         buffer_upload(cmd, &pt.materials, pt.material_count*sizeof(pt_material_t));
         pt.materials_dirty = qfalse;
     }
     buffer_upload(cmd, &pt.lights, sizeof(pt_lights_t));
+    if (pt.fog_dirty) {
+        buffer_upload(cmd, &pt.fog, pt.fog.size);
+        pt.fog_dirty = qfalse;
+    }
     buffer_upload(cmd, &pt.temporal_params, sizeof(pt_temporal_params_t));
+    if (pt.sampling_dirty) {
+        buffer_upload(cmd, &pt.light_grid, 32+pt.light_cells*pt.map_light_count*16);
+        buffer_upload(cmd, &pt.blue_noise, sizeof(pt_blue_noise));
+        pt.sampling_dirty = qfalse;
+    }
     barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT | VK_ACCESS_SHADER_WRITE_BIT;
     barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
     qvkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
         VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, &barrier, 0, NULL, 0, NULL);
-    qvkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pt.pipeline);
     qvkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pt.layout, 0, 1, &pt.set, 0, NULL);
+    if (material_cache_active) {
+        qvkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pt.material_cache_pipeline);
+        c[28] = (float)pt.material_count;
+        qvkCmdPushConstants(cmd, pt.layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(c), c);
+        qvkCmdDispatch(cmd, (pt.material_count * 9u + 63u) / 64u, 1, 1);
+        c[28] = (float)r_pathTracingSamples->integer;
+        barrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+        barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+        qvkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, &barrier, 0, NULL, 0, NULL);
+    }
+    qvkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pt.guide_pipeline);
     qvkCmdPushConstants(cmd, pt.layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(c), c);
+    if (pt_rr.frame_ready) { c[27] = (float)pt_rr.sampling_flags; rr_prepare(cmd, c); }
     qvkCmdDispatch(cmd, (pt.width + 7) / 8, (pt.height + 7) / 8, 1);
+    barrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+    barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
+    qvkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, &barrier, 0, NULL, 0, NULL);
+    uint32_t lighting_mode = pt.lighting_mode;
+    qboolean brdf_active = (lighting_mode & 1) != 0;
+    qboolean map_light_cull_active = (lighting_mode & 2) != 0;
+    if (brdf_active != pt.brdf_active)
+        ri.Printf(PRINT_ALL, "PT_BRDF_MODE enabled=%d requested=%d\n", brdf_active, r_pathTracingBRDFReuse->integer);
+    pt.brdf_active = brdf_active;
+    if (map_light_cull_active != pt.map_light_cull_active)
+        ri.Printf(PRINT_ALL, "PT_MAP_LIGHT_MODE enabled=%d requested=%d\n", map_light_cull_active, r_pathTracingMapLightCull->integer);
+    pt.map_light_cull_active = map_light_cull_active;
+    qboolean alias_pdf_active = (lighting_mode & 4) != 0;
+    if (alias_pdf_active != pt.alias_pdf_active)
+        ri.Printf(PRINT_ALL, "PT_ALIAS_PDF_MODE enabled=%d requested=%d\n", alias_pdf_active, r_pathTracingAliasPDF->integer);
+    pt.alias_pdf_active = alias_pdf_active;
+    qboolean emitter_geometry_active = (lighting_mode & 8) != 0;
+    if (emitter_geometry_active != pt.emitter_geometry_active)
+        ri.Printf(PRINT_ALL, "PT_EMITTER_GEOMETRY_MODE enabled=%d emitters=%u\n",
+            emitter_geometry_active, lights->counts[0]);
+    pt.emitter_geometry_active = emitter_geometry_active;
+    qboolean light_loop_active = (lighting_mode & 16) != 0;
+    if (light_loop_active != pt.light_loop_active)
+        ri.Printf(PRINT_ALL, "PT_LIGHT_LOOP enabled=%d requested=%d\n", light_loop_active, r_pathTracingLightLoop->integer);
+    pt.light_loop_active = light_loop_active;
+    pt.profile_instrumented = shader_profile_bind(cmd, brdf_active, map_light_cull_active, alias_pdf_active, emitter_geometry_active, light_loop_active);
+    qboolean compact_active = !pt.profile_instrumented && compact_transport_select(pt.lighting_mode);
+    if (compact_active != pt.compact_transport_active)
+        ri.Printf(PRINT_ALL, "PT_COMPACT_TRANSPORT enabled=%d requested=%d\n", compact_active, r_pathTracingCompactTransport->integer);
+    pt.compact_transport_active = compact_active;
+    qboolean rr_trace = pt_rr.frame_ready && compact_active && !staged_active;
+    if (rr_trace) {
+        if (pt_rr.sampling_flags & 1u) {
+            rr_bind(cmd, pt_rr.spatial, c);
+            qvkCmdDispatch(cmd, (pt.width + 7) / 8, (pt.height + 7) / 8, 1);
+            rr_barrier(cmd);
+        }
+        rr_bind(cmd, pt_rr.trace, c);
+    } else if (!pt.profile_instrumented) {
+        // RR guide's two-set layout is incompatible with the native one-set
+        // layout. Rebind both descriptors and push constants explicitly.
+        qvkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pt.layout, 0, 1, &pt.set, 0, NULL);
+        qvkCmdPushConstants(cmd, pt.layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(c), c);
+        qvkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
+        compact_active ? pt.compact_transport_pipeline : pt.lighting_pipelines[lighting_mode]);
+    }
     vk_pt_profile(cmd, 3);
-    if (c[27] != 0) {
+    if (!staged_active || (r_pathTracingStaged->integer == 2 && c[31] == 0))
+        qvkCmdDispatch(cmd, (pt.width + 7) / 8,
+            rr_trace ? (pt.height + pt_rr.rows - 1) / pt_rr.rows :
+            (compact_active ? (pt.height + pt.compact_transport_rows - 1) / pt.compact_transport_rows : (pt.height + 7) / 8), 1);
+    if (staged_active) staged_record(cmd, c);
+    vk_pt_profile(cmd, 4);
+    if (pt.profile_instrumented) shader_profile_finish(cmd);
+    if (pt_rr.frame_ready) rr_pack(cmd, c, rr_trace);
+    pt_rr.direct_profile_frame = rr_trace;
+    if (c[27] != 0 && !pt_rr.frame_ready) {
         /* Spatial reconstruction never feeds back into the unbiased reference
          * accumulator. Every pass reads a distinct source buffer. */
         barrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_SHADER_READ_BIT;
@@ -1303,7 +2038,7 @@ qboolean vk_pt_record(VkCommandBuffer cmd, VkAccelerationStructureKHR scene,
             qvkCmdDispatch(cmd, (pt.width + 7) / 8, (pt.height + 7) / 8, 1);
         }
         qvkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pt.denoise_pipeline);
-        vk_pt_profile(cmd, 4);
+        vk_pt_profile(cmd, 5);
         for (i = 0; i < 3; ++i) {
             qvkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
                 VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, &barrier, 0, NULL, 0, NULL);
@@ -1321,11 +2056,17 @@ qboolean vk_pt_record(VkCommandBuffer cmd, VkAccelerationStructureKHR scene,
             pt_buffer_t shading_swap = pt.shading_guide;
             pt.shading_guide = pt.previous_shading_guide;
             pt.previous_shading_guide = shading_swap;
+            pt_buffer_t reflection_swap = pt.reflection_guide;
+            pt.reflection_guide = pt.previous_reflection_guide;
+            pt.previous_reflection_guide = reflection_swap;
+            pt_buffer_t transmission_swap = pt.transmission_guide;
+            pt.transmission_guide = pt.previous_transmission_guide;
+            pt.previous_transmission_guide = transmission_swap;
         }
     }
     pt.temporal_valid = temporal_enabled;
-    if (c[27] == 0) vk_pt_profile(cmd, 4);
-    vk_pt_profile(cmd, 5);
+    if (c[27] == 0 || pt_rr.frame_ready) vk_pt_profile(cmd, 5);
+    vk_pt_profile(cmd, 6);
     if (!r_pathTracingReference->integer) pt.motion_frame ^= 1;
     if (!pt.logged) {
         ri.Printf(PRINT_ALL, "Path tracing active: %u triangles, %u textures, %u emissive triangles, %u game lights\n",
@@ -1337,8 +2078,36 @@ qboolean vk_pt_record(VkCommandBuffer cmd, VkAccelerationStructureKHR scene,
 
 void vk_pt_info_f(void)
 {
+    ri.Printf(PRINT_ALL, "RR sampling: light reuse %u, adaptive %u, ceiling %d spp, workgroup 8x%u\n",
+        pt_rr.sampling_flags & 1u, (pt_rr.sampling_flags >> 1) & 1u, r_pathTracingSamples->integer, pt_rr.rows);
+    ri.Printf(PRINT_ALL, "Path tracing staged prototype: requested %d, active %d, rows %u, state %llu bytes\n",
+        r_pathTracingStaged->integer, pt.staged.active, pt.staged.rows, (unsigned long long)pt.staged.state.size);
+    ri.Printf(PRINT_ALL, "Path tracing compact workgroup: 8x%u\n", pt.compact_transport_rows);
+    ri.Printf(PRINT_ALL, "Path tracing compact transport: requested %d, active %d\n",
+        r_pathTracingCompactTransport->integer, pt.compact_transport_active);
+    ri.Printf(PRINT_ALL, "Path tracing material cache: requested %d, active %d\n",
+        r_pathTracingMaterialCache->integer, pt.material_cache_active);
+    ri.Printf(PRINT_ALL, "Path tracing unified light loop: requested %d, active %d\n",
+        r_pathTracingLightLoop->integer, pt.light_loop_active);
+    ri.Printf(PRINT_ALL, "Path tracing packed emitter geometry: requested %d, active %d\n",
+        r_pathTracingEmitterGeometry->integer, pt.emitter_geometry_active);
+    ri.Printf(PRINT_ALL, "Path tracing BRDF reuse: requested %d, active %d, pipeline ready %d\n",
+        r_pathTracingBRDFReuse->integer, pt.brdf_active,
+        pt.lighting_pipelines[1] != VK_NULL_HANDLE || pt.lighting_pipelines[3] != VK_NULL_HANDLE ||
+        pt.lighting_pipelines[5] != VK_NULL_HANDLE || pt.lighting_pipelines[7] != VK_NULL_HANDLE ||
+        pt.compact_transport_pipeline != VK_NULL_HANDLE ||
+        ((pt.lighting_mode & 1) && pt.lighting_pipelines[pt.lighting_mode] != VK_NULL_HANDLE));
+    ri.Printf(PRINT_ALL, "Path tracing map-light rejection: requested %d, active %d\n",
+        r_pathTracingMapLightCull->integer, pt.map_light_cull_active);
+    ri.Printf(PRINT_ALL, "Path tracing cached alias PDF: requested %d, active %d\n",
+        r_pathTracingAliasPDF->integer, pt.alias_pdf_active);
+    vk_sl_info_f();
     ri.Printf(PRINT_ALL, "Path tracer: active %d, frame %u, accumulated frames %u, camera resets %u, scene resets %u\n",
         pt.active, pt.frame, pt.history, pt.camera_resets, pt.scene_resets);
+    ri.Printf(PRINT_ALL, "Path tracing ambient fill: %.3f (0 disables; exposure %.3f)\n",
+        r_pathTracingAmbient->value, r_pathTracingExposure->value);
+    ri.Printf(PRINT_ALL, "Path tracing penumbra: sun angle %.3f degrees, light radius %.3f units (0 = point source)\n",
+        r_pathTracingSunAngle->value, r_pathTracingLightRadius->value);
     ri.Printf(PRINT_ALL, "Path tracing temporal: valid %d, resets %u, history limit %d (moving geometry limit 4)\n",
         pt.temporal_valid, pt.temporal_resets, r_pathTracingHistory->integer);
     ri.Printf(PRINT_ALL, "Temporal reset causes: renderer %u, invalid %u, lights %u, time %u, camera/settings %u\n",
@@ -1346,14 +2115,26 @@ void vk_pt_info_f(void)
         pt.temporal_reset_reasons[2], pt.temporal_reset_reasons[3], pt.temporal_reset_reasons[4]);
     ri.Printf(PRINT_ALL, "Path tracing object motion: %u matched surfaces, %u new/untracked surfaces\n",
         pt.motion_matched, pt.motion_rejected);
+    ri.Printf(PRINT_ALL, "Path tracing reconstruction: %u local light updates, variance moments, planar mirror motion; sampling %s, %u light cells\n",
+        pt.local_light_updates, r_pathTracingSampling->integer ? "blue noise" : "white noise", pt.light_cells);
     ri.Printf(PRINT_ALL, "Path tracing materials: %u animated, %u transparent/additive, %u textures\n",
         pt.animated_materials, pt.effect_materials, pt.texture_count);
-    uint32_t dielectric = 0, mapped = 0;
+    ri.Printf(PRINT_ALL, "Path tracing transmission: up to 4 tracked optical events including internal reflection, history cap 4\n");
+    ri.Printf(PRINT_ALL, "Path tracing effects: submitted polygons, %.0f attached decal triangles (16 layers per hit)\n",
+        pt.active ? ((pt_lights_t *)pt.lights.mapped)->decal_bounds[0][3] : 0.0f);
+    ri.Printf(PRINT_ALL, "Path tracing geometry uploads: %.0f bytes (last recorded frame; static map prefixes cached)\n",
+        (double)(vk_rt_scene_upload_bytes()+pt.geometry_upload_bytes));
+    ri.Printf(PRINT_ALL, "Path tracing water reflection: previous-wave/target motion, history cap 4, shared 32-byte motion record\n");
+    uint32_t dielectric = 0, mapped = 0, texture_programs = 0;
     for (int i = 0; i < MAX_SHADERS; ++i) if (pt.material_shaders[i]) {
         const pt_material_t *m = (const pt_material_t *)pt.materials.mapped+i;
         if (m->params[0] == 4) ++dielectric;
         if (m->maps[0] >= 0 || m->maps[1] >= 0 || m->maps[2] >= 0) ++mapped;
+        for (int layer = 0; layer < (int)m->composition[0]; ++layer)
+            if (m->layers[layer].vectors[0][3] == 2 || m->layers[layer].vectors[0][3] == -2) ++texture_programs;
     }
+    ri.Printf(PRINT_ALL, "Path tracing texture programs: %u UV-only stages, fast path %d\n",
+        texture_programs, r_pathTracingMaterialFastPath->integer);
     ri.Printf(PRINT_ALL, "Path tracing transport: %u dielectrics, %u PBR mapped, %u BSP water volumes, camera IOR %.3f; separate diffuse/reflection histories\n",
         dielectric, mapped, pt.medium_count, pt.active ? ((pt_temporal_params_t *)pt.temporal_params.mapped)->camera_medium[0] : 1);
 }

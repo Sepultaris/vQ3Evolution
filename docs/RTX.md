@@ -60,13 +60,14 @@ At startup, successful setup prints `NVIDIA RTX ray-query shadows initialized`.
 The first real dispatch after a map loads prints the number of triangles included
 in the acceleration structure. `/vkinfo` identifies the selected Vulkan device.
 
-## Current scope
+## Shadow-mode scope
 
-The initial implementation provides hard ray-traced directional shadows from
+This hybrid mode provides hard ray-traced directional shadows from
 opaque map and model geometry. Alpha-tested surfaces, translucent materials,
 reflection rays, emissive lighting, denoising, and full path-traced global
-illumination are not yet represented. Those require deeper material and lighting
-work rather than treating the RTX extension as a presentation option.
+illumination are not represented by this shadow-only pass. Several of these
+features are implemented separately in [path-tracing mode](PATH_TRACING.md).
+The path-tracing ambient/penumbra controls do not change this hybrid pass.
 
 The implementation lives in `code/renderer_vulkan/vk_raytracing.c`; the compute
 shader source is `code/renderer_vulkan/shaders/rt_shadows.comp`. The generated
@@ -101,5 +102,5 @@ validation no longer reported scene pipeline/render-pass incompatibility,
 shared AS-scratch write hazards, or the DLSS input-depth layout mismatch.
 The subsequent reconstruction update fixes raster clip-distance interfaces,
 private-data enablement and several DLSS synchronization/input issues. NVIDIA
-presentation diagnostics remain; see the current [path-tracing status](PATH_TRACING.md).
+presentation diagnostics have separate dated outcomes; see [current status](STATUS.md).
 This is not a claim that the entire renderer is validation-clean.

@@ -29,6 +29,7 @@ Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
 #include "snd_public.h"
 #include "../cgame/cg_public.h"
 #include "../game/bg_public.h"
+#include "cl_options.h"
 
 #ifdef USE_CURL
 #include "cl_curl.h"
@@ -466,6 +467,8 @@ void CL_StartHunkUsers( qboolean rendererOnly );
 void CL_Disconnect_f (void);
 void CL_GetChallengePacket (void);
 void CL_Vid_Restart_f( void );
+void CL_RequestVideoRestart( int delayMsec );
+void CL_CheckVideoRestart( void );
 void CL_Snd_Restart_f (void);
 void CL_StartDemoLoop( void );
 void CL_NextDemo( void );
@@ -593,6 +596,7 @@ int CIN_PlayCinematic( const char *arg0, int xpos, int ypos, int width, int heig
 e_status CIN_StopCinematic(int handle);
 e_status CIN_RunCinematic (int handle);
 void CIN_DrawCinematic (int handle);
+void CIN_DrawCinematicScaled(int handle, qboolean ui);
 void CIN_SetExtents (int handle, int x, int y, int w, int h);
 void CIN_SetLooping (int handle, qboolean loop);
 void CIN_UploadCinematic(int handle);
@@ -640,4 +644,3 @@ qboolean CL_VideoRecording( void );
 // cl_main.c
 //
 void CL_WriteDemoMessage ( msg_t *msg, int headerBytes );
-

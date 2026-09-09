@@ -73,7 +73,7 @@ void R_DisplayResolutionList_f( void )
 }
 
 
-void R_SetWinMode(int mode, unsigned int width, unsigned int height, unsigned int hz)
+void R_SetWinMode(int mode, unsigned int width, unsigned int height, unsigned int hz, qboolean fullscreen)
 {
 	
     if ( mode < -2 || mode >= s_numVidModes) {
@@ -87,7 +87,6 @@ void R_SetWinMode(int mode, unsigned int width, unsigned int height, unsigned in
         glConfig.vidHeight = height;
         glConfig.windowAspect = (float)width / (float)height;
         glConfig.displayFrequency = hz;
-        glConfig.isFullscreen = 1;
     }
 	else if ( mode == -1 )
     {
@@ -95,7 +94,6 @@ void R_SetWinMode(int mode, unsigned int width, unsigned int height, unsigned in
 		glConfig.vidHeight = r_customheight->integer;
 		glConfig.windowAspect = r_customaspect->value;
         glConfig.displayFrequency = 60;
-        glConfig.isFullscreen = 0;
 	} 
     else
     {
@@ -103,18 +101,38 @@ void R_SetWinMode(int mode, unsigned int width, unsigned int height, unsigned in
         glConfig.vidHeight = r_vidModes[mode].height;
         glConfig.windowAspect = (float)r_vidModes[mode].width / ( r_vidModes[mode].height * r_vidModes[mode].pixelAspect );
         glConfig.displayFrequency = 60;
-        glConfig.isFullscreen = 0;
 
     }
     
-	ri.Printf(PRINT_ALL,  " MODE: %d, %d x %d, refresh rate: %dhz\n",
-        mode, glConfig.vidWidth, glConfig.vidHeight, glConfig.displayFrequency);
+    glConfig.isFullscreen = fullscreen;
+    ri.Printf(PRINT_ALL,  " MODE: %d, %d x %d, refresh rate: %dhz, fullscreen: %d\n",
+        mode, glConfig.vidWidth, glConfig.vidHeight, glConfig.displayFrequency, fullscreen);
 }
 
 void R_GetWinResolution(int* w, int* h)
 {
     *w = glConfig.vidWidth;
     *h = glConfig.vidHeight;
+}
+
+void R_SetDrawableResolution(int width, int height)
+{
+    if (width <= 0 || height <= 0)
+        ri.Error(ERR_FATAL, "Invalid Vulkan drawable size: %d x %d", width, height);
+
+    // Window managers may constrain a requested window to the work area. The
+    // swapchain extent, not the requested mode, owns all GPU output dimensions
+    // and the resolution exported to the game/UI. Keep the user's mode cvars.
+    if (width != glConfig.vidWidth || height != glConfig.vidHeight)
+    {
+        ri.Printf(PRINT_ALL, "Vulkan: requested %d x %d, using drawable %d x %d\n",
+            glConfig.vidWidth, glConfig.vidHeight, width, height);
+        glConfig.vidWidth = width;
+        glConfig.vidHeight = height;
+        glConfig.windowAspect = (float)width / (float)height;
+    }
+    ri.Printf(PRINT_ALL, "Vulkan drawable: %d x %d, fullscreen: %d\n",
+        width, height, glConfig.isFullscreen);
 }
 
 void R_GetWinResolutionF(float* w, float* h)

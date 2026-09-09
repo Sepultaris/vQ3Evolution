@@ -733,7 +733,8 @@ intptr_t CL_UISystemCalls( intptr_t *args ) {
 		return Sys_Milliseconds();
 
 	case UI_CVAR_REGISTER:
-		Cvar_Register( VMA(1), VMA(2), VMA(3), args[4] ); 
+		CL_OptionsRegisterScale(qtrue,VMA(2));
+		Cvar_Register( VMA(1), VMA(2), VMA(3), args[4] );
 		return 0;
 
 	case UI_CVAR_UPDATE:
@@ -760,6 +761,7 @@ intptr_t CL_UISystemCalls( intptr_t *args ) {
 		return 0;
 
 	case UI_CVAR_CREATE:
+		CL_OptionsRegisterScale(qtrue,VMA(1));
 		Cvar_Register( NULL, VMA(1), VMA(2), args[3] );
 		return 0;
 
@@ -833,7 +835,7 @@ intptr_t CL_UISystemCalls( intptr_t *args ) {
 		return 0;
 
 	case UI_R_RENDERSCENE:
-		re.RenderScene( VMA(1) );
+		CL_OptionsRenderScene(qtrue,VMA(1));
 		return 0;
 
 	case UI_R_SETCOLOR:
@@ -841,7 +843,7 @@ intptr_t CL_UISystemCalls( intptr_t *args ) {
 		return 0;
 
 	case UI_R_DRAWSTRETCHPIC:
-		re.DrawStretchPic( VMF(1), VMF(2), VMF(3), VMF(4), VMF(5), VMF(6), VMF(7), VMF(8), args[9] );
+		CL_OptionsStretchPic(qtrue,VMF(1),VMF(2),VMF(3),VMF(4),VMF(5),VMF(6),VMF(7),VMF(8),args[9]);
 		return 0;
 
   case UI_R_MODELBOUNDS:
@@ -1058,7 +1060,7 @@ intptr_t CL_UISystemCalls( intptr_t *args ) {
 	  return CIN_RunCinematic(args[1]);
 
 	case UI_CIN_DRAWCINEMATIC:
-	  CIN_DrawCinematic(args[1]);
+	  CIN_DrawCinematicScaled(args[1],qtrue);
 	  return 0;
 
 	case UI_CIN_SETEXTENTS:
@@ -1107,6 +1109,7 @@ void CL_InitUI( void ) {
 	int		v;
 	vmInterpret_t		interpret;
 	qboolean			localServer;
+	CL_OptionsResetModule(qtrue);
 
 	// load the dll or bytecode
 	interpret = Cvar_VariableValue("vm_ui");

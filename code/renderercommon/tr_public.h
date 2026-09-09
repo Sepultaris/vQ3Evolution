@@ -24,7 +24,7 @@ Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
 
 #include "tr_types.h"
 
-#define	REF_API_VERSION		9
+#define	REF_API_VERSION		10
 
 //
 // these are the functions exported by the refresh module
@@ -182,6 +182,9 @@ typedef struct {
 	void	(*Sys_GLimpSafeInit)( void );
 	void	(*Sys_GLimpInit)( void );
 	qboolean (*Sys_LowPhysicalMemory)( void );
+	// Main-thread request only. The engine restarts after renderer/VM calls
+	// have returned; a nonzero delay debounces native window resize events.
+	void (*RequestVideoRestart)( int delayMsec );
 } refimport_t;
 
 

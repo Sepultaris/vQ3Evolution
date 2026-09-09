@@ -14,6 +14,8 @@ features source-native and maintainable.
 ## Submitting changes
 
 - Keep each commit focused and describe the behavior it changes.
+- Run the [repository and offline checks](docs/TESTING.md) before staging;
+  review untracked files as well as the tracked diff.
 - Build the affected renderer and native/QVM modules.
 - Test both the main menu and a loaded map for graphics or UI changes.
 - Document user-visible settings, requirements, and fallback behavior.
@@ -23,6 +25,20 @@ features source-native and maintainable.
 Do not commit build directories, Quake III PK3 data, local configuration files,
 downloaded SDKs, NVIDIA runtime DLLs, test homes, crash dumps, or generated logs.
 The root `.gitignore` covers the standard locations.
+
+Embedded GLSL bytecode/C arrays under `code/renderer_vulkan/shaders/Compiled`
+and the generated blue-noise header are intentional source-build inputs.
+Regenerate and include them with the source change; do not ignore or delete
+them as old build output. GitHub marks these generated files for collapsed
+review, but they still belong in the commit. Already-tracked upstream libraries
+retain their existing provenance; adding any new binary dependency needs an
+explicit review.
+
+Keep current setup/defaults in the feature guides and [status](docs/STATUS.md).
+Move superseded implementation narratives to `docs/archive` with their original
+test settings and caveats. Do not erase failed experiments or present historical
+one-scene results as current whole-renderer performance. Never commit credentials
+or include full local profiles/captures just to support a benchmark claim.
 
 ## Reporting problems
 

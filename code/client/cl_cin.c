@@ -1571,7 +1571,7 @@ void CIN_ResampleCinematic(int handle, int *buf2) {
 CIN_DrawCinematic
 ==================
 */
-void CIN_DrawCinematic (int handle) {
+static void CIN_DrawCinematicInternal(int handle, int module) {
 	float	x, y, w, h;
 	byte	*buf;
 
@@ -1587,6 +1587,7 @@ void CIN_DrawCinematic (int handle) {
 	h = cinTable[handle].height;
 	buf = cinTable[handle].buf;
 	SCR_AdjustFrom640( &x, &y, &w, &h );
+	if (module>=0) CL_OptionsScaleRect(module!=0,&x,&y,&w,&h);
 
 	if (cinTable[handle].dirty && (cinTable[handle].CIN_WIDTH != cinTable[handle].drawX || cinTable[handle].CIN_HEIGHT != cinTable[handle].drawY)) {
 		int *buf2;
@@ -1604,6 +1605,9 @@ void CIN_DrawCinematic (int handle) {
 	re.DrawStretchRaw( x, y, w, h, cinTable[handle].drawX, cinTable[handle].drawY, buf, handle, cinTable[handle].dirty);
 	cinTable[handle].dirty = qfalse;
 }
+
+void CIN_DrawCinematic(int handle) { CIN_DrawCinematicInternal(handle,-1); }
+void CIN_DrawCinematicScaled(int handle,qboolean ui) { CIN_DrawCinematicInternal(handle,ui); }
 
 void CL_PlayCinematic_f(void) {
 	char	*arg, *s;
@@ -1699,4 +1703,3 @@ void CIN_UploadCinematic(int handle) {
 		}
 	}
 }
-

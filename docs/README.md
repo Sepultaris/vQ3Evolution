@@ -1,0 +1,39 @@
+# VQ3 Evolution documentation
+
+Start with the [project README](../README.md) for building and game-data setup,
+then [current status](STATUS.md) for supported paths and known limitations.
+
+## User and developer guides
+
+| Document | Purpose |
+| --- | --- |
+| [Universal options](UNIVERSAL_OPTIONS.md) | Engine-owned settings for base Quake III, Team Arena and mods; shared profiles and legacy UI scaling |
+| [Path tracing](PATH_TRACING.md) | Lighting, samples, bounces, exposure, ambient fill, penumbra, materials and fallback |
+| [Ray Reconstruction](RAY_RECONSTRUCTION.md) | NVIDIA RR with DLAA/DLSS, current defaults, input contract and limitations |
+| [NVIDIA integration](DLSS.md) | SDK/runtime setup, DLSS/DLAA, NR, Frame Generation and Reflex |
+| [Ray-traced shadows](RTX.md) | The separate hybrid shadow mode, not full path tracing |
+| [Texture upscaling](TEXTURE_UPSCALING.md) | Optional offline asset processing, packaging and safeguards |
+| [True Combat patch](TRUECOMBAT_PATCH.md) | Optional version-checked fix for the mod's own widescreen UI bug |
+| [Testing and commit checks](TESTING.md) | Offline checks, shader payloads and bounded GPU-test policy |
+| [GPU profiling](GPU_PROFILING.md) | Nsight capture and evidence acceptance |
+| [Vulkan backend overview](../code/renderer_vulkan/README.md) | Source layout and rendering ownership |
+
+## Historical evidence
+
+- [Path-tracing development record](archive/PATH_TRACING_DEVELOPMENT.md): dated
+  implementation details, material fixes, successful checks and rejected trials.
+- [RR development record](archive/RAY_RECONSTRUCTION_DEVELOPMENT.md): dated RR
+  integration, sampling, jitter, performance and shutdown evidence.
+- [GPU performance analysis](GPU_PERFORMANCE_ANALYSIS.md): the measured
+  **pre-RR** register/latency bottleneck and its follow-up; not a profile of the
+  current RR shader.
+- [Inherited Vulkan notes](archive/VULKAN_LEGACY.md): upstream provenance only.
+
+Archived statements about defaults, completion or next steps apply to their
+dated build. Raw captures live in ignored local build directories and are not
+part of a fresh clone. Do not turn a timed-out diagnostic or one-map result into
+a general performance or validation-clean claim.
+
+Licenses and attribution remain in [COPYING.txt](../COPYING.txt),
+[id-readme.txt](../id-readme.txt), component source headers, and the
+[NR integration notice](DLSSNR-THIRD-PARTY-NOTICE.txt).

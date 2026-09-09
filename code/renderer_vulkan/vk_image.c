@@ -27,18 +27,20 @@ struct StagingBuffer_t
     VkBuffer buff;
     // Host visible memory used to copy image data to device local memory.
     VkDeviceMemory mappableMem;
+    VkDeviceSize capacity;
 };
 
 struct ImageChunk_t {
     VkDeviceMemory block;
-    uint32_t Used;
-    // uint32_t typeIndex;
+    VkDeviceSize Used, Size;
+    uint32_t typeIndex;
 };
 
 
 struct deviceLocalMemory_t {
     // One large device device local memory allocation, assigned to multiple images
-	struct ImageChunk_t Chunks[8];
+	struct ImageChunk_t *Chunks;
+	uint32_t Capacity;
 	uint32_t Index; // number of chunks used
 };
 
@@ -48,8 +50,10 @@ static struct deviceLocalMemory_t devMemImg;
 void gpuMemUsageInfo_f(void)
 {
     // approm	 for debug info
-    ri.Printf(PRINT_ALL, "Number of image: %d chuck memory(device local) used: %d M \n", 
-           tr.numImages, devMemImg.Index * (IMAGE_CHUNK_SIZE>>20) );
+    VkDeviceSize total = 0;
+    for (uint32_t i = 0; i < devMemImg.Index; ++i) total += devMemImg.Chunks[i].Size;
+    ri.Printf(PRINT_ALL, "Number of images: %d, image memory(device local): %llu MiB\n",
+           tr.numImages, (unsigned long long)(total >> 20));
 }
 
 
@@ -71,13 +75,13 @@ uint32_t find_memory_type(uint32_t memory_type_bits, VkMemoryPropertyFlags prope
 }
 
 
-static void vk_createStagingBuffer(uint32_t size)
+static void vk_createStagingBuffer(VkDeviceSize size)
 {
 
     memset(&StagBuf, 0, sizeof(StagBuf));
 
 
-    ri.Printf(PRINT_ALL, " Create Staging Buffer: %d\n", size);
+    ri.Printf(PRINT_ALL, " Create Staging Buffer: %llu\n", (unsigned long long)size);
 
     {
         VkBufferCreateInfo buffer_desc;
@@ -122,6 +126,7 @@ static void vk_createStagingBuffer(uint32_t size)
         VK_CHECK(qvkAllocateMemory(vk.device, &alloc_info, NULL, &StagBuf.mappableMem));
 
         VK_CHECK(qvkBindBufferMemory(vk.device, StagBuf.buff, StagBuf.mappableMem, 0));
+        StagBuf.capacity = size;
 
         ri.Printf(PRINT_ALL, " Stagging buffer alignment: %ld, memoryTypeBits: 0x%x, Type Index: %d. \n",
             memory_requirements.alignment, memory_requirements.memoryTypeBits, alloc_info.memoryTypeIndex);
@@ -148,6 +153,16 @@ static void vk_destroy_staging_buffer(void)
     memset(&StagBuf, 0, sizeof(StagBuf));
 }
 
+
+static void vk_ensure_staging_buffer(VkDeviceSize required)
+{
+    if (required <= StagBuf.capacity) return;
+    // Uploads are synchronous, but explicitly drain any previous users before
+    // replacing their storage. Grow only when needed, preserving texture quality.
+    VK_CHECK(qvkQueueWaitIdle(vk.queue));
+    vk_destroy_staging_buffer();
+    vk_createStagingBuffer(required);
+}
 
 static void vk_stagBufferToDeviceLocalMem(VkImage image, VkBufferImageCopy* pRegion, uint32_t num_region)
 {
@@ -294,7 +309,7 @@ static void vk_createImageAndBindWithMemory(image_t* pImg)
     qvkGetImageMemoryRequirements(vk.device, pImg->handle, &memory_requirements);
     
     // ensure that memory region has proper alignment
-    uint32_t mask = (memory_requirements.alignment - 1);
+    VkDeviceSize mask = (memory_requirements.alignment - 1);
 
 
     uint32_t i = 0;
@@ -303,7 +318,8 @@ static void vk_createImageAndBindWithMemory(image_t* pImg)
 		// ensure that memory region has proper alignment
 		VkDeviceSize offset_aligned = (devMemImg.Chunks[i].Used + mask) & (~mask);
         VkDeviceSize end = offset_aligned + memory_requirements.size;
-		if (end <= IMAGE_CHUNK_SIZE)
+		if (end <= devMemImg.Chunks[i].Size &&
+            (memory_requirements.memoryTypeBits & (1u << devMemImg.Chunks[i].typeIndex)))
         {
             VK_CHECK(qvkBindImageMemory(vk.device, pImg->handle, 
                         devMemImg.Chunks[i].block, offset_aligned));
@@ -315,11 +331,18 @@ static void vk_createImageAndBindWithMemory(image_t* pImg)
 
 	// Couldn't find suitable in existing chunk.
     // Allocate a new chunk
+    if (devMemImg.Index == devMemImg.Capacity) {
+        uint32_t capacity = devMemImg.Capacity ? devMemImg.Capacity * 2 : 8;
+        struct ImageChunk_t *chunks = realloc(devMemImg.Chunks, sizeof(*chunks) * capacity);
+        if (!chunks) { ri.Error(ERR_FATAL, "Vulkan: image allocation metadata exhausted"); return; }
+        devMemImg.Chunks = chunks;
+        devMemImg.Capacity = capacity;
+    }
     
     VkMemoryAllocateInfo alloc_info;
     alloc_info.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
     alloc_info.pNext = NULL;
-    alloc_info.allocationSize = IMAGE_CHUNK_SIZE;
+    alloc_info.allocationSize = memory_requirements.size > IMAGE_CHUNK_SIZE ? memory_requirements.size : IMAGE_CHUNK_SIZE;
     alloc_info.memoryTypeIndex = find_memory_type(memory_requirements.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
 
     VkDeviceMemory memory;
@@ -328,6 +351,8 @@ static void vk_createImageAndBindWithMemory(image_t* pImg)
 
     devMemImg.Chunks[devMemImg.Index].block = memory;
     devMemImg.Chunks[devMemImg.Index].Used = memory_requirements.size;
+    devMemImg.Chunks[devMemImg.Index].Size = alloc_info.allocationSize;
+    devMemImg.Chunks[devMemImg.Index].typeIndex = alloc_info.memoryTypeIndex;
     ++devMemImg.Index;
 
 
@@ -336,8 +361,7 @@ static void vk_createImageAndBindWithMemory(image_t* pImg)
     ri.Printf(PRINT_ALL, "alignment: %ld, Type Index: %d. \n",
             memory_requirements.alignment, alloc_info.memoryTypeIndex);
     
-    ri.Printf(PRINT_ALL, "Image chuck memory consumed: %d M \n",
-            devMemImg.Index * (IMAGE_CHUNK_SIZE >> 20) );
+    gpuMemUsageInfo_f();
 
     ri.Printf(PRINT_ALL, " --- ------------------------ --- \n");
 }
@@ -655,6 +679,7 @@ image_t* R_CreateImage( const char *name, unsigned char* pic, const uint32_t wid
     vk_createImageViewAndDescriptorSet(pImage);
 
 
+    vk_ensure_staging_buffer(buffer_size);
     void* data;
     VK_CHECK(qvkMapMemory(vk.device, StagBuf.mappableMem, 0, VK_WHOLE_SIZE, 0, &data));
     memcpy(data, pUploadBuffer, buffer_size);
@@ -785,6 +810,7 @@ void RE_UploadCinematic (int w, int h, int cols, int rows, const unsigned char *
 
         const uint32_t buffer_size = cols * rows * 4;
 
+        vk_ensure_staging_buffer(buffer_size);
         void* pDat;
         VK_CHECK(qvkMapMemory(vk.device, StagBuf.mappableMem, 0, VK_WHOLE_SIZE, 0, &pDat));
         memcpy(pDat, data, buffer_size);
@@ -816,6 +842,7 @@ void RE_UploadCinematic (int w, int h, int cols, int rows, const unsigned char *
 
         const uint32_t buffer_size = cols * rows * 4;
 
+        vk_ensure_staging_buffer(buffer_size);
         void* pDat;
         VK_CHECK(qvkMapMemory(vk.device, StagBuf.mappableMem, 0, VK_WHOLE_SIZE, 0, &pDat));
         memcpy(pDat, data, buffer_size);
@@ -1037,7 +1064,8 @@ void vk_destroyImageRes(void)
         devMemImg.Chunks[i].Used = 0;
     }
 
-    devMemImg.Index = 0;
+    free(devMemImg.Chunks);
+    memset(&devMemImg, 0, sizeof(devMemImg));
 
 
     vk_destroy_staging_buffer();

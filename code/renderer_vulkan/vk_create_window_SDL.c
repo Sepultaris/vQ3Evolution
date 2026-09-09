@@ -188,14 +188,14 @@ static int VKimp_SetMode(int mode, qboolean fullscreen)
 
     if(fullscreen)
     {
-        // prevent crush the OS
-        r_mode->integer = mode = -2;
+        // Use desktop dimensions without overwriting the saved windowed mode.
+        mode = -2;
         		
         flags |= SDL_WINDOW_FULLSCREEN;
 		flags |= SDL_WINDOW_BORDERLESS;
     }
 
-    R_SetWinMode( mode, desktopMode.w, desktopMode.h, desktopMode.refresh_rate );
+    R_SetWinMode( mode, desktopMode.w, desktopMode.h, desktopMode.refresh_rate, fullscreen );
     
 
 
@@ -363,6 +363,11 @@ void vk_destroyWindow( void )
     window_sdl = NULL;
 }
 
+void vk_getDrawableSize(int *width, int *height)
+{
+    SDL_Vulkan_GetDrawableSize(window_sdl, width, height);
+}
+
 
 void vk_createSurfaceImpl(void)
 {
@@ -375,8 +380,11 @@ void vk_createSurfaceImpl(void)
         SDL_VERSION(&window_info.version);
         if (SDL_GetWindowWMInfo(window_sdl, &window_info))
         {
+            /* The generic interposer vkGetInstanceProcAddr returns the native
+             * function here. Use our resolver's explicit exported surface hook
+             * so DLSS-G receives this surface's actual HWND, not a window guess. */
             PFN_vkCreateWin32SurfaceKHR create_surface =
-                (PFN_vkCreateWin32SurfaceKHR)qvkGetInstanceProcAddr(
+                (PFN_vkCreateWin32SurfaceKHR)vk_sl_get_instance_proc_addr(
                     vk.instance, "vkCreateWin32SurfaceKHR");
             if (create_surface)
             {
@@ -414,62 +422,9 @@ Minimize the game so that user is back at the desktop
 */
 void vk_minimizeWindow( void )
 {
-    VkBool32 toggleWorked = 1;
     ri.Printf( PRINT_ALL, " Minimizing Window (SDL). \n");
-
-	VkBool32 isWinFullscreen = ( SDL_GetWindowFlags( window_sdl ) & SDL_WINDOW_FULLSCREEN );
-    
-
-    if( isWinFullscreen )
-	{
-		toggleWorked = (SDL_SetWindowFullscreen( window_sdl, 0 ) >= 0);
-	}
-
-    // SDL_WM_ToggleFullScreen didn't work, so do it the slow way
-    if( toggleWorked )
-    {
-        // ri.IN_Shutdown( );
+    // SDL owns fullscreen restoration. Do not silently change window mode
+    // before minimizing: the requested mode must survive minimize/restore.
+    if (window_sdl)
         SDL_MinimizeWindow( window_sdl );
-        // SDL_HideWindow( window_sdl );
-    }
-    else
-    {
-        ri.Printf( PRINT_ALL, " SDL_SetWindowFullscreen didn't work, so do it the slow way \n");
-
-        ri.Cmd_ExecuteText(EXEC_APPEND, "vid_restart\n");
-    }
 }
-
-/*
-	if( r_fullscreen->modified )
-	{
-		qboolean    needToToggle;
-		qboolean    sdlToggled = qfalse;
-
-		// Find out the current state
-		int fullscreen = !!( SDL_GetWindowFlags( window_sdl ) & SDL_WINDOW_FULLSCREEN );
-
-		if( r_fullscreen->integer && ri.Cvar_VariableIntegerValue( "in_nograb" ) )
-		{
-			ri.Printf( PRINT_ALL, "Fullscreen not allowed with in_nograb 1\n");
-			ri.Cvar_Set( "r_fullscreen", "0" );
-			r_fullscreen->modified = qfalse;
-		}
-
-		// Is the state we want different from the current state?
-		needToToggle = !!r_fullscreen->integer != fullscreen;
-
-		if( needToToggle )
-		{
-			sdlToggled = SDL_SetWindowFullscreen( window_sdl, r_fullscreen->integer ) >= 0;
-
-			// SDL_WM_ToggleFullScreen didn't work, so do it the slow way
-			if( !sdlToggled )
-				ri.Cmd_ExecuteText(EXEC_APPEND, "vid_restart\n");
-
-			ri.IN_Restart( );
-		}
-
-		r_fullscreen->modified = qfalse;
-	}
-*/
