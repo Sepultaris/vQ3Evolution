@@ -36,10 +36,16 @@ class CompactTransportTests(unittest.TestCase):
             self.assertIn(token,source)
     def test_measured_default_and_safe_dispatch(self):
         native=(ROOT/'code/renderer_vulkan/vk_pathtrace.c').read_text()
-        self.assertIn('compact_active ? pt.compact_transport_pipeline : pt.lighting_pipelines[lighting_mode]',native)
+        self.assertIn('compact_active ? pt.compact_transport_pipeline[(lighting_mode & 4) ? 1 : 0] : pt.lighting_pipelines[lighting_mode]',native)
         self.assertIn('Cvar_Get("r_pathTracingCompactTransport", "1", CVAR_CHEAT)',(ROOT/'code/renderer_vulkan/tr_cvar.c').read_text())
         shutdown=native.split('void vk_pt_shutdown(void)',1)[1]
-        self.assertLess(shutdown.index('if (pt.compact_transport_pipeline)'),shutdown.index('qvkDestroyPipelineLayout'))
+        self.assertLess(shutdown.index('for (int i = 0; i < 2; ++i)'),shutdown.index('qvkDestroyPipelineLayout'))
+
+    def test_alias_pdf_keeps_compact_transport_eligible(self):
+        helper=(ROOT/'code/renderer_vulkan/pt_compact_transport.h').read_text()
+        self.assertIn('(mode != 57 && mode != 61)',helper)
+        self.assertIn('uint32_t alias_variant = (mode & 4u) ? 1u : 0u;',helper)
+        self.assertIn('alias_variant ? VK_TRUE : VK_FALSE',helper)
     def test_benchmark_roles_and_quality_preserved(self):
         for suffix,expected in [('',[0,1,1,0]),('_confirm',[1,0,0,1])]:
             active=None;seen=[]

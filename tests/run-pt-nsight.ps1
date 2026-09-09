@@ -36,6 +36,28 @@ function Wait-PtGuardResult([string]$Path, [int]$TimeoutSeconds = 60) {
     } while ($ptGuardTimer.Elapsed.TotalSeconds -lt $TimeoutSeconds)
     return $null
 }
+function Test-PtNsightConnection {
+    param([int]$BasePort = 0, [ValidateRange(1,65535)][int]$MaxPorts = 64)
+    if ($BasePort -eq 0) {
+        # ngfx 2026.3.1 uses native QSettings (HKCU), whereas ngfx-ui uses an
+        # INI file. Changing Tools > Options alone does not fix CLI launches.
+        $connection = Get-ItemProperty -LiteralPath 'HKCU:/Software/NVIDIA Corporation/NVIDIA Nsight Graphics/Connection' -ErrorAction SilentlyContinue
+        $BasePort = if ($connection.ConnectionBasePort) { [int]$connection.ConnectionBasePort } else { 49152 }
+        if ($connection.ConnectionMaxPorts) { $MaxPorts = [int]$connection.ConnectionMaxPorts }
+    }
+    if ($BasePort -lt 1 -or $MaxPorts -lt 1 -or $BasePort + $MaxPorts -gt 65536) { throw 'Invalid Nsight connection range.' }
+    $failures = @{}
+    for ($port = $BasePort; $port -lt $BasePort + $MaxPorts; ++$port) {
+        $listener = [Net.Sockets.TcpListener]::new([Net.IPAddress]::Loopback, $port)
+        try {
+            $listener.Start()
+            return [ordered]@{ basePort=$BasePort; maxPorts=$MaxPorts; availablePort=$port }
+        } catch [Net.Sockets.SocketException] {
+            $failures[[string]$_.Exception.SocketErrorCode] = $true
+        } finally { $listener.Stop() }
+    }
+    throw "Nsight cannot bind any port in $BasePort-$($BasePort+$MaxPorts-1): $($failures.Keys -join ', '). Check Windows excluded TCP ranges and Nsight CLI's HKCU connection settings; see docs/GPU_PROFILING.md. No game was launched."
+}
 if ($FunctionsOnly) { return }
 
 if (Get-Process -Name vQ3Evolution -ErrorAction SilentlyContinue) { throw 'Close the game before a capture.' }
@@ -62,13 +84,16 @@ if (Test-Path -LiteralPath $ptResultPath) { throw 'Never overwrite a previous ca
 $ptResult = [ordered]@{ tool=$Tool; completed=$false; error=$null; profilerExit=$null; sourceSettingsUnchanged=$false }
 $ptProcess = $null
 try {
+    if ($Tool -eq 'Graphics') { $ptResult['connection'] = Test-PtNsightConnection }
     $ptManifest = Get-Content -Raw -LiteralPath (Join-Path $ptHome 'settings.json') | ConvertFrom-Json
     if ((Get-FileHash -LiteralPath $ptExe).Hash -ne $ptManifest.executableSha256 -or
         (Get-FileHash -LiteralPath (Join-Path $ptBuild 'renderer_vulkan_x86_64.dll')).Hash -ne $ptManifest.rendererSha256) {
         throw 'Build changed after capture preparation.'
     }
     if ($ptManifest.settings.r_fullscreen -ne '0') { throw 'This bounded capture requires saved windowed settings; no display-mode override is made.' }
-    $ptGameArgs = '+set fs_homepath ' + (ConvertTo-PtArgument ($ptHome.Replace('\','/'))) + ' +set logfile 2 +set developer 0 +devmap q3dm6 +exec pt_nsight.cfg'
+    # The shared user profile can restore archived FG settings during startup;
+    # command-line startup overrides must agree with the benchmark manifest.
+    $ptGameArgs = '+set fs_homepath ' + (ConvertTo-PtArgument ($ptHome.Replace('\','/'))) + ' +set r_dlssFrameGeneration 0 +set logfile 2 +set developer 0 +devmap q3dm6 +exec pt_nsight.cfg'
     $ptStart = [Diagnostics.ProcessStartInfo]::new()
     $ptStart.UseShellExecute = $false
     $ptStart.CreateNoWindow = $true

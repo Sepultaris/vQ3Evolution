@@ -2,6 +2,7 @@ param(
     [string]$Label = 'profile', [int]$Dlss = 5, [int]$NeuralRendering = 1,
     [int]$Width = 1920, [int]$Height = 1080, [int]$TimeoutSeconds = 180, [int]$Sampling = 1,
     [switch]$Validation, [switch]$VisibleWindow,
+    [string]$BuildDirectory = '',
     [ValidatePattern('^pt_[a-z_]+\.cfg$')][string]$Config = 'pt_performance.cfg',
     [switch]$Synthetic, [string]$SettingsFile = '', [switch]$PrepareOnly,
     [string]$SharedSettingsFile = '',
@@ -19,11 +20,13 @@ param(
 )
 $ErrorActionPreference = 'Stop'
 if ($Synthetic -and $SharedSettingsFile) { throw 'Shared profiles apply only to saved-settings runs, not synthetic benchmarks.' }
-if ($Bounded -and ($TimeoutSeconds -gt 45 -or $TimeoutSeconds -lt 1)) {
-    throw 'Bounded runs require a 1-45 second deadline.'
+if ($Bounded -and ($TimeoutSeconds -gt 120 -or $TimeoutSeconds -lt 1)) {
+    throw 'Bounded runs require a 1-120 second deadline.'
 }
 $ptRepo = Split-Path -Parent $PSScriptRoot
 $ptBuild = Join-Path $ptRepo 'build-widescreen/release-mingw64-x86_64'
+$ptAssets = $ptBuild
+if ($BuildDirectory) { $ptBuild = (Resolve-Path -LiteralPath $BuildDirectory).Path }
 $ptProfile = Join-Path $ptRepo 'build-widescreen/rt-audit'
 if (!(Test-Path -LiteralPath (Join-Path $ptBuild $Game) -PathType Container)) { throw 'Selected game/mod directory does not exist.' }
 if ($Label -notmatch '^[a-zA-Z0-9_-]+$') { throw 'Label must be a simple filename stem.' }
@@ -108,7 +111,7 @@ if (!$Synthetic) {
     # exposure, sharpening, FOV, HUD, weapon presentation and FPS cap intact.
     $ptConfigText = $ptConfigText | Where-Object {
         $_ -notmatch '^set (r_[A-Za-z0-9_]+|cg_[A-Za-z0-9_]+|com_maxfps[A-Za-z]*) ' -or
-        $_ -match '^set r_pathTracing(Profile|ShaderProfile|Reference|Debug|TemporalDebug|TestScene|TestMotion|MaterialFastPath|EmitterSearch|EmitterGeometry|BRDFReuse|MapLightCull|AliasPDF|LightLoop|MaterialCache|CompactTransport|Staged|StagedRows|StagedProfile|AdaptiveDebug) '
+        $_ -match '^set r_pathTracing(Profile|ShaderProfile|Reference|Debug|TemporalDebug|TestScene|TestMotion|MaterialFastPath|EmitterSearch|EmitterGeometry|BRDFReuse|MapLightCull|AliasPDF|LightLoop|MaterialCache|CompactTransport|Staged|StagedRows|StagedProfile|AdaptiveDebug|DynamicOpaque) '
     }
 }
 Set-Content -LiteralPath (Join-Path $ptHome "$Game/$Config") -Value $ptConfigText -Encoding ASCII
@@ -153,6 +156,7 @@ if ($Validation) {
     $env:VK_INSTANCE_LAYERS=''
 }
 $ptArguments = "+set fs_homepath `"$($ptHome.Replace('\','/'))`""
+if ($BuildDirectory) { $ptArguments += " +set fs_basepath `"$($ptAssets.Replace('\','/'))`"" }
 if ($Game -ne 'baseq3') { $ptArguments += " +set fs_game $Game" }
 if ($Synthetic) {
     $ptArguments += " +set cl_renderer vulkan +set r_fullscreen 0 +set r_mode -1 +set r_customwidth $Width +set r_customheight $Height +set r_rayTracing 2 +set r_dlss $Dlss +set r_dlssNeuralRendering $NeuralRendering +set r_dlssFrameGeneration 0 +set r_pathTracingTestScene 0 +set r_pathTracingSampling $Sampling +set r_swapInterval 0"

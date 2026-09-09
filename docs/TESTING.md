@@ -57,6 +57,9 @@ optional baseline comparison ran when it was omitted. Asset-specific checks
 such as hologram, panels and True Combat require the user's separately installed
 game/mod data; never copy that data into Git to make the tests self-contained.
 Consult each check's `--help` for its dependencies and opt-in GPU modes.
+The performance runner and independent process guard accept explicit 1–120 second
+limits. Allow time for setup and the complete scenario; a guard timeout is a
+safety stop, not a successful lifecycle test.
 
 ## Embedded shaders
 

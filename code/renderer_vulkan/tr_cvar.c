@@ -123,6 +123,7 @@ cvar_t* r_pathTracingCompactTransport;
 cvar_t* r_pathTracingStaged;
 cvar_t* r_pathTracingStagedRows;
 cvar_t* r_pathTracingRRRows;
+cvar_t* r_pathTracingDynamicOpaque;
 cvar_t* r_pathTracingStagedProfile;
 cvar_t* r_pathTracingPipelineStats;
 cvar_t* r_pathTracingBRDFReuse;
@@ -228,6 +229,9 @@ void R_Register( void )
 	ri.Cvar_CheckRange(r_pathTracingStagedRows, 0, 256, qtrue);
 	/* Non-archived scheduling override for matched RR tests; zero is automatic. */
 	r_pathTracingRRRows = ri.Cvar_Get("r_pathTracingRRRows", "0", CVAR_CHEAT | CVAR_LATCH);
+	/* Non-archived comparison switch; keep off until hardware verification. */
+	r_pathTracingDynamicOpaque = ri.Cvar_Get("r_pathTracingDynamicOpaque", "0", CVAR_CHEAT);
+	ri.Cvar_CheckRange(r_pathTracingDynamicOpaque, 0, 1, qtrue);
 	ri.Cvar_CheckRange(r_pathTracingRRRows, 0, 128, qtrue);
 	r_pathTracingStagedProfile = ri.Cvar_Get("r_pathTracingStagedProfile", "0", CVAR_CHEAT);
 	ri.Cvar_CheckRange(r_pathTracingStagedProfile, 0, 1, qtrue);

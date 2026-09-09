@@ -1,8 +1,12 @@
 /* Optional shader-clock diagnostics. Included once after the native PT state.
  * Only the diagnostic pipeline uses set 1. Normal pipelines/buffers are intact.
  * Readback reuses the completed render fence; there is no profiling GPU wait. */
-typedef struct { float ticks[12]; uint32_t counts[8]; } pt_profile_record_t;
-typedef char pt_profile_record_layout[(sizeof(pt_profile_record_t) == 80) ? 1 : -1];
+/* The first eight counters are the long-standing path/fog totals.  The second
+ * eight are query-walk counters used to distinguish too many ray queries from
+ * expensive traversal inside each query.  This is diagnostic-only storage;
+ * production pipelines do not bind this buffer. */
+typedef struct { float ticks[12]; uint32_t counts[16]; } pt_profile_record_t;
+typedef char pt_profile_record_layout[(sizeof(pt_profile_record_t) == 112) ? 1 : -1];
 static struct {
     VkBuffer buffer;
     VkDeviceMemory memory;
@@ -133,7 +137,7 @@ static void shader_profile_read(void)
 {
     if (!pt_shader_profile.pending) return;
     pt_shader_profile.pending = qfalse;
-    double ticks[12] = {0}, counts[8] = {0}, total = 0;
+    double ticks[12] = {0}, counts[16] = {0}, total = 0;
     uint32_t pixels = 0;
     for (uint32_t i = 0; i < pt_shader_profile.records; ++i) {
         const pt_profile_record_t *record = &pt_shader_profile.mapped[i];
@@ -144,7 +148,7 @@ static void shader_profile_read(void)
         if (!valid) continue;
         ++pixels;
         for (int j = 0; j < 12; ++j) ticks[j] += record->ticks[j];
-        for (int j = 0; j < 8; ++j) counts[j] += record->counts[j];
+        for (int j = 0; j < 16; ++j) counts[j] += record->counts[j];
     }
     for (int j = 0; j < 12; ++j) total += ticks[j];
     if (total > 0 && pixels) {
@@ -155,6 +159,8 @@ static void shader_profile_read(void)
             (ticks[3]+ticks[4]+ticks[5]+ticks[6]+ticks[7]+ticks[9])*100/total,
             ticks[3]*100/total, ticks[4]*100/total, ticks[5]*100/total, ticks[6]*100/total, (ticks[7]+ticks[9])*100/total,
             counts[0], counts[1], counts[2], counts[3]);
+        ri.Printf(PRINT_ALL, "PT_SHADER_QUERY_PROFILE pixels=%u trace_proceed=%.0f trace_candidates=%.0f trace_confirmed=%.0f visibility_proceed=%.0f visibility_candidates=%.0f visibility_confirmed=%.0f alpha_rejected=%.0f transparent_filters=%.0f\n",
+            pixels, counts[8], counts[9], counts[10], counts[11], counts[12], counts[13], counts[14], counts[15]);
         ri.Printf(PRINT_ALL, "PT_SHADER_FOG_PROFILE pixels=%u sampling=%.3f lightsetup=%.3f visibility=%.3f transmittance=%.3f events=%.0f scattered=%.0f shadows=%.0f bounded_segments=%.0f\n",
             pixels, ticks[8]*100/total, ticks[9]*100/total, ticks[10]*100/total, ticks[11]*100/total,
             counts[4], counts[5], counts[6], counts[7]);

@@ -2,13 +2,13 @@
 // clock shares, NOT additive GPU milliseconds or hardware-unit utilization.
 #ifdef PT_PROFILE_PASS
 #extension GL_ARB_shader_clock : require
-struct ProfileRecord { vec4 ticks[3]; uvec4 counts[2]; };
+struct ProfileRecord { vec4 ticks[3]; uvec4 counts[4]; };
 layout(set=1,binding=0,std430) writeonly buffer ShaderProfile { ProfileRecord profileRecords[]; };
 bool profileEnabled=false;
 uint profileCategory=0u,profileRecordIndex;
 uvec2 profileLast;
 vec4 profileTicks[3]=vec4[3](vec4(0),vec4(0),vec4(0));
-uvec4 profileCounts[2]=uvec4[2](uvec4(0),uvec4(0));
+uvec4 profileCounts[4]=uvec4[4](uvec4(0),uvec4(0),uvec4(0),uvec4(0));
 uint profileEnter(uint category) {
     uint previous=profileCategory;
     if(profileEnabled) {

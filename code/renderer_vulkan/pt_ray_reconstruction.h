@@ -9,7 +9,7 @@ static struct {
     VkDescriptorPool pool;
     VkDescriptorSet set;
     VkPipelineLayout layout;
-    VkPipeline guide, pack, post, trace, spatial, fallback;
+    VkPipeline guide[2], pack, post, trace[2], spatial, fallback;
     uint32_t width, height;
     uint32_t rows, sample_index, sampling_flags;
     qboolean ready, transitioned, frame_ready, previous_active;
@@ -19,10 +19,12 @@ static struct {
 
 static void rr_shutdown(void)
 {
-    if (pt_rr.guide) qvkDestroyPipeline(vk.device, pt_rr.guide, NULL);
+    for (int i = 0; i < 2; ++i)
+        if (pt_rr.guide[i]) qvkDestroyPipeline(vk.device, pt_rr.guide[i], NULL);
     if (pt_rr.pack) qvkDestroyPipeline(vk.device, pt_rr.pack, NULL);
     if (pt_rr.post) qvkDestroyPipeline(vk.device, pt_rr.post, NULL);
-    if (pt_rr.trace) qvkDestroyPipeline(vk.device, pt_rr.trace, NULL);
+    for (int i = 0; i < 2; ++i)
+        if (pt_rr.trace[i]) qvkDestroyPipeline(vk.device, pt_rr.trace[i], NULL);
     if (pt_rr.spatial) qvkDestroyPipeline(vk.device, pt_rr.spatial, NULL);
     if (pt_rr.fallback) qvkDestroyPipeline(vk.device, pt_rr.fallback, NULL);
     if (pt_rr.layout) qvkDestroyPipelineLayout(vk.device, pt_rr.layout, NULL);
@@ -36,13 +38,14 @@ static void rr_shutdown(void)
     memset(&pt_rr, 0, sizeof(pt_rr));
 }
 
-static qboolean rr_pipeline(const unsigned char *code, size_t size, VkPipeline *result)
+static qboolean rr_pipeline(const unsigned char *code, size_t size, VkPipeline *result,
+    qboolean alias_pdf)
 {
     VkShaderModule module = VK_NULL_HANDLE;
     VkShaderModuleCreateInfo shader = { .sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,
         .codeSize = size, .pCode = (const uint32_t *)code };
     if (qvkCreateShaderModule(vk.device, &shader, NULL, &module) != VK_SUCCESS) return qfalse;
-    uint32_t options[4] = { VK_FALSE, VK_FALSE, VK_TRUE, pt_rr.rows };
+    uint32_t options[4] = { VK_FALSE, alias_pdf ? VK_TRUE : VK_FALSE, VK_TRUE, pt_rr.rows };
     VkSpecializationMapEntry entries[4] = { { 0, 0, 4 }, { 1, 4, 4 }, { 2, 8, 4 }, { 3, 12, 4 } };
     VkSpecializationInfo specialization = { 4, entries, sizeof(options), options };
     VkComputePipelineCreateInfo pipeline = { .sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO,
@@ -140,12 +143,13 @@ qboolean vk_pt_rr_initialize(uint32_t output_width, uint32_t output_height)
     VkPipelineLayoutCreateInfo layout = { .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
         .setLayoutCount = 2, .pSetLayouts = sets, .pushConstantRangeCount = 1, .pPushConstantRanges = &push };
     if (qvkCreatePipelineLayout(vk.device, &layout, NULL, &pt_rr.layout) != VK_SUCCESS ||
-        !rr_pipeline(pt_rr_guides_comp_spv, pt_rr_guides_comp_spv_size, &pt_rr.guide) ||
-        !rr_pipeline(pt_rr_pack_comp_spv, pt_rr_pack_comp_spv_size, &pt_rr.pack) ||
-        !rr_pipeline(pt_rr_post_comp_spv, pt_rr_post_comp_spv_size, &pt_rr.post) ||
-        !rr_pipeline(pt_rr_trace_comp_spv, pt_rr_trace_comp_spv_size, &pt_rr.trace) ||
-        !rr_pipeline(pt_rr_spatial_comp_spv, pt_rr_spatial_comp_spv_size, &pt_rr.spatial) ||
-        !rr_pipeline(pt_rr_fallback_comp_spv, pt_rr_fallback_comp_spv_size, &pt_rr.fallback)) goto fail;
+            !rr_pipeline(pt_rr_pack_comp_spv, pt_rr_pack_comp_spv_size, &pt_rr.pack, qfalse) ||
+            !rr_pipeline(pt_rr_post_comp_spv, pt_rr_post_comp_spv_size, &pt_rr.post, qfalse) ||
+            !rr_pipeline(pt_rr_spatial_comp_spv, pt_rr_spatial_comp_spv_size, &pt_rr.spatial, qfalse) ||
+            !rr_pipeline(pt_rr_fallback_comp_spv, pt_rr_fallback_comp_spv_size, &pt_rr.fallback, qfalse)) goto fail;
+    for (int i = 0; i < 2; ++i)
+        if (!rr_pipeline(pt_rr_guides_comp_spv, pt_rr_guides_comp_spv_size, &pt_rr.guide[i], i != 0) ||
+            !rr_pipeline(pt_rr_trace_comp_spv, pt_rr_trace_comp_spv_size, &pt_rr.trace[i], i != 0)) goto fail;
     pt_rr.ready = qtrue;
     ri.Printf(PRINT_ALL, "Ray Reconstruction HDR resources ready: %ux%u -> %ux%u\n", pt.width, pt.height, output_width, output_height);
     return qtrue;
@@ -210,7 +214,7 @@ static void rr_prepare(VkCommandBuffer cmd, const float *push)
         pt_rr.transitioned = qtrue;
     }
     rr_barrier(cmd);
-    rr_bind(cmd, pt_rr.guide, push);
+    rr_bind(cmd, pt_rr.guide[(pt.lighting_mode & 4) ? 1 : 0], push);
 }
 
 static void rr_pack(VkCommandBuffer cmd, const float *push, qboolean direct_output)

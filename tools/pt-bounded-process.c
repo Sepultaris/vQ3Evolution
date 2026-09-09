@@ -11,7 +11,7 @@ static DWORD bounded_process(const wchar_t *exe, const wchar_t *directory,
     const wchar_t *arguments, DWORD timeout_ms, DWORD flags)
 {
     size_t length = wcslen(exe)+wcslen(arguments)+4;
-    if (!timeout_ms || timeout_ms>45000 || length>32767) return 2;
+    if (!timeout_ms || timeout_ms>120000 || length>32767) return 2;
     wchar_t *command = calloc(length,sizeof(wchar_t));
     if (!command) return 2;
     _snwprintf(command,length,L"\"%ls\" %ls",exe,arguments);
@@ -83,7 +83,7 @@ int wmain(int argc,wchar_t **argv)
     if (argc!=5) { fwprintf(stderr,L"Usage: pt-bounded-process exe directory seconds arguments\n"); return 2; }
     wchar_t *end=NULL;
     unsigned long seconds=wcstoul(argv[3],&end,10);
-    if (*end || seconds<1 || seconds>45) return 2;
+    if (*end || seconds<1 || seconds>120) return 2;
     /* Nsight may stop forwarding stdout when collection ends. Keep the
      * independent deadline/exit evidence in the capture's private directory. */
     const wchar_t *log=_wgetenv(L"VQ3E_BOUNDED_LOG");

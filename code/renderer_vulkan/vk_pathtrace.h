@@ -22,7 +22,7 @@ void vk_pt_shutdown(void);
 void vk_pt_info_f(void);
 void vk_pt_profile(VkCommandBuffer cmd, uint32_t point);
 uint32_t vk_pt_partition_world(uint32_t *indices, uint32_t count);
-uint32_t vk_pt_partition_dynamic(uint32_t *indices, uint32_t count);
+void vk_pt_partition_dynamic(uint32_t *indices, uint32_t count, uint32_t starts[5]);
 void vk_pt_begin_world(uint32_t vertices, uint32_t indices);
 void vk_pt_world_vertex(uint32_t vertex, const float *normal, const float *uv, byte alpha);
 void vk_pt_world_surface(uint32_t first_index, uint32_t index_count, shader_t *shader);

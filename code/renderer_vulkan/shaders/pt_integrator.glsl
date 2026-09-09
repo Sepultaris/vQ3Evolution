@@ -378,7 +378,9 @@ bool trace(vec3 origin, vec3 direction, float minimum, float maximum,
         purpose==3u ? 8u : (purpose==1u ? 1u : (purpose==2u ? 4u : 2u)),
         origin, minimum, direction, maximum);
     while(rayQueryProceedEXT(query)) {
+        PT_COUNT(8u);
         if(rayQueryGetIntersectionTypeEXT(query,false)==gl_RayQueryCandidateIntersectionTriangleEXT) {
+            PT_COUNT(9u);
             uint primitive=queryPrimitive(query,false);
             vec2 bary=rayQueryGetIntersectionBarycentricsEXT(query,false);
             // Sky polygons delimit the environment but must not occlude the sun.
@@ -393,7 +395,10 @@ bool trace(vec3 origin, vec3 direction, float minimum, float maximum,
             bool independentGlow=purpose!=2u && materials[materialAndFlags&0xffffu].maps.w==3;
             if (!excluded && (purpose!=2u || (!sky && !additive)) &&
                 (independentGlow || passesAlpha(primitive,bary,origin)))
+            {
                 rayQueryConfirmIntersectionEXT(query);
+                PT_COUNT(10u);
+            }
         }
     }
     if(rayQueryGetIntersectionTypeEXT(query,true)==gl_RayQueryCommittedIntersectionNoneEXT)
@@ -560,14 +565,17 @@ vec3 visibility(vec3 origin,vec3 direction,float distance) {
     vec3 transmission=vec3(1);
     int filters=0;
     while(rayQueryProceedEXT(query)) {
+        PT_COUNT(11u);
         if(rayQueryGetIntersectionTypeEXT(query,false)!=gl_RayQueryCandidateIntersectionTriangleEXT) continue;
+        PT_COUNT(12u);
         uint primitive=queryPrimitive(query,false);
         uint flags=triangleMaterials[primitive], id=flags&0xffffu;
         if((flags&0x48000000u)!=0u || materials[id].emission.z!=0 || materials[id].params.x==2) continue;
         vec2 bary=rayQueryGetIntersectionBarycentricsEXT(query,false);
-        if(!passesAlpha(primitive,bary,origin)) continue;
+        if(!passesAlpha(primitive,bary,origin)) { PT_COUNT(14u); continue; }
         if(materials[id].params.x==4 && materials[id].optical.y<0) {
             if(++filters>=32) return vec3(0);
+            PT_COUNT(15u);
             vec3 geometric;
             vec3 n=shadingNormal(Hit(0,primitive,bary),direction,geometric);
             vec3 r,t;
@@ -578,8 +586,12 @@ vec3 visibility(vec3 origin,vec3 direction,float distance) {
             // Multiplicative filters commute: one traversal visits them in any
             // order, instead of restarting a closest-hit query for every pane.
             if(++filters>=32) return vec3(0);
+            PT_COUNT(15u);
             transmission*=filterTransmission(primitive,bary,mat2(0),origin);
-        } else rayQueryConfirmIntersectionEXT(query);
+        } else {
+            rayQueryConfirmIntersectionEXT(query);
+            PT_COUNT(13u);
+        }
     }
     return rayQueryGetIntersectionTypeEXT(query,true)==gl_RayQueryCommittedIntersectionNoneEXT ?
         transmission*exp(-visibilityAbsorption*distance)*fogTransmittance(origin,direction,0,distance):vec3(0);

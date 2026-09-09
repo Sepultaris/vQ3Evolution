@@ -14,7 +14,8 @@ int wmain(int argc,wchar_t **argv)
     assert(bounded_process(exe,directory,L"--sleep",150,CREATE_NO_WINDOW)==124);
     assert(GetTickCount64()-start<2500);
     assert(bounded_process(exe,directory,L"--exit",2000,CREATE_NO_WINDOW)==23);
-    assert(bounded_process(exe,directory,L"--sleep",45001,CREATE_NO_WINDOW)==2);
+    assert(bounded_process(exe,directory,L"--exit",90000,CREATE_NO_WINDOW)==23);
+    assert(bounded_process(exe,directory,L"--sleep",120001,CREATE_NO_WINDOW)==2);
     assert(bounded_process(L"C:\\not-a-real-vq3e-test.exe",directory,L"",100,CREATE_NO_WINDOW)==4);
     puts("PASS: owned job timeout, normal exit, hard limit and failed launch; no game/GPU used");
     return 0;

@@ -15,9 +15,9 @@ static void qvkGetPhysicalDeviceProperties(VkPhysicalDevice device,VkPhysicalDev
 }
 static struct {
     VkPipelineLayout layout;
-    VkPipeline compact_transport_pipeline;
+    VkPipeline compact_transport_pipeline[2];
     uint32_t compact_transport_rows;
-    qboolean compact_transport_failed;
+    qboolean compact_transport_failed[2];
 } pt;
 static struct { int integer; } requested,profile;
 #define r_pathTracingCompactTransport (&requested)
@@ -25,6 +25,7 @@ static struct { int integer; } requested,profile;
 _Alignas(4) unsigned char pt_compact_transport_comp_spv[4];
 int pt_compact_transport_comp_spv_size=4;
 static unsigned failure,modules,module_destroys,creates,destroys,live,warnings;
+static unsigned expected_alias;
 static void print_log(int level,const char *fmt,...) { (void)fmt;if(level==PRINT_WARNING) ++warnings; }
 static int milliseconds(void) { return 0; }
 static struct {void (*Printf)(int,const char *,...);int (*Milliseconds)(void);}ri={print_log,milliseconds};
@@ -47,7 +48,7 @@ static VkResult qvkCreateComputePipelines(VkDevice d,VkPipelineCache c,uint32_t 
     const VkBool32 *v=s->pData;
     for(unsigned i=0;i<3;++i) {
         assert(s->pMapEntries[i].constantID==i && s->pMapEntries[i].offset==i*sizeof(VkBool32));
-        assert(s->pMapEntries[i].size==sizeof(VkBool32) && v[i]==(i==2 ? VK_TRUE:VK_FALSE));
+        assert(s->pMapEntries[i].size==sizeof(VkBool32) && v[i]==(i==2 ? VK_TRUE:(i==1 ? expected_alias:VK_FALSE)));
     }
     assert(s->pMapEntries[3].constantID==3 && s->pMapEntries[3].offset==12 && s->pMapEntries[3].size==4);
     assert(v[3]==pt.compact_transport_rows && (v[3]==8 || v[3]==64 || v[3]==128));
@@ -69,8 +70,8 @@ int main(void) {
         device_properties.limits.maxComputeWorkGroupSize[0]=1024;
         device_properties.limits.maxComputeWorkGroupSize[1]=device==3 ? 32:(device==5 ? 64:1024);
         unsigned rows=device==1 ? 128:(device>=4 ? 64:8);
-        failure=fail;requested.integer=on;profile.integer=prof;
-        unsigned eligible=on && !prof && mode==57;
+        failure=fail;requested.integer=on;profile.integer=prof;expected_alias=(mode&4u)!=0;
+        unsigned eligible=on && !prof && (mode==57 || mode==61);
         unsigned success=fail==0 || fail>=4;
         unsigned retry=fail>=2 && fail<=4 ? (rows==128 ? 2:(rows==64 ? 1:0)) : (fail==5 && rows==128);
         for(unsigned frame=0;frame<8;++frame) {
@@ -81,7 +82,8 @@ int main(void) {
             if(eligible && success) assert(pt.compact_transport_rows==(fail==4 ? 8u:(fail==5 && rows==128 ? 64u:rows)));
             ++checks;
         }
-        if(pt.compact_transport_pipeline) qvkDestroyPipeline(vk.device,pt.compact_transport_pipeline,NULL);
+        for(unsigned variant=0;variant<2;++variant)
+            if(pt.compact_transport_pipeline[variant]) qvkDestroyPipeline(vk.device,pt.compact_transport_pipeline[variant],NULL);
         assert(!live && module_destroys==(eligible && fail!=1));
         assert(destroys==eligible*(fail!=1 && fail!=2)*(1+retry));
     }

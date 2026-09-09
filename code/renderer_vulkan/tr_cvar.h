@@ -137,6 +137,7 @@ extern cvar_t* r_pathTracingCompactTransport;
 extern cvar_t* r_pathTracingStaged;
 extern cvar_t* r_pathTracingStagedRows;
 extern cvar_t* r_pathTracingRRRows;
+extern cvar_t* r_pathTracingDynamicOpaque;
 extern cvar_t* r_pathTracingStagedProfile;
 extern cvar_t* r_pathTracingPipelineStats;
 extern cvar_t* r_pathTracingBRDFReuse;

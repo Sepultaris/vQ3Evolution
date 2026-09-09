@@ -9,6 +9,7 @@ then [current status](STATUS.md) for supported paths and known limitations.
 | --- | --- |
 | [Universal options](UNIVERSAL_OPTIONS.md) | Engine-owned settings for base Quake III, Team Arena and mods; shared profiles and legacy UI scaling |
 | [Path tracing](PATH_TRACING.md) | Lighting, samples, bounces, exposure, ambient fill, penumbra, materials and fallback |
+| [Dynamic opaque experiment](DYNAMIC_OPAQUE.md) | Separate built candidate; measured no median FPS gain and remains disabled |
 | [Ray Reconstruction](RAY_RECONSTRUCTION.md) | NVIDIA RR with DLAA/DLSS, current defaults, input contract and limitations |
 | [NVIDIA integration](DLSS.md) | SDK/runtime setup, DLSS/DLAA, NR, Frame Generation and Reflex |
 | [Ray-traced shadows](RTX.md) | The separate hybrid shadow mode, not full path tracing |

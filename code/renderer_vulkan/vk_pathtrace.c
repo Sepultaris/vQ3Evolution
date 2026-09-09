@@ -170,9 +170,10 @@ static struct {
     VkPipeline guide_pipeline;
     VkPipeline material_cache_pipeline;
     qboolean material_cache_failed, material_cache_active;
-    VkPipeline compact_transport_pipeline;
+    /* Compact transport has separate specializations for cached alias PDFs. */
+    VkPipeline compact_transport_pipeline[2];
     uint32_t compact_transport_rows;
-    qboolean compact_transport_failed, compact_transport_active;
+    qboolean compact_transport_failed[2], compact_transport_active;
     struct {
         pt_buffer_t state;
         VkBuffer comparison;
@@ -329,7 +330,7 @@ void vk_pt_profile(VkCommandBuffer cmd, uint32_t point)
 {
     gpu_label_point(cmd, point);
     if (!point && pt_gpu_labels.name) {
-        gpu_label_pipeline(0, pt.compact_transport_pipeline, "VQ3E Path tracing - compact transport");
+        gpu_label_pipeline(0, pt.compact_transport_pipeline[(pt.lighting_mode & 4) ? 1 : 0], "VQ3E Path tracing - compact transport");
         gpu_label_pipeline(1, pt.guide_pipeline, "VQ3E Surface guides");
         gpu_label_pipeline(2, pt.material_cache_pipeline, "VQ3E Material preprocessing");
         gpu_label_pipeline(3, pt.temporal_pipeline, "VQ3E Temporal reconstruction");
@@ -1086,23 +1087,39 @@ uint32_t vk_pt_partition_world(uint32_t *indices, uint32_t count)
     return pt.world_opaque_indices;
 }
 
-uint32_t vk_pt_partition_dynamic(uint32_t *indices, uint32_t count)
+static qboolean dynamic_opaque(uint32_t flags, const pt_material_t *m)
 {
-    uint32_t cursor = 0, regular = 0;
+    /* Weapon instances are queried only by first-person rays, which ignore
+     * third-person/no-shadow flags. Decals must always retain callbacks. */
+    uint32_t excluded = (flags & 0x20000000u) ? 0x08000000u : 0xc8000000u;
+    return !(flags & excluded) && m->params[0] == 0 &&
+        m->surface[3] == 0 && m->emission[2] == 0;
+}
+
+void vk_pt_partition_dynamic(uint32_t *indices, uint32_t count, uint32_t starts[5])
+{
+    uint32_t cursor = 0;
     uint32_t *materials = pt.triangle_materials.mapped;
+    qboolean enabled = r_pathTracingDynamicOpaque->integer != 0;
     // Stable partition changes triangle order only, never vertex correspondence.
-    for (int weapon = 0; weapon <= 1; ++weapon) {
+    // World, regular opaque/callback, weapon opaque/callback. Separate BLAS
+    // instances preserve existing shader primitive addressing without changes.
+    starts[0] = 0;
+    for (int bucket = 0; bucket < 4; ++bucket) {
+        starts[bucket+1] = pt.world_indices + cursor;
+        if (!enabled && (bucket&1) == 0) continue; // Preserve two scans when disabled.
         for (uint32_t i = pt.world_indices/3; i < count/3; ++i) {
-            if (((materials[i]&0x20000000u) != 0) != weapon) continue;
+            const pt_material_t *m = (const pt_material_t *)pt.materials.mapped + (materials[i]&0xffffu);
+            int group = (materials[i]&0x20000000u) ? 2 : 0;
+            if (!enabled || !dynamic_opaque(materials[i], m)) ++group;
+            if (group != bucket) continue;
             memcpy(pt.partition_indices+cursor, indices+i*3, 3*sizeof(uint32_t));
             pt.partition_materials[cursor/3] = materials[i];
             cursor += 3;
         }
-        if (!weapon) regular = cursor;
     }
     memcpy(indices+pt.world_indices, pt.partition_indices, cursor*sizeof(uint32_t));
     memcpy(materials+pt.world_indices/3, pt.partition_materials, cursor/3*sizeof(uint32_t));
-    return pt.world_indices+regular;
 }
 
 /* Native materials are compiled into the renderer. The diagnostic assets and
@@ -1604,7 +1621,8 @@ void vk_pt_shutdown(void)
     free(pt.motion_positions[0]);
     free(pt.motion_positions[1]);
     lighting_pipeline_shutdown();
-    if (pt.compact_transport_pipeline) qvkDestroyPipeline(vk.device, pt.compact_transport_pipeline, NULL);
+    for (int i = 0; i < 2; ++i)
+        if (pt.compact_transport_pipeline[i]) qvkDestroyPipeline(vk.device, pt.compact_transport_pipeline[i], NULL);
     if (pt.material_cache_pipeline) qvkDestroyPipeline(vk.device, pt.material_cache_pipeline, NULL);
     if (pt.guide_pipeline) qvkDestroyPipeline(vk.device, pt.guide_pipeline, NULL);
     if (pt.denoise_pipeline) qvkDestroyPipeline(vk.device, pt.denoise_pipeline, NULL);
@@ -1817,7 +1835,7 @@ qboolean vk_pt_record(VkCommandBuffer cmd, VkAccelerationStructureKHR scene,
     radiance_hash = hash_bytes(radiance_hash, &light_radius, sizeof(light_radius));
     pt_rr.frame_ready = rr_requested();
     if (pt_rr.frame_ready != pt_rr.previous_active) pt.temporal_valid = qfalse;
-    uint32_t rr_sampling = pt_rr.frame_ready && pt.lighting_mode == 57 &&
+    uint32_t rr_sampling = pt_rr.frame_ready && (pt.lighting_mode == 57 || pt.lighting_mode == 61) &&
         r_pathTracingCompactTransport->integer && !r_pathTracingStaged->integer ?
         (r_pathTracingLightReuse->integer ? 1u : 0u) | (r_pathTracingAdaptive->integer ? 2u : 0u) : 0;
     if (rr_sampling != pt_rr.sampling_flags) pt.temporal_valid = qfalse;
@@ -2007,14 +2025,14 @@ qboolean vk_pt_record(VkCommandBuffer cmd, VkAccelerationStructureKHR scene,
             qvkCmdDispatch(cmd, (pt.width + 7) / 8, (pt.height + 7) / 8, 1);
             rr_barrier(cmd);
         }
-        rr_bind(cmd, pt_rr.trace, c);
+        rr_bind(cmd, pt_rr.trace[(lighting_mode & 4) ? 1 : 0], c);
     } else if (!pt.profile_instrumented) {
         // RR guide's two-set layout is incompatible with the native one-set
         // layout. Rebind both descriptors and push constants explicitly.
         qvkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pt.layout, 0, 1, &pt.set, 0, NULL);
         qvkCmdPushConstants(cmd, pt.layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(c), c);
         qvkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
-        compact_active ? pt.compact_transport_pipeline : pt.lighting_pipelines[lighting_mode]);
+        compact_active ? pt.compact_transport_pipeline[(lighting_mode & 4) ? 1 : 0] : pt.lighting_pipelines[lighting_mode]);
     }
     vk_pt_profile(cmd, 3);
     if (!staged_active || (r_pathTracingStaged->integer == 2 && c[31] == 0))
@@ -2095,7 +2113,8 @@ void vk_pt_info_f(void)
         r_pathTracingBRDFReuse->integer, pt.brdf_active,
         pt.lighting_pipelines[1] != VK_NULL_HANDLE || pt.lighting_pipelines[3] != VK_NULL_HANDLE ||
         pt.lighting_pipelines[5] != VK_NULL_HANDLE || pt.lighting_pipelines[7] != VK_NULL_HANDLE ||
-        pt.compact_transport_pipeline != VK_NULL_HANDLE ||
+        pt.compact_transport_pipeline[0] != VK_NULL_HANDLE ||
+        pt.compact_transport_pipeline[1] != VK_NULL_HANDLE ||
         ((pt.lighting_mode & 1) && pt.lighting_pipelines[pt.lighting_mode] != VK_NULL_HANDLE));
     ri.Printf(PRINT_ALL, "Path tracing map-light rejection: requested %d, active %d\n",
         r_pathTracingMapLightCull->integer, pt.map_light_cull_active);

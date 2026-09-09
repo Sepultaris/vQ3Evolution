@@ -152,9 +152,9 @@ class ShaderProfileTests(unittest.TestCase):
     def test_detailed_lighting_layout_is_diagnostic_only(self):
         shader = (ROOT / "code/renderer_vulkan/shaders/pt_shader_profile.glsl").read_text()
         native = (ROOT / "code/renderer_vulkan/pt_shader_profile.h").read_text()
-        self.assertIn("vec4 ticks[3]; uvec4 counts[2]", shader)
-        self.assertIn("sizeof(pt_profile_record_t) == 80", native)
-        self.assertIn("float ticks[12]; uint32_t counts[8]", native)
+        self.assertIn("vec4 ticks[3]; uvec4 counts[4]", shader)
+        self.assertIn("sizeof(pt_profile_record_t) == 112", native)
+        self.assertIn("float ticks[12]; uint32_t counts[16]", native)
         self.assertIn("PT_SHADER_FOG_PROFILE", native)
         self.assertIn("(ticks[1]+ticks[10]+ticks[11])*100/total", native)
         self.assertIn("(ticks[2]+ticks[8])*100/total", native)
@@ -216,13 +216,13 @@ if __name__ == "__main__":
         for variant in ('pt_profile','pt_profile_brdf','pt_light_loop_profile','pt_light_loop_profile_brdf'):
             binary=ROOT/f'code/renderer_vulkan/shaders/Compiled/{variant}.cspv'
             text=subprocess.check_output([args.spirv_dis,str(binary)],text=True)
-            assert re.search(r'OpDecorate %\w*ProfileRecord\w* ArrayStride 80\b',text),variant
+            assert re.search(r'OpDecorate %\w*ProfileRecord\w* ArrayStride 112\b',text),variant
             records=re.findall(r'OpName (%\w+) "ProfileRecord"',text)
             records=[record for record in records if re.search(r'OpTypeRuntimeArray '+re.escape(record)+r'\s',text)]
             assert records,variant
             for record in records:
                 assert re.search(r'OpMemberDecorate '+re.escape(record)+r' 1 Offset 48\b',text),variant
-        print('PASS: all four diagnostic binaries use 80-byte records, counts at byte 48')
+        print('PASS: all four diagnostic binaries use 112-byte records, counts at byte 48')
     if args.fog_log:
         text=args.fog_log.read_text(errors='replace')
         assert 'PT_PROGRAM_COMPLETE' in text and 'PT_SHADER_PROFILE_READY' in text

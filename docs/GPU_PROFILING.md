@@ -9,6 +9,9 @@ historical, not a profile of the current combined RR tracer. See
 [current status](STATUS.md) and the [later RR record](archive/RAY_RECONSTRUCTION_DEVELOPMENT.md)
 before selecting a new capture target.
 
+The current RR capture and source-line findings are recorded in
+[the 2026-09-09 profiler repair and capture](GPU_PROFILE_20260909.md).
+
 ## Tool versions used in the 2026-09-08 setup
 
 The setup machine has Nsight Systems 2025.6.3 and Nsight Graphics 2026.3.1.
@@ -46,10 +49,11 @@ shader build. The existing `spirv-opt -O` pass and Vulkan validation remain.
 comparison. Normalize both using `spirv-opt --strip-debug --compact-ids` and
 compare their SHA-256 hashes before accepting symbol payloads. The historical
 setup performed this check on `pt_compact_transport`, `pt_guides`,
-`pt_material_cache`, `pt_temporal` and `pt_denoise`; it is not evidence that the
-current RR payloads have already passed a fresh symbol comparison. Choose the
-shaders actually active in the captured configuration and restore normal
-payloads before a production commit.
+`pt_material_cache`, `pt_temporal` and `pt_denoise`. The current RR trace, guides
+and post payloads passed a separate fresh comparison on 2026-09-09; hashes and
+isolated-build provenance are in [the current capture report](GPU_PROFILE_20260909.md).
+Choose the shaders actually active in the captured configuration and restore
+normal payloads before a production commit.
 These are source/line symbols, not NonSemantic function/call-site debug info.
 
 The opt-in process environment variable `VQ3E_GPU_LABELS=1` names the normal
@@ -131,6 +135,38 @@ the target once the report is saved, so the scenario's later quit marker is not
 required for this capture. Automatic metrics export and detailed shader-source
 inspection remain separate from successful data collection; do not claim the
 shader-stall root cause has been established just because a report was saved.
+
+### Windows reserved-port attachment failure (2026-09-09)
+
+If Graphics repeats `Searching for attachable processes` and the game stops on
+its first queue submission, inspect the connection before changing renderer code.
+On this host Windows reserved TCP ports 49152–49251, covering Nsight's entire
+default target range (49152–49215). A noninvasive stack inspection showed the
+main thread waiting in `WarpVizTarget` during `vkQueueSubmit`; no target listener
+existed. Binding the excluded ports failed with `AccessDenied`.
+
+Read reservations using `netsh interface ipv4 show excludedportrange protocol=tcp`
+(also check IPv6). Do not delete exclusions, disable networking/services or
+disable the firewall. Choose an available range for the profiler instead.
+
+Nsight Graphics 2026.3.1 stores these settings separately:
+
+- GUI: **Tools > Options > Connection > Base Port**, saved in
+  `%APPDATA%/NVIDIA Corporation/NVIDIA Nsight Graphics.ini`.
+- CLI: `HKCU/Software/NVIDIA Corporation/NVIDIA Nsight Graphics/Connection`,
+  DWORD values `ConnectionBasePort` and `ConnectionMaxPorts`.
+
+Both now use base port **55000**, maximum ports **64**, on this host. The GUI INI
+was backed up before editing. Changing the GUI alone did not affect the CLI;
+after its native settings were corrected, the CLI attached and captured normally.
+This is a per-user profiler setting, not a change to game settings or Windows
+port reservations. Recheck availability if the machine's reservations change.
+
+The Graphics runner now tests its configured range before launching the game
+and records the chosen range. It fails immediately if no port can be bound.
+The probe closes its socket immediately: it neither leaves a listener behind
+nor guarantees availability against a later competing process. The capture log
+must still show attachment and a successfully saved trace.
 
 ## Inspect and accept the evidence
 

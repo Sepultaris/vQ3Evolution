@@ -1,6 +1,23 @@
 # No game, injection, elevation or GPU. Exercise the real native guard.
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'run-pt-nsight.ps1') -FunctionsOnly
+# A local occupied port must fail before any game/worker launch. Use an OS-chosen
+# port so this regression check does not depend on this machine's exclusions.
+$ptListener = [Net.Sockets.TcpListener]::new([Net.IPAddress]::Loopback, 0)
+$ptListener.ExclusiveAddressUse = $true
+try {
+    $ptListener.Start()
+    $ptProbePort = $ptListener.LocalEndpoint.Port
+    $ptProbeError = $null
+    try { Test-PtNsightConnection -BasePort $ptProbePort -MaxPorts 1 | Out-Null }
+    catch { $ptProbeError = $_.Exception.Message }
+    if ($ptProbeError -notlike 'Nsight cannot bind any port*No game was launched.') { throw 'Occupied Nsight port was not rejected clearly.' }
+} finally { $ptListener.Stop() }
+$ptProbe = Test-PtNsightConnection -BasePort $ptProbePort -MaxPorts 1
+if ($ptProbe.availablePort -ne $ptProbePort) { throw 'Released Nsight port was not usable.' }
+# The successful probe must release its listener too.
+$null = Test-PtNsightConnection -BasePort $ptProbePort -MaxPorts 1
+Write-Output 'PASS: Nsight occupied-port rejection, available-port detection and probe cleanup.'
 $ptTestDirectory = New-Item -ItemType Directory -Path (Join-Path $ptAudit ('tools/guard-check-' + [guid]::NewGuid().ToString('N')))
 $ptFixture = Join-Path $ptAudit 'tools/pt_bounded_process_check.exe'
 function Start-PtGuardTest([string]$Name, [string]$Arguments) {

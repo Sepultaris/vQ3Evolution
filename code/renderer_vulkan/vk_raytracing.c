@@ -52,6 +52,8 @@ typedef struct {
 	rt_buffer_t scratch;
 	rt_acceleration_structure_t blas;
 	rt_acceleration_structure_t world_blas, weapon_blas;
+	rt_acceleration_structure_t opaque_blas, opaque_weapon_blas;
+	int dynamic_opaque_logged;
 	qboolean world_built;
 	qboolean world_upload_pending;
 	VkDeviceSize scene_upload_bytes;
@@ -631,7 +633,7 @@ qboolean vk_rt_initialize(uint32_t width, uint32_t height,
 		VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
 		VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
 		qtrue) ||
-		!create_buffer(&rt.instances, 3 * sizeof(VkAccelerationStructureInstanceKHR),
+		!create_buffer(&rt.instances, 5 * sizeof(VkAccelerationStructureInstanceKHR),
 		VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR |
 		VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
 		VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
@@ -756,6 +758,8 @@ void vk_rt_shutdown(void)
 	destroy_as(&rt.blas);
 	destroy_as(&rt.world_blas);
 	destroy_as(&rt.weapon_blas);
+	destroy_as(&rt.opaque_blas);
+	destroy_as(&rt.opaque_weapon_blas);
 	destroy_buffer(&rt.scratch);
 	destroy_buffer(&rt.instances);
 	destroy_buffer(&rt.indices);
@@ -891,32 +895,40 @@ static void upload_scene(VkCommandBuffer cmd, uint32_t instance_count)
 		0, 1, &barrier, 0, NULL, 0, NULL);
 }
 
-/* The static world has separate opaque and alpha-tested geometry. Dynamic
- * objects and the first-person layer have their own instances, so a weapon
- * query never walks the map and opaque world hits need no shader callback. */
+/* Static world geometry separates opaque and callback triangles. The optional
+ * dynamic partition does the same through separate BLAS instances, preserving
+ * existing shader addressing and first-person/decal visibility masks. */
 static qboolean record_path_scene(VkCommandBuffer command_buffer,
 	const float *projection, const float *camera_origin,
 	const float *camera_axis, const float *sun_direction,
 	float near_distance, float far_distance, qboolean reset_history)
 {
-	VkAccelerationStructureGeometryKHR geometry[3][2] = {0}, tlas_geometry = {0};
-	VkAccelerationStructureBuildGeometryInfoKHR builds[3] = {0}, tlas_info = {0};
-	VkAccelerationStructureBuildRangeInfoKHR ranges[3][2] = {0}, tlas_range = {0};
+	VkAccelerationStructureGeometryKHR geometry[5][2] = {0}, tlas_geometry = {0};
+	VkAccelerationStructureBuildGeometryInfoKHR builds[5] = {0}, tlas_info = {0};
+	VkAccelerationStructureBuildRangeInfoKHR ranges[5][2] = {0}, tlas_range = {0};
 	VkAccelerationStructureBuildSizesInfoKHR sizes = {0};
-	VkAccelerationStructureInstanceKHR instances[3] = {0};
+	VkAccelerationStructureInstanceKHR instances[5] = {0};
 	VkAccelerationStructureDeviceAddressInfoKHR address = {0};
-	rt_acceleration_structure_t *targets[3] = {&rt.world_blas, &rt.blas, &rt.weapon_blas};
+	rt_acceleration_structure_t *targets[5] = {&rt.world_blas, &rt.opaque_blas,
+		&rt.blas, &rt.opaque_weapon_blas, &rt.weapon_blas};
 	VkDeviceSize scratch_size = 0;
 	VkMemoryBarrier barrier = {0};
-	uint32_t weapon_start = vk_pt_partition_dynamic(rt.indices.mapped, rt.index_count);
-	uint32_t starts[3] = {0, rt.world_index_count, weapon_start};
-	uint32_t counts[3] = {rt.world_index_count, weapon_start-rt.world_index_count, rt.index_count-weapon_start};
+	uint32_t starts[5], counts[5];
+	const uint32_t masks[5] = {7, 7, 23, 8, 8}; // Only callback dynamics contain decals (bit 16).
+	vk_pt_partition_dynamic(rt.indices.mapped, rt.index_count, starts);
+	for (uint32_t i = 0; i < 5; ++i)
+		counts[i] = (i+1 < 5 ? starts[i+1] : rt.index_count)-starts[i];
+	if (rt.dynamic_opaque_logged != 1+r_pathTracingDynamicOpaque->integer) {
+		ri.Printf(PRINT_ALL, "PT_DYNAMIC_OPAQUE enabled=%d regular=%u weapon=%u callback=%u\n",
+			r_pathTracingDynamicOpaque->integer, counts[1]/3, counts[3]/3, (counts[2]+counts[4])/3);
+		rt.dynamic_opaque_logged = 1+r_pathTracingDynamicOpaque->integer;
+	}
 	uint32_t instance_count = 0;
 	qboolean result;
 	vk_pt_profile(command_buffer, 1);
 	/* Size every allocation first: no recorded build may refer to scratch or
 	 * acceleration storage that a later allocation grows and destroys. */
-	for (uint32_t i = 0; i < 3; ++i) {
+	for (uint32_t i = 0; i < 5; ++i) {
 		uint32_t primitive_counts[2] = {counts[i]/3, 0};
 		uint32_t geometry_count = i == 0 ? 2 : 1;
 		if (!counts[i]) continue;
@@ -928,7 +940,7 @@ static qboolean record_path_scene(VkCommandBuffer command_buffer,
 			VkAccelerationStructureGeometryTrianglesDataKHR *tri = &geometry[i][j].geometry.triangles;
 			geometry[i][j].sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_KHR;
 			geometry[i][j].geometryType = VK_GEOMETRY_TYPE_TRIANGLES_KHR;
-			geometry[i][j].flags = i == 0 && j == 0 ? VK_GEOMETRY_OPAQUE_BIT_KHR :
+			geometry[i][j].flags = ((i == 0 && j == 0) || i == 1 || i == 3) ? VK_GEOMETRY_OPAQUE_BIT_KHR :
 				VK_GEOMETRY_NO_DUPLICATE_ANY_HIT_INVOCATION_BIT_KHR;
 			tri->sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_TRIANGLES_DATA_KHR;
 			tri->vertexFormat = VK_FORMAT_R32G32B32_SFLOAT;
@@ -961,7 +973,7 @@ static qboolean record_path_scene(VkCommandBuffer command_buffer,
 		instances[instance_count].transform.matrix[1][1] = 1;
 		instances[instance_count].transform.matrix[2][2] = 1;
 		instances[instance_count].instanceCustomIndex = starts[i]/3;
-		instances[instance_count].mask = i == 2 ? 8 : (i == 1 ? 23 : 7); // Bit 16 queries dynamic decals only.
+		instances[instance_count].mask = masks[i];
 		instances[instance_count].flags = VK_GEOMETRY_INSTANCE_TRIANGLE_FACING_CULL_DISABLE_BIT_KHR;
 		instances[instance_count].accelerationStructureReference = rt.get_as_address(vk.device, &address);
 		++instance_count;
@@ -985,7 +997,7 @@ static qboolean record_path_scene(VkCommandBuffer command_buffer,
 		!ensure_scratch(scratch_size)) return qfalse;
 	upload_scene(command_buffer, instance_count);
 	barrier.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
-	for (uint32_t i = 0; i < 3; ++i) {
+	for (uint32_t i = 0; i < 5; ++i) {
 		const VkAccelerationStructureBuildRangeInfoKHR *range = ranges[i];
 		if (!counts[i] || (i == 0 && rt.world_built)) continue;
 		builds[i].scratchData.deviceAddress = rt.scratch.address;
