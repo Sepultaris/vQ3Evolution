@@ -38,7 +38,7 @@ qboolean vk_sl_reflex_supported(void);
 const char *vk_sl_status(void);
 qboolean vk_sl_configure(int dlss_mode, int frame_generation, int reflex_mode,
 	uint32_t output_width, uint32_t output_height,
-	uint32_t *render_width, uint32_t *render_height);
+	uint32_t *render_width, uint32_t *render_height, float pt_scale);
 
 typedef struct vk_sl_frame_resources_s {
 	VkCommandBuffer command_buffer;

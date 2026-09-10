@@ -58,20 +58,20 @@ EOF
 chmod 754 $PKG/usr/bin/ioquake3
 
 mkdir -p $PKG/usr/bin
-cat >> $PKG/usr/bin/ioq3ded << EOF
+cat >> $PKG/usr/bin/vQ3EvoDed << EOF
 #!/bin/sh
 cd /usr/games/$APP/
-./ioq3ded.${ARCHSUFFIX} \$*
+./vQ3EvoDed.${ARCHSUFFIX} \$*
 exit \$? 
 EOF
-chmod 754 $PKG/usr/bin/ioq3ded
+chmod 754 $PKG/usr/bin/vQ3EvoDed
 
 mkdir -p $PKG/install
 cat $CWD/slack-desc > $PKG/install/slack-desc
 
 cat >> $PKG/install/doinst.sh << EOF
 chmod 754 /usr/games/$APP/*.${ARCHSUFFIX}
-chmod 754 /usr/bin/ioquake3 /usr/bin/ioq3ded
+chmod 754 /usr/bin/ioquake3 /usr/bin/vQ3EvoDed
 EOF
 chmod +x $PKG/install/doinst.sh
 

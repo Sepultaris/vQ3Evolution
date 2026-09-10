@@ -34,7 +34,7 @@ static uvec4 lightCounts;
 static struct { float x; } lightSelection;
 static vec4 pointPositions[1056],pointColors[1056];
 static vec3 positions[192];
-static bool ptEmitterGeometry,ptMapLightCull;
+static bool ptEmitterGeometry,ptMapLightCull,ptDlightReservoir;
 static uint sampledEmitterIndex, rng, trial;
 static std::vector<vec4> rays;
 static std::vector<vec3> contributions;

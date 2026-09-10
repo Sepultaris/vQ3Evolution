@@ -13,16 +13,17 @@ enum { qfalse, qtrue, PRINT_ALL, PRINT_WARNING };
 static struct { VkDevice device; } vk;
 static struct {
     VkPipelineLayout layout;
-    VkPipeline lighting_pipelines[64];
+    VkPipeline lighting_pipelines[128];
     uint32_t lighting_mode;
-    qboolean lighting_failed[64];
+    qboolean lighting_failed[128];
 } pt;
-static struct { int integer; } reuse, cull, alias_pdf, emitter_geometry_cvar, shared_functions_cvar;
+static struct { int integer; } reuse, cull, alias_pdf, emitter_geometry_cvar, shared_functions_cvar, dlight_reservoir_cvar;
 #define r_pathTracingBRDFReuse (&reuse)
 #define r_pathTracingMapLightCull (&cull)
 #define r_pathTracingAliasPDF (&alias_pdf)
 #define r_pathTracingEmitterGeometry (&emitter_geometry_cvar)
 #define r_pathTracingLightLoop (&shared_functions_cvar)
+#define r_pathTracingDlightReservoir (&dlight_reservoir_cvar)
 _Alignas(4) unsigned char pt_brdf_comp_spv[4], pathtrace_comp_spv[4];
 int pt_brdf_comp_spv_size=4, pathtrace_comp_spv_size=4;
 _Alignas(4) unsigned char pt_light_loop_comp_spv[4], pt_light_loop_brdf_comp_spv[4];
@@ -32,7 +33,7 @@ int pt_cached_materials_comp_spv_size=4, pt_cached_materials_brdf_comp_spv_size=
 static struct { int integer; } parallel_cvar, profile_cvar;
 #define r_pathTracingMaterialCache (&parallel_cvar)
 #define r_pathTracingShaderProfile (&profile_cvar)
-static unsigned creates[64], destroys[64], live[64], modules, module_destroys;
+static unsigned creates[128], destroys[128], live[128], modules, module_destroys;
 static uint64_t fail_mask;
 static unsigned fail_next_module, partial_failure, warnings, clock_ms;
 static unsigned checks;
@@ -48,7 +49,7 @@ static int milliseconds(void) { clock_ms+=7; return (int)clock_ms; }
 static struct { void (*Printf)(int,const char *,...); int (*Milliseconds)(void); } ri={print_log,milliseconds};
 static VkPipelineCreateFlags pipeline_statistics_flags(void) { return 0; }
 static void pipeline_statistics_print(VkPipeline pipeline,unsigned mode,VkPipelineCreateFlags flags) {
-    assert(pipeline && mode<64 && !flags);
+    assert(pipeline && mode<128 && !flags);
 }
 static VkResult qvkCreateShaderModule(VkDevice device, const VkShaderModuleCreateInfo *info,
     const VkAllocationCallbacks *allocator, VkShaderModule *output) {
@@ -78,18 +79,20 @@ static VkResult qvkCreateComputePipelines(VkDevice device, VkPipelineCache cache
     (void)device; (void)cache; (void)allocator;
     assert(count==1 && info->sType==VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO && info->layout==pt.layout);
     const VkSpecializationInfo *spec=info->stage.pSpecializationInfo;
-    assert(spec && spec->mapEntryCount==3 && spec->dataSize==3*sizeof(VkBool32));
+    assert(spec && spec->mapEntryCount==4 && spec->dataSize==4*sizeof(VkBool32));
     assert(spec->pMapEntries[0].constantID==0 && spec->pMapEntries[0].offset==0);
     assert(spec->pMapEntries[0].size==sizeof(VkBool32));
     assert(spec->pMapEntries[1].constantID==1 && spec->pMapEntries[1].offset==sizeof(VkBool32));
     assert(spec->pMapEntries[1].size==sizeof(VkBool32));
     assert(spec->pMapEntries[2].constantID==2 && spec->pMapEntries[2].offset==2*sizeof(VkBool32));
     assert(spec->pMapEntries[2].size==sizeof(VkBool32));
-    VkBool32 values[3];
+    assert(spec->pMapEntries[3].constantID==4 && spec->pMapEntries[3].offset==3*sizeof(VkBool32));
+    assert(spec->pMapEntries[3].size==sizeof(VkBool32));
+    VkBool32 values[4];
     memcpy(values,spec->pData,sizeof(values));
-    for(unsigned i=0;i<3;++i) assert(values[i]==VK_TRUE || values[i]==VK_FALSE);
-    unsigned mode=(unsigned)((uintptr_t)info->stage.module-100) + (values[0] ? 2u:0u) + (values[1] ? 4u:0u) + (values[2] ? 8u:0u);
-    assert(mode<64 && !live[mode]);
+    for(unsigned i=0;i<4;++i) assert(values[i]==VK_TRUE || values[i]==VK_FALSE);
+    unsigned mode=(unsigned)((uintptr_t)info->stage.module-100) + (values[0] ? 2u:0u) + (values[1] ? 4u:0u) + (values[2] ? 8u:0u) + (values[3] ? 64u:0u);
+    assert(mode<128 && !live[mode]);
     ++creates[mode];
     if (!(fail_mask & (UINT64_C(1)<<mode)) || partial_failure) {
         *output=(VkPipeline)(uintptr_t)(mode+1);
@@ -100,13 +103,13 @@ static VkResult qvkCreateComputePipelines(VkDevice device, VkPipelineCache cache
 static void qvkDestroyPipeline(VkDevice device, VkPipeline pipeline, const VkAllocationCallbacks *allocator) {
     (void)device; (void)allocator;
     unsigned mode=(unsigned)(uintptr_t)pipeline-1;
-    assert(mode<64 && live[mode]);
+    assert(mode<128 && live[mode]);
     live[mode]=0; ++destroys[mode];
 }
 #include "pt_pipeline_functions.inc"
 static void clear(void) {
     lighting_pipeline_shutdown();
-    for(unsigned i=0;i<64;++i) assert(!live[i]);
+    for(unsigned i=0;i<128;++i) assert(!live[i]);
     assert(modules==module_destroys);
     memset(&pt,0,sizeof(pt));
     memset(creates,0,sizeof(creates)); memset(destroys,0,sizeof(destroys));
@@ -124,19 +127,20 @@ static int expected_mode(unsigned requested, uint64_t mask) {
 int main(void) {
     // Every fresh configuration compiles only the requested integrator, with
     // correct shader/spec mapping. Repeated frames never compile again.
-    for(unsigned mode=0;mode<64;++mode) {
+    for(unsigned mode=0;mode<128;++mode) {
         clear(); reuse.integer=(int)(mode&1); cull.integer=(int)(mode&2); alias_pdf.integer=(int)(mode&4);
         emitter_geometry_cvar.integer=(int)(mode&8);
         shared_functions_cvar.integer=(int)(mode&16);
         parallel_cvar.integer=(int)(mode&32);
+        dlight_reservoir_cvar.integer=(int)(mode&64);
         assert(lighting_pipeline_requested()==mode);
         for(unsigned frame=0;frame<1000;++frame) {
             assert(lighting_pipeline_select(lighting_pipeline_requested()));
             assert(pt.lighting_mode==mode && pt.lighting_pipelines[mode]); ++checks;
         }
-        for(unsigned i=0;i<64;++i) assert(creates[i]==(i==mode));
+        for(unsigned i=0;i<128;++i) assert(creates[i]==(i==mode));
         lighting_pipeline_shutdown(); lighting_pipeline_shutdown();
-        for(unsigned i=0;i<64;++i) assert(destroys[i]==(i==mode));
+        for(unsigned i=0;i<128;++i) assert(destroys[i]==(i==mode));
     }
     // Actual same-process benchmark: proven reuse / combined candidate only;
     // the original and cull-only paths are never unnecessarily compiled.
@@ -155,7 +159,7 @@ int main(void) {
     clear();
     const unsigned shared_sequence[]={1,17,17,1,17,1};
     for(unsigned i=0;i<ARRAY_LEN(shared_sequence);++i) assert(lighting_pipeline_select(shared_sequence[i]));
-    for(unsigned i=0;i<64;++i) assert(creates[i]==(i==1 || i==17));
+    for(unsigned i=0;i<128;++i) assert(creates[i]==(i==1 || i==17));
     // All pipeline failure combinations, including non-null partial handles.
     for(unsigned mask=0;mask<65536;++mask) for(unsigned partial=0;partial<2;++partial)
         for(unsigned requested=0;requested<16;++requested) {
@@ -180,7 +184,7 @@ int main(void) {
                 qboolean result=lighting_pipeline_select(requested);
                 assert(result==(expected>=0));
                 if(result) assert(pt.lighting_mode==(unsigned)expected && pt.lighting_pipelines[pt.lighting_mode]);
-                for(unsigned i=0;i<64;++i) assert(creates[i]<=1);
+                for(unsigned i=0;i<128;++i) assert(creates[i]<=1);
                 ++checks;
             }
         }
@@ -202,7 +206,7 @@ int main(void) {
                 qboolean result=lighting_pipeline_select(requested);
                 assert(result==(expected>=0));
                 if(result) assert(pt.lighting_mode==(unsigned)expected);
-                for(unsigned i=0;i<64;++i) assert(creates[i]<=1);
+                for(unsigned i=0;i<128;++i) assert(creates[i]<=1);
                 ++checks;
             }
         }
@@ -230,7 +234,9 @@ int main(void) {
     // If both a new mode and the base fail, retain the last valid pipeline.
     clear(); assert(lighting_pipeline_select(1)); fail_mask=1;
     assert(lighting_pipeline_select(0) && pt.lighting_mode==1);
-    assert(!lighting_pipeline_select(64) && !lighting_pipeline_select(UINT32_MAX));
+    // The reservoir bit is a normal mode up to the new 128-entry bound.
+    clear(); assert(lighting_pipeline_select(64) && pt.lighting_mode==64);
+    assert(!lighting_pipeline_select(128) && !lighting_pipeline_select(UINT32_MAX));
     // All variants preserve effects; a cached packed mode is a valid fallback.
     clear(); assert(lighting_pipeline_select(9)); fail_mask=1;
     assert(lighting_pipeline_select(0) && pt.lighting_mode==9);
@@ -241,7 +247,7 @@ int main(void) {
     compact_available=1;
     for(unsigned frame=0;frame<1000;++frame) {
         assert(lighting_pipeline_select(57) && pt.lighting_mode==57);
-        for(unsigned i=0;i<64;++i) assert(creates[i]==0);
+        for(unsigned i=0;i<128;++i) assert(creates[i]==0);
         ++checks;
     }
     fail_mask=1;

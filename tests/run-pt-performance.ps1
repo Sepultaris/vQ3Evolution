@@ -13,6 +13,7 @@ param(
     [ValidateRange(0,64)][int]$BenchmarkSamples = 0,
     [ValidateRange(-1,1)][int]$BenchmarkLightReuse = -1,
     [ValidateRange(-1,1)][int]$BenchmarkAdaptive = -1,
+    [ValidateRange(0.0,1.0)][double]$BenchmarkScale = 0.0,
     [ValidateSet(-1,0,8,32,64,128)][int]$BenchmarkRRRows = -1,
     [switch]$Bounded,
     [ValidatePattern('^[a-zA-Z0-9_]+$')][string]$Map = 'q3dm6',
@@ -94,13 +95,14 @@ if (!$Synthetic) {
         @{ name = 'r_pathTracingLightReuse'; value = $BenchmarkLightReuse; enabled = ($BenchmarkLightReuse -ge 0) },
         @{ name = 'r_pathTracingAdaptive'; value = $BenchmarkAdaptive; enabled = ($BenchmarkAdaptive -ge 0) },
         @{ name = 'r_pathTracingRRRows'; value = $BenchmarkRRRows; enabled = ($BenchmarkRRRows -ge 0) },
+        @{ name = 'r_pathTracingScale'; value = $BenchmarkScale; enabled = ($BenchmarkScale -gt 0) },
         @{ name = 'r_dlss'; value = $BenchmarkDlss; enabled = ($BenchmarkDlss -ge 0) },
         @{ name = 'r_dlssRayReconstruction'; value = $BenchmarkRayReconstruction; enabled = ($BenchmarkRayReconstruction -ge 0) },
         @{ name = 'r_pathTracingSamples'; value = $BenchmarkSamples; enabled = ($BenchmarkSamples -gt 0) }
     )) {
         if ($ptSettingOverride.enabled) {
-            $ptBenchmarkOverrides += [ordered]@{ name = $ptSettingOverride.name; from = $ptSettings[$ptSettingOverride.name]; to = "$($ptSettingOverride.value)" }
-            $ptSettings[$ptSettingOverride.name] = "$($ptSettingOverride.value)"
+            $ptBenchmarkOverrides += [ordered]@{ name = $ptSettingOverride.name; from = $ptSettings[$ptSettingOverride.name]; to = $ptSettingOverride.value.ToString([System.Globalization.CultureInfo]::InvariantCulture) }
+            $ptSettings[$ptSettingOverride.name] = $ptSettingOverride.value.ToString([System.Globalization.CultureInfo]::InvariantCulture)
         }
     }
     $ptConfigSettings = if ($SharedSettingsFile) { $ptGameSettings } else { $ptSettings }
@@ -170,7 +172,8 @@ if ($BenchmarkDlss -ge 0) { $ptArguments += " +set r_dlss $BenchmarkDlss" }
 if ($BenchmarkSamples -gt 0) { $ptArguments += " +set r_pathTracingSamples $BenchmarkSamples" }
 if ($BenchmarkLightReuse -ge 0) { $ptArguments += " +set r_pathTracingLightReuse $BenchmarkLightReuse" }
 if ($BenchmarkAdaptive -ge 0) { $ptArguments += " +set r_pathTracingAdaptive $BenchmarkAdaptive" }
-if ($BenchmarkRRRows -ge 0) { $ptArguments += " +set r_pathTracingRRRows $BenchmarkRRRows" }
+if ($BenchmarkRRRows -ge 0) { $ptArguments += " +set r_pathTracingRRRows $BenchmarkRRRows" }                
+                if ($BenchmarkScale -gt 0) { $ptArguments += " +set r_pathTracingScale $($BenchmarkScale.ToString([System.Globalization.CultureInfo]::InvariantCulture))" }
 if ($PipelineStatistics) { $ptArguments = '+set r_pathTracingPipelineStats 1 ' + $ptArguments }
 if ($KeepIdleFrameGenerationHooks) { $ptArguments = '+set r_dlssFGIdleHooks 1 ' + $ptArguments }
 $ptWindowStyle = if ($VisibleWindow) { 'Normal' } else { 'Hidden' }

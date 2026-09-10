@@ -4,4 +4,4 @@ echo "Set the sv_dlURL setting to a url like http://yoursite.com/ioquake3_path f
 
 # sv_dlURL needs to have quotes escaped like \"http://yoursite.com/ioquake3_path\" or it will be set to "http:" in-game.
 
-/Applications/ioquake3/ioquake3.app/Contents/MacOS/ioq3ded +set dedicated 2 +set sv_allowDownload 1 +set sv_dlURL \"\" +set com_hunkmegs 64 "$@"
+/Applications/ioquake3/ioquake3.app/Contents/MacOS/vQ3EvoDed +set dedicated 2 +set sv_allowDownload 1 +set sv_dlURL \"\" +set com_hunkmegs 64 "$@"

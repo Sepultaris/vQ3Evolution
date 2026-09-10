@@ -25,7 +25,7 @@ static struct { int integer; } requested,profile;
 _Alignas(4) unsigned char pt_compact_transport_comp_spv[4];
 int pt_compact_transport_comp_spv_size=4;
 static unsigned failure,modules,module_destroys,creates,destroys,live,warnings;
-static unsigned expected_alias;
+static unsigned expected_alias, expected_reservoir;
 static void print_log(int level,const char *fmt,...) { (void)fmt;if(level==PRINT_WARNING) ++warnings; }
 static int milliseconds(void) { return 0; }
 static struct {void (*Printf)(int,const char *,...);int (*Milliseconds)(void);}ri={print_log,milliseconds};
@@ -44,7 +44,7 @@ static void qvkDestroyShaderModule(VkDevice d,VkShaderModule m,const VkAllocatio
 static VkResult qvkCreateComputePipelines(VkDevice d,VkPipelineCache c,uint32_t count,const VkComputePipelineCreateInfo *info,const VkAllocationCallbacks *a,VkPipeline *out) {
     (void)d;(void)c;(void)a;assert(count==1 && info->layout==pt.layout && !live);
     const VkSpecializationInfo *s=info->stage.pSpecializationInfo;
-    assert(s && s->mapEntryCount==4 && s->dataSize==4*sizeof(uint32_t));
+    assert(s && s->mapEntryCount==5 && s->dataSize==5*sizeof(uint32_t));
     const VkBool32 *v=s->pData;
     for(unsigned i=0;i<3;++i) {
         assert(s->pMapEntries[i].constantID==i && s->pMapEntries[i].offset==i*sizeof(VkBool32));
@@ -52,6 +52,8 @@ static VkResult qvkCreateComputePipelines(VkDevice d,VkPipelineCache c,uint32_t 
     }
     assert(s->pMapEntries[3].constantID==3 && s->pMapEntries[3].offset==12 && s->pMapEntries[3].size==4);
     assert(v[3]==pt.compact_transport_rows && (v[3]==8 || v[3]==64 || v[3]==128));
+    assert(s->pMapEntries[4].constantID==4 && s->pMapEntries[4].offset==16 && s->pMapEntries[4].size==4);
+    assert(v[4]==expected_reservoir);
     ++creates;if(failure!=2) { *out=(VkPipeline)(uintptr_t)1;live=1; }
     return failure==2 || failure==3 || (failure==4 && v[3]>8) || (failure==5 && v[3]==128) ? VK_ERROR_OUT_OF_DEVICE_MEMORY:VK_SUCCESS;
 }
@@ -61,7 +63,7 @@ static void qvkDestroyPipeline(VkDevice d,VkPipeline p,const VkAllocationCallbac
 #include "../code/renderer_vulkan/pt_compact_transport.h"
 int main(void) {
     unsigned checks=0;
-    for(unsigned mode=0;mode<64;++mode) for(unsigned on=0;on<2;++on)
+    for(unsigned mode=0;mode<128;++mode) for(unsigned on=0;on<2;++on)
     for(unsigned prof=0;prof<2;++prof) for(unsigned fail=0;fail<6;++fail) for(unsigned device=0;device<6;++device) {
         memset(&pt,0,sizeof(pt));modules=module_destroys=creates=destroys=live=warnings=0;
         memset(&device_properties,0,sizeof(device_properties));
@@ -70,8 +72,8 @@ int main(void) {
         device_properties.limits.maxComputeWorkGroupSize[0]=1024;
         device_properties.limits.maxComputeWorkGroupSize[1]=device==3 ? 32:(device==5 ? 64:1024);
         unsigned rows=device==1 ? 128:(device>=4 ? 64:8);
-        failure=fail;requested.integer=on;profile.integer=prof;expected_alias=(mode&4u)!=0;
-        unsigned eligible=on && !prof && (mode==57 || mode==61);
+        failure=fail;requested.integer=on;profile.integer=prof;expected_alias=(mode&4u)!=0;expected_reservoir=(mode&64u)?1u:0u;
+        unsigned eligible=on && !prof && (mode==57 || mode==61 || mode==121 || mode==125);
         unsigned success=fail==0 || fail>=4;
         unsigned retry=fail>=2 && fail<=4 ? (rows==128 ? 2:(rows==64 ? 1:0)) : (fail==5 && rows==128);
         for(unsigned frame=0;frame<8;++frame) {

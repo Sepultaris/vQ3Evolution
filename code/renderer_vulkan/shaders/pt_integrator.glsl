@@ -3,6 +3,7 @@
 #include "pt_shader_profile.glsl"
 // Compile-time pipeline specialization: no per-pixel quality switch/buffer.
 layout(constant_id=0) const bool ptMapLightCull=false;
+layout(constant_id=4) const bool ptDlightReservoir=false;
 
 #ifdef PT_PARALLEL_SAMPLES
 layout(local_size_x=4, local_size_y=4, local_size_z=4) in;

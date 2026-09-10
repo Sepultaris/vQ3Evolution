@@ -89,7 +89,7 @@ Section "ioquake3 (required)"
 !endif
 
   ; Put file there
-  File "../../build/release-mingw32-x86/ioq3ded.x86.exe"
+  File "../../build/release-mingw32-x86/vQ3EvoDed.exe"
   File "../../build/release-mingw32-x86/ioquake3.x86.exe"
 !ifdef USE_RENDERER_DLOPEN
   File "../../build/release-mingw32-x86/renderer_opengl1_x86.dll"
@@ -178,7 +178,7 @@ Section "Uninstall"
   Delete $INSTDIR\missionpack\qagamex86.dll
   Delete $INSTDIR\missionpack\uix86.dll
   Delete $INSTDIR\ioquake3.x86.exe
-  Delete $INSTDIR\ioq3ded.x86.exe
+  Delete $INSTDIR\vQ3EvoDed.exe
 !ifdef USE_RENDERER_DLOPEN
   Delete $INSTDIR\renderer_opengl1_x86.dll
   Delete $INSTDIR\renderer_opengl2_x86.dll

@@ -54,9 +54,28 @@ quality and lighting controls update live and reset relevant history.
 | `r_pathTracingAmbient` | 0 | 0–2 diffuse ambient fill, also contributing to fog; 0 disables it |
 | `r_pathTracingSunAngle` | 0 | 0–20 degrees, full angular diameter of the map's authored sun |
 | `r_pathTracingLightRadius` | 0 | 0–64 world units, source radius for map point/spot and dynamic lights |
+| `r_pathTracingScale` | 1 | 0.25–1 internal render scale for path tracing; applied on `vid_restart` |
 
 For a flat two-sample budget, use `r_pathTracingSamples 2` and
 `r_pathTracingAdaptive 0`. RR does not silently change samples or bounces.
+
+### Render scale
+
+`r_pathTracingScale` (default 1, range 0.25–1) runs the entire path-tracing
+pipeline at a fraction of the internal render resolution, then presents the
+result at full resolution through reconstruction or the final upscale. Trace
+time scales with the rendered pixel count, so 0.5 gives roughly a 4× trace
+speedup on the reference scene (e.g. 19.4 → 5.1 ms trace at 1920×1080).
+
+Scales that match an NVIDIA DLSS quality ratio (0.25, 0.333, 0.5, 0.667) keep
+DLSS/Ray Reconstruction evaluation active at that exact render ratio; the DLSS
+mode is remapped to the matching preset (Ray Reconstruction then upscales the
+half-resolution render for quality) and DLSS optimal-settings render sizing is
+bypassed so the scale is authoritative. Any other scale disables RR evaluation
+for the session and the linear present upscale is used, which the engine also
+uses whenever NVIDIA runtimes are absent. The setting is latched: apply it and
+`vid_restart`. Compare at fixed samples, bounces, lighting mode, scene and
+camera; the savings come from fewer traced pixels, not changed sampling.
 
 Ambient fill is an artistic fill term, not extra traced bounce lighting or an
 exposure substitute. Sun angle affects only maps with an authored sun. Local

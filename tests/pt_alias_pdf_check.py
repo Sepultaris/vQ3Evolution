@@ -44,10 +44,12 @@ class AliasPDFTests(unittest.TestCase):
         shader = (RENDERER / "shaders/pt_sampling.glsl").read_text()
         self.assertIn("layout(constant_id=1) const bool ptAliasPDF=false", shader)
         self.assertIn("pdf=ptAliasPDF ? (direct ? entry.z:entry.w):lightAliases[offset+chosen].z", shader)
-        for file in ("vk_pathtrace.c", "pt_shader_profile.h"):
-            native = (RENDERER / file).read_text()
-            self.assertIn("{ 1, sizeof(VkBool32), sizeof(VkBool32) }", native)
-            self.assertIn("{ 3, entries, sizeof(options), options }", native)
+        native = (RENDERER / "vk_pathtrace.c").read_text()
+        self.assertIn("{ 1, sizeof(VkBool32), sizeof(VkBool32) }", native)
+        self.assertIn("{ 4, entries, sizeof(options), options }", native)
+        profile = (RENDERER / "pt_shader_profile.h").read_text()
+        self.assertIn("{ 1, sizeof(VkBool32), sizeof(VkBool32) }", profile)
+        self.assertIn("{ 3, entries, sizeof(options), options }", profile)
 
     def test_same_storage_and_no_runtime_grid_rebuild(self):
         native = (RENDERER / "vk_pathtrace.c").read_text()

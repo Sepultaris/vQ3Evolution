@@ -74,11 +74,12 @@ class MapLightCullTests(unittest.TestCase):
     def test_specialization_matches_diagnostics_without_new_buffers(self):
         shader = (RENDERER / "shaders/pt_integrator.glsl").read_text()
         self.assertIn("layout(constant_id=0) const bool ptMapLightCull=false;", shader)
-        for name in ("vk_pathtrace.c", "pt_shader_profile.h"):
-            native = (RENDERER / name).read_text()
-            self.assertIn("VkSpecializationMapEntry entries[3] = { { 0, 0, sizeof(VkBool32) },", native)
-            self.assertIn("pSpecializationInfo = &specialization", native)
+        native = (RENDERER / "vk_pathtrace.c").read_text()
+        self.assertIn("VkSpecializationMapEntry entries[4] = { { 0, 0, sizeof(VkBool32) },", native)
+        self.assertIn("pSpecializationInfo = &specialization", native)
         profile = (RENDERER / "pt_shader_profile.h").read_text()
+        self.assertIn("VkSpecializationMapEntry entries[3] = { { 0, 0, sizeof(VkBool32) },", profile)
+        self.assertIn("pSpecializationInfo = &specialization", profile)
         self.assertIn("pt_shader_profile.map_light_cull == map_light_cull", profile)
 
     def test_independent_pipeline_modes_keep_proven_reuse_on_failure(self):

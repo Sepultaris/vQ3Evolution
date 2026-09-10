@@ -1,6 +1,8 @@
 // Included inside integrator after prepareHitBRDF. Preserve the original light
 // order and RNG consumption, but share ONE inlined visibility/BRDF call site.
-// No reservoir across light categories, fewer rays, or omitted light sources.
+// No reservoir across light categories, fewer rays, or omitted light sources
+// by default. The opt-in dynamic-light reservoir (ptDlightReservoir) replaces
+// per-source dlight shadow rays at light slot 2 with a single sampled source.
 for(uint lightSlot=0;lightSlot<lightCounts.y+3u;++lightSlot) {
     vec3 l;
     float distance, nl=0, lightPDF=0;
@@ -40,11 +42,36 @@ for(uint lightSlot=0;lightSlot<lightCounts.y+3u;++lightSlot) {
         if(!(dot(n,l)>0 && dot(geometric,l)>0 && any(greaterThan(pc.sunRadiance.rgb,vec3(0))))) continue;
     } else if(lightSlot<lightCounts.y+2u) {
         PT_CATEGORY(7u);
-        point=lightSlot-2u;
-        vec3 delta=pointPositions[point].xyz-start;
-        distance=length(delta);
-        l=delta/max(distance,0.000001);
-        if(distance<=0.04 || (skyEnvironment.w<=0 && (dot(n,l)<=0 || dot(geometric,l)<=0))) continue;
+        if(ptDlightReservoir) {
+            if(lightSlot!=2u) continue;
+            candidateCount=lightCounts.y;
+            uint selected=0;
+            for(uint candidate=0;candidate<candidateCount;++candidate) {
+                vec3 delta=pointPositions[candidate].xyz-start;
+                float distanceSquared=dot(delta,delta);
+                vec3 direction=delta*inversesqrt(max(distanceSquared,0.000001));
+                float weight=dot(pointColors[candidate].rgb,vec3(0.2126,0.7152,0.0722))*pointAttenuation(candidate,direction,distanceSquared)*max(dot(n,direction),0);
+                if(skyEnvironment.w>0) weight=dot(pointColors[candidate].rgb,vec3(0.2126,0.7152,0.0722))*
+                    pointPositions[candidate].w/max(distanceSquared,1);
+                if(weight<=0) continue;
+                float proposalPDF=1.0/float(lightCounts.y);
+                float reservoirWeight=weight/max(proposalPDF,0.00000001);
+                totalWeight+=reservoirWeight;
+                if(randomFloat()*totalWeight<reservoirWeight) { selected=candidate; selectedWeight=weight; }
+            }
+            if(selectedWeight<=0) continue;
+            point=selected;
+            vec3 delta=pointPositions[selected].xyz-start;
+            distance=length(delta);
+            l=delta/max(distance,0.000001);
+            if(distance<=0.04 || (skyEnvironment.w<=0 && (dot(n,l)<=0 || dot(geometric,l)<=0))) continue;
+        } else {
+            point=lightSlot-2u;
+            vec3 delta=pointPositions[point].xyz-start;
+            distance=length(delta);
+            l=delta/max(distance,0.000001);
+            if(distance<=0.04 || (skyEnvironment.w<=0 && (dot(n,l)<=0 || dot(geometric,l)<=0))) continue;
+        }
     } else {
         PT_CATEGORY(4u);
         uint selected=0;
@@ -98,8 +125,13 @@ for(uint lightSlot=0;lightSlot<lightCounts.y+3u;++lightSlot) {
     } else if(lightSlot==1u) {
         addDirect(brdf,max(dot(n,l),0)*pc.sunRadiance.rgb*transmittance);
     } else if(lightSlot<lightCounts.y+2u) {
-        float intensity=pointPositions[point].w*pointPositions[point].w/max(distance*distance,1);
-        addDirect(brdf,dot(n,l)*pointColors[point].rgb*intensity*lightScale*transmittance);
+        if(ptDlightReservoir && candidateCount>0u) {
+            vec3 incident=pointColors[point].rgb*pointAttenuation(point,l,distance*distance);
+            addDirect(brdf,dot(n,l)*incident*totalWeight/selectedWeight/float(candidateCount)*lightScale*transmittance);
+        } else {
+            float intensity=pointPositions[point].w*pointPositions[point].w/max(distance*distance,1);
+            addDirect(brdf,dot(n,l)*pointColors[point].rgb*intensity*lightScale*transmittance);
+        }
     } else {
         vec3 incident=pointColors[point].rgb*pointAttenuation(point,l,distance*distance);
         addDirect(brdf,dot(n,l)*incident*totalWeight/selectedWeight/float(candidateCount)*lightScale*transmittance);

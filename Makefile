@@ -112,7 +112,7 @@ CLIENTBIN=vQ3Evolution
 endif
 
 ifndef SERVERBIN
-SERVERBIN=ioq3ded
+SERVERBIN=vQ3EvoDed
 endif
 
 ifndef BASEGAME
@@ -1036,7 +1036,7 @@ ifndef SHLIBNAME
 endif
 
 ifneq ($(BUILD_SERVER),0)
-  TARGETS += $(B)/$(SERVERBIN)$(FULLBINEXT)
+  TARGETS += $(B)/$(SERVERBIN)$(CLIENTBINEXT)
 endif
 
 ifneq ($(BUILD_CLIENT),0)
@@ -2582,7 +2582,7 @@ ifeq ($(PLATFORM),darwin)
     $(B)/ded/sys_osx.o
 endif
 
-$(B)/$(SERVERBIN)$(FULLBINEXT): $(Q3DOBJ)
+$(B)/$(SERVERBIN)$(CLIENTBINEXT): $(Q3DOBJ)
 	$(echo_cmd) "LD $@"
 	$(Q)$(CC) $(CFLAGS) $(LDFLAGS) $(NOTSHLIBLDFLAGS) -o $@ $(Q3DOBJ) $(LIBS)
 
@@ -3175,8 +3175,8 @@ ifneq ($(BUILD_CLIENT),0)
 endif
 
 ifneq ($(BUILD_SERVER),0)
-	@if [ -f $(BR)/$(SERVERBIN)$(FULLBINEXT) ]; then \
-		$(INSTALL) $(STRIP_FLAG) -m 0755 $(BR)/$(SERVERBIN)$(FULLBINEXT) $(COPYBINDIR)/$(SERVERBIN)$(FULLBINEXT); \
+	@if [ -f $(BR)/$(SERVERBIN)$(CLIENTBINEXT) ]; then \
+		$(INSTALL) $(STRIP_FLAG) -m 0755 $(BR)/$(SERVERBIN)$(CLIENTBINEXT) $(COPYBINDIR)/$(SERVERBIN)$(CLIENTBINEXT); \
 	fi
 endif
 

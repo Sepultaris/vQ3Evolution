@@ -54,9 +54,23 @@ void vk_initialize(void)
     uint32_t render_height = (uint32_t)height;
     vk_sl_configure(r_dlss->integer, r_dlssFrameGeneration->integer,
         r_reflex->integer, (uint32_t)width, (uint32_t)height,
-        &render_width, &render_height);
+        &render_width, &render_height, r_pathTracingScale->value);
     vk_sl_configure_neural_rendering(r_dlssNeuralRendering->integer,
         render_width, render_height);
+
+    // Run the path tracer at a fraction of the internal render resolution and
+    // let runtime evaluation (DLSS/ray reconstruction) or the final present
+    // blit upscale it back to the output resolution. Uniform scale keeps the
+    // aspect ratio, so projection, jitter and DLSS extents stay consistent.
+    if (r_rayTracing->integer == 2 && r_pathTracingScale->value < 1.0f) {
+        const float pt_scale = r_pathTracingScale->value;
+        render_width = (uint32_t)((float)render_width * pt_scale);
+        render_height = (uint32_t)((float)render_height * pt_scale);
+        if (render_width < 4) render_width = 4;
+        if (render_height < 4) render_height = 4;
+        ri.Printf(PRINT_ALL, "Path tracing internal render scale %g -> %ux%u\n",
+            pt_scale, render_width, render_height);
+    }
 
     backEnd.viewParms.viewportWidth = width;
     backEnd.viewParms.viewportHeight = height;

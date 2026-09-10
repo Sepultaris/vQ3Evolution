@@ -399,6 +399,23 @@ void SV_DirectConnect( netadr_t from ) {
 	}
 	Info_SetValueForKey( userinfo, "ip", ip );
 
+	// A loopback connection to a listen server is the host player's own
+	// session. Older game modules (e.g. Urban Terror 3.7's qagame qvm)
+	// enforce g_password against localhost too, which locks the host out
+	// of a passworded local game. Hand the local connection the server's
+	// password so it can join; remote clients are left untouched and must
+	// still present the correct password, keeping the server protected.
+	if ( NET_IsLocalAddress (from) ) {
+		const char *gpass = Cvar_VariableString( "g_password" );
+		if ( gpass[0] && Q_stricmp( gpass, "none" ) ) {
+			if ( !Info_ValueForKey( userinfo, "password" )[0] ) {
+				if ( ( strlen( ip ) + strlen( userinfo ) + strlen( gpass ) + 16 ) < MAX_INFO_STRING ) {
+					Info_SetValueForKey( userinfo, "password", gpass );
+				}
+			}
+		}
+	}
+
 	// see if the challenge is valid (LAN clients don't need to challenge)
 	if (!NET_IsLocalAddress(from))
 	{

@@ -164,9 +164,9 @@ static struct {
     VkDescriptorPool pool;
     VkDescriptorSet set;
     VkPipelineLayout layout;
-    VkPipeline lighting_pipelines[64]; // bits: BRDF reuse, early rejection, alias PDF, packed emitters, unified light loop, cached materials.
+    VkPipeline lighting_pipelines[128]; // bits: BRDF reuse, early rejection, alias PDF, packed emitters, unified light loop, cached materials, dlight reservoir.
     uint32_t lighting_mode;
-    qboolean lighting_failed[64], brdf_active, map_light_cull_active, alias_pdf_active, emitter_geometry_active, light_loop_active;
+    qboolean lighting_failed[128], brdf_active, map_light_cull_active, alias_pdf_active, emitter_geometry_active, light_loop_active;
     VkPipeline guide_pipeline;
     VkPipeline material_cache_pipeline;
     qboolean material_cache_failed, material_cache_active;
@@ -237,10 +237,11 @@ static qboolean lighting_pipeline_initialize(uint32_t mode)
         .codeSize = code_size, .pCode = (const uint32_t *)code };
     if (qvkCreateShaderModule(vk.device, &shader, NULL, &module) != VK_SUCCESS) goto fail;
     VkBool32 map_light_cull = (mode & 2) ? VK_TRUE : VK_FALSE;
-    VkBool32 options[3] = { map_light_cull, (mode & 4) ? VK_TRUE : VK_FALSE, (mode & 8) ? VK_TRUE : VK_FALSE };
-    VkSpecializationMapEntry entries[3] = { { 0, 0, sizeof(VkBool32) },
-        { 1, sizeof(VkBool32), sizeof(VkBool32) }, { 2, 2*sizeof(VkBool32), sizeof(VkBool32) } };
-    VkSpecializationInfo specialization = { 3, entries, sizeof(options), options };
+    VkBool32 options[4] = { map_light_cull, (mode & 4) ? VK_TRUE : VK_FALSE, (mode & 8) ? VK_TRUE : VK_FALSE, (mode & 64) ? VK_TRUE : VK_FALSE };
+    VkSpecializationMapEntry entries[4] = { { 0, 0, sizeof(VkBool32) },
+        { 1, sizeof(VkBool32), sizeof(VkBool32) }, { 2, 2*sizeof(VkBool32), sizeof(VkBool32) },
+        { 4, 3*sizeof(VkBool32), sizeof(VkBool32) } };
+    VkSpecializationInfo specialization = { 4, entries, sizeof(options), options };
     VkComputePipelineCreateInfo pipeline = { .sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO,
         .flags = pipeline_statistics_flags(),
         .layout = pt.layout,
@@ -280,7 +281,8 @@ static uint32_t lighting_pipeline_requested(void)
         (r_pathTracingAliasPDF->integer ? 4u : 0u) |
         (r_pathTracingEmitterGeometry->integer ? 8u : 0u) |
         (r_pathTracingLightLoop->integer ? 16u : 0u) |
-        (r_pathTracingMaterialCache->integer && lighting_material_cache_eligible() ? 32u : 0u);
+        (r_pathTracingMaterialCache->integer && lighting_material_cache_eligible() ? 32u : 0u) |
+        (r_pathTracingDlightReservoir->integer ? 64u : 0u);
 }
 
 static qboolean lighting_pipeline_select(uint32_t requested)
@@ -295,6 +297,7 @@ static qboolean lighting_pipeline_select(uint32_t requested)
         pt.lighting_mode = requested;
         return qtrue;
     }
+    if (requested & 64) return lighting_pipeline_select(requested & 63);
     if (requested & 32) return lighting_pipeline_select(requested & 31);
     if (requested & 16) return lighting_pipeline_select(requested & 15);
     if (requested & 8) return lighting_pipeline_select(requested & 7);
@@ -1835,7 +1838,8 @@ qboolean vk_pt_record(VkCommandBuffer cmd, VkAccelerationStructureKHR scene,
     radiance_hash = hash_bytes(radiance_hash, &light_radius, sizeof(light_radius));
     pt_rr.frame_ready = rr_requested();
     if (pt_rr.frame_ready != pt_rr.previous_active) pt.temporal_valid = qfalse;
-    uint32_t rr_sampling = pt_rr.frame_ready && (pt.lighting_mode == 57 || pt.lighting_mode == 61) &&
+    uint32_t rr_sampling = pt_rr.frame_ready && (pt.lighting_mode == 57 || pt.lighting_mode == 61 ||
+        pt.lighting_mode == 121 || pt.lighting_mode == 125) &&
         r_pathTracingCompactTransport->integer && !r_pathTracingStaged->integer ?
         (r_pathTracingLightReuse->integer ? 1u : 0u) | (r_pathTracingAdaptive->integer ? 2u : 0u) : 0;
     if (rr_sampling != pt_rr.sampling_flags) pt.temporal_valid = qfalse;

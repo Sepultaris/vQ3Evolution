@@ -72,6 +72,8 @@ struct StreamlineState {
 	bool reflexSupported = false;
 	bool dlssEnabled = false;
 	bool dlssEvaluationAttempted = false;
+	float ptScale = 1.0f;
+	bool ptScaleModeMatched = false;
 	bool frameGenerationEnabled = false;
 	bool frameGenerationActive = false;
 	bool frameGenerationResourcesAllocated = false;
@@ -696,12 +698,37 @@ extern "C" void vk_sl_info_f(void)
 
 extern "C" qboolean vk_sl_configure(int dlssMode, int frameGeneration, int reflexMode,
 	uint32_t outputWidth, uint32_t outputHeight,
-	uint32_t *renderWidth, uint32_t *renderHeight)
+	uint32_t *renderWidth, uint32_t *renderHeight, float ptScaleIn)
 {
 	if (renderWidth) *renderWidth = outputWidth;
 	if (renderHeight) *renderHeight = outputHeight;
 	if (!g_sl.initialized)
 		return qfalse;
+
+	// When path tracing runs at a fractional render scale the DLSS/RR plugins
+	// are bound to a fixed input-to-output ratio per mode (an eDLAA input must
+	// equal the output, otherwise NGX evaluate fails with 0xbad00005). Select
+	// the quality preset whose ratio matches the requested scale and, when the
+	// scale matches no preset exactly, disable runtime evaluation entirely so
+	// the final present blit performs the upscale instead.
+	g_sl.ptScale = ptScaleIn;
+	if (g_sl.ptScale >= 1.0f) {
+		g_sl.ptScaleModeMatched = false;
+	} else if (g_sl.dlssSetOptions) {
+		static const float presetRatios[] = { 0.667f, 0.5f, 0.333f, 0.25f };
+		float best = 1e9f;
+		int bestIndex = 1;
+		for (int i = 0; i < 4; ++i) {
+			const float d = fabsf(g_sl.ptScale - presetRatios[i]);
+			if (d < best) {
+				best = d;
+				bestIndex = i;
+			}
+		}
+		g_sl.ptScaleModeMatched = best < 0.05f;
+		if (g_sl.ptScaleModeMatched)
+			dlssMode = bestIndex + 1; // eMaxQuality..eUltraPerformance
+	}
 
 	static const sl::DLSSMode modes[] = {
 		sl::DLSSMode::eOff,
@@ -715,7 +742,8 @@ extern "C" qboolean vk_sl_configure(int dlssMode, int frameGeneration, int refle
 	g_sl.dlssEnabled = dlssMode != 0 && g_sl.dlssSupported;
 	g_sl.rrEnabled = g_sl.dlssEnabled && g_sl.rrSupported &&
 		ri.Cvar_VariableIntegerValue("r_rayTracing") == 2 &&
-		ri.Cvar_VariableIntegerValue("r_dlssRayReconstruction") != 0;
+		ri.Cvar_VariableIntegerValue("r_dlssRayReconstruction") != 0 &&
+		(g_sl.ptScale >= 1.0f || g_sl.ptScaleModeMatched);
 	frameGeneration = frameGeneration && g_sl.frameGenerationSupported &&
 		g_sl.frameGenerationPresentationSupported;
 	g_sl.frameGenerationEnabled = frameGeneration != 0;
@@ -733,7 +761,7 @@ extern "C" qboolean vk_sl_configure(int dlssMode, int frameGeneration, int refle
 			g_sl.status = "DLSS rejected the selected rendering mode";
 			return qfalse;
 		}
-		if (dlssMode && g_sl.dlssGetOptimalSettings) {
+		if (dlssMode && g_sl.dlssGetOptimalSettings && g_sl.ptScale >= 1.0f) {
 			sl::DLSSOptimalSettings settings;
 			if (g_sl.dlssGetOptimalSettings(options, settings) == sl::Result::eOk &&
 				settings.optimalRenderWidth && settings.optimalRenderHeight) {
@@ -750,13 +778,15 @@ extern "C" qboolean vk_sl_configure(int dlssMode, int frameGeneration, int refle
 		g_sl.rrOptions.normalRoughnessMode = sl::DLSSDNormalRoughnessMode::ePacked;
 		g_sl.rrOptions.colorBuffersHDR = sl::Boolean::eTrue;
 		sl::DLSSDOptimalSettings settings;
-		if (g_sl.rrGetOptimalSettings(g_sl.rrOptions, settings) == sl::Result::eOk &&
-			settings.optimalRenderWidth && settings.optimalRenderHeight) {
-			if (renderWidth) *renderWidth = settings.optimalRenderWidth;
-			if (renderHeight) *renderHeight = settings.optimalRenderHeight;
-		} else {
-			g_sl.rrEnabled = false;
-			ri.Printf(PRINT_WARNING, "Ray Reconstruction rejected this mode; native reconstruction retained\n");
+		if (g_sl.ptScale >= 1.0f) {
+			if (g_sl.rrGetOptimalSettings(g_sl.rrOptions, settings) == sl::Result::eOk &&
+				settings.optimalRenderWidth && settings.optimalRenderHeight) {
+				if (renderWidth) *renderWidth = settings.optimalRenderWidth;
+				if (renderHeight) *renderHeight = settings.optimalRenderHeight;
+			} else {
+				g_sl.rrEnabled = false;
+				ri.Printf(PRINT_WARNING, "Ray Reconstruction rejected this mode; native reconstruction retained\n");
+			}
 		}
 	}
 
@@ -811,6 +841,10 @@ static qboolean evaluateReconstruction(const vk_sl_frame_resources_t *r, bool rr
 {
 	if (!r || !g_sl.frameToken || !g_sl.setConstants ||
 		!g_sl.setTagForFrame || !g_sl.evaluateFeature)
+		return qfalse;
+	// A path tracing scale that matches no NVIDIA DLSS quality preset cannot
+	// be evaluated; the final present blit upscales the raw render instead.
+	if (g_sl.ptScale < 1.0f && !g_sl.ptScaleModeMatched)
 		return qfalse;
 
 	sl::Constants constants;

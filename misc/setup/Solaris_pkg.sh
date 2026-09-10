@@ -80,7 +80,7 @@ if [ -d ${BUILD_DIR} ]; then
 		fi
 	done
 
-	for EXEC_BIN in ioq3ded ioquake3-smp ioquake3
+	for EXEC_BIN in vQ3EvoDed ioquake3-smp ioquake3
 	do
 		if [ -f ${BUILD_DIR}/${EXEC_BIN}.${ARCH} ]; then
         		${INSTALL_BIN} ${BUILD_DIR}/${EXEC_BIN}.${ARCH} ${PKG_BUILD_DIR}/${EXEC_BIN}.${ARCH}

@@ -1,10 +1,11 @@
-// Compact state supports the normal lighting mode (57) and its cached
-// alias-PDF specialization (61). Other diagnostic combinations retain their
-// existing integrator unchanged.
+// Compact state supports the normal lighting mode (57), its cached
+// alias-PDF specialization (61), and the opt-in dynamic-light reservoir
+// modes (121/125). Other diagnostic combinations retain their existing
+// integrator unchanged.
 static qboolean compact_transport_select(uint32_t mode)
 {
     if (!r_pathTracingCompactTransport->integer || r_pathTracingShaderProfile->integer ||
-        (mode != 57 && mode != 61))
+        ((mode != 57 && mode != 61) && (mode != 121 && mode != 125)))
         return qfalse;
     uint32_t alias_variant = (mode & 4u) ? 1u : 0u;
     if (pt.compact_transport_pipeline[alias_variant]) return qtrue;
@@ -29,10 +30,10 @@ static qboolean compact_transport_select(uint32_t mode)
     VkShaderModuleCreateInfo shader = { .sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,
         .codeSize = pt_compact_transport_comp_spv_size, .pCode = (const uint32_t *)pt_compact_transport_comp_spv };
     if (qvkCreateShaderModule(vk.device, &shader, NULL, &module) != VK_SUCCESS) goto fail;
-    uint32_t options[4] = { VK_FALSE, alias_variant ? VK_TRUE : VK_FALSE, VK_TRUE, pt.compact_transport_rows };
-    VkSpecializationMapEntry entries[4] = { { 0, 0, sizeof(uint32_t) },
-        { 1, 4, sizeof(uint32_t) }, { 2, 8, sizeof(uint32_t) }, { 3, 12, sizeof(uint32_t) } };
-    VkSpecializationInfo specialization = { 4, entries, sizeof(options), options };
+    uint32_t options[5] = { VK_FALSE, alias_variant ? VK_TRUE : VK_FALSE, VK_TRUE, pt.compact_transport_rows, (mode & 64u) ? 1u : 0u };
+    VkSpecializationMapEntry entries[5] = { { 0, 0, sizeof(uint32_t) },
+        { 1, 4, sizeof(uint32_t) }, { 2, 8, sizeof(uint32_t) }, { 3, 12, sizeof(uint32_t) }, { 4, 16, sizeof(uint32_t) } };
+    VkSpecializationInfo specialization = { 5, entries, sizeof(options), options };
     VkComputePipelineCreateInfo pipeline = { .sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO,
         .flags = pipeline_statistics_flags(), .layout = pt.layout,
         .stage = { .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
