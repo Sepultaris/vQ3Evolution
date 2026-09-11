@@ -29,9 +29,10 @@ def check(cxx):
     for index,name in [(2,'sun_angle'),(3,'light_radius')]:
         assert native.index('pt.frozen = r_pathTracingReference->integer != 0;')<native.index(f'lights->sky_environment[{index}] = {name};')
         assert f'radiance_hash = hash_bytes(radiance_hash, &{name}, sizeof({name}));' in native
+    assert 'radiance_hash = hash_bytes(radiance_hash, &sun_scale, sizeof(sun_scale));' in native
     assert 'ambient_changed || penumbra_changed' in native
     assert 'M_PI / 360.0' in native, 'Full angular diameter in degrees -> half-angle radians'
-    assert 'penumbra: sun angle %.3f degrees, light radius %.3f units' in native
+    assert 'penumbra: sun angle %.3f degrees, sun scale %.3f, light radius %.3f units' in native
     for file in ['pt_integrator.glsl','pt_light_loop.glsl','pt_fog_lighting.glsl']:
         text=(R/'shaders'/file).read_text()
         assert 'sampleSunPenumbra(' in text and 'samplePointPenumbra(' in text
@@ -53,8 +54,8 @@ def gpu(directory):
     assert not re.search(r'VUID-|SYNC-HAZARD|debugUtilsMessengerCallback|Unknown command',log,re.I)
     assert 'Ray Reconstruction: supported 1, enabled 1' in log
     assert 'Ray Reconstruction evaluation failed' not in log
-    values=re.findall(r'Path tracing penumbra: sun angle ([\d.]+) degrees, light radius ([\d.]+) units',log)
-    assert [tuple(map(float,v)) for v in values]==[(0,0),(0,8),(2,8),(0,0)],values
+    values=re.findall(r'Path tracing penumbra: sun angle ([\d.]+) degrees, sun scale ([\d.]+), light radius ([\d.]+) units',log)
+    assert [tuple(map(float,v)) for v in values]==[(0,1,0),(0,1,8),(2,1,8),(0,1,0)],values
     resets=[int(v) for v in re.findall(r'Temporal reset causes: renderer \d+, invalid \d+, lights (\d+)',log)]
     assert len(resets)==4 and all(b>a for a,b in zip(resets,resets[1:])),resets
     for key,value in [('r_dlss','5'),('r_pathTracingSamples','2'),('r_pathTracingAdaptive','0'),

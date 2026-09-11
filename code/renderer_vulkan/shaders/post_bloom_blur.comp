@@ -1,0 +1,37 @@
+#version 450
+
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+layout(set = 0, binding = 0) uniform sampler2D inputImage;
+layout(rgba16f, set = 0, binding = 1) uniform writeonly image2D outputImage;
+
+layout(push_constant) uniform BlurPush {
+	uint width;
+	uint height;
+	uint iwidth;
+	uint iheight;
+} pc;
+
+/* 5x5 gaussian: [1 4 6 4 1] / 16 per axis, indexed by |offset| below. */
+const float weights[3] = float[3](0.375, 0.25, 0.0625);
+
+void main()
+{
+	ivec2 pixel = ivec2(gl_GlobalInvocationID.xy);
+	if (pixel.x >= int(pc.width) || pixel.y >= int(pc.height))
+		return;
+
+	vec2 texelUV = vec2(1.0) / vec2(pc.iwidth, pc.iheight);
+	vec2 center = (vec2(pixel) + 0.5) / vec2(pc.width, pc.height);
+
+	vec3 acc = vec3(0.0);
+	for (int j = -2; j <= 2; ++j) {
+		for (int i = -2; i <= 2; ++i) {
+			float w = weights[abs(i)] * weights[abs(j)];
+			acc += texture(inputImage,
+				center + vec2(float(i), float(j)) * texelUV).rgb * w;
+		}
+	}
+
+	imageStore(outputImage, pixel, vec4(acc, 1.0));
+}

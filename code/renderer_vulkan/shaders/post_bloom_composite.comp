@@ -1,0 +1,36 @@
+#version 450
+
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+layout(set = 0, binding = 0) uniform sampler2D sourceImage;
+layout(set = 0, binding = 1) uniform sampler2D glowImage;
+layout(rgba8, set = 0, binding = 2) uniform writeonly image2D outputImage;
+
+layout(push_constant) uniform CompositePush {
+	float strength;
+	uint width;
+	uint height;
+	uint debug;
+} pc;
+
+void main()
+{
+	ivec2 pixel = ivec2(gl_GlobalInvocationID.xy);
+	if (pixel.x >= int(pc.width) || pixel.y >= int(pc.height))
+		return;
+
+	vec2 uv = (vec2(pixel) + 0.5) / vec2(pc.width, pc.height);
+	vec3 source = texelFetch(sourceImage, pixel, 0).rgb;
+	vec3 glow = texture(glowImage, uv).rgb;
+
+	/* Additive composite with a soft-light falloff so bright cores do not
+	 * crush to pure white. Debug mode outputs the raw glow mask so it can be
+	 * verified independently of the composite math. */
+	vec3 result;
+	if (pc.debug != 0) {
+		result = glow * 4.0;
+	} else {
+		result = source + glow * pc.strength * (1.0 - source * 0.75);
+	}
+	imageStore(outputImage, pixel, vec4(clamp(result, vec3(0.0), vec3(1.0)), 1.0));
+}

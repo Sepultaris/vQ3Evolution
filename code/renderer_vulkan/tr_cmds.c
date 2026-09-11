@@ -38,6 +38,14 @@ Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
 
 static renderCommandList_t	BE_Commands;
 
+/* Set when the Urban Terror night-vision overlay shaders would have been
+   drawn this frame; the post-processing NV pass consumes the result. */
+static qboolean nv_overlay_active;
+
+void R_NvOverlaySet(void) { nv_overlay_active = qtrue; }
+qboolean R_NvOverlayActive(void) { return nv_overlay_active; }
+void R_NvOverlayClear(void) { nv_overlay_active = qfalse; }
+
 /*
 ============
 R_GetCommandBuffer
@@ -275,8 +283,17 @@ static void RB_RenderDrawSurfList( drawSurf_t* drawSurfs, int numDrawSurfs )
 			rb_surfaceTable[ *drawSurf->surface ]( drawSurf->surface );
 			continue;
 		}
-		oldSort = drawSurf->sort;
 		R_DecomposeSort( drawSurf->sort, &entityNum, &shader, &fogNum, &dlighted );
+
+		/* Urban Terror night-vision overlay shaders are never rasterized;
+		   the post-processing NV pass replaces the effect at output time.
+		   oldSort/oldShader stay untouched so the pre-NV batch is not
+		   disturbed and the fast path can never pick up an NV surface. */
+		if (shader->nvOverlay) {
+			R_NvOverlaySet();
+			continue;
+		}
+		oldSort = drawSurf->sort;
 
 		//
 		// change the tess parameters if needed
@@ -361,6 +378,13 @@ static void RB_RenderDrawSurfList( drawSurf_t* drawSurfs, int numDrawSurfs )
 
 void RB_StretchPic( const stretchPicCommand_t * const cmd )
 {
+	/* Legacy Urban Terror NV overlay drawn as a 2D stretch-pic: never
+	 * rasterize it; the post-processing NV pass replaces the effect. */
+	if (cmd->shader->nvOverlay) {
+		R_NvOverlaySet();
+		return;
+	}
+
 	/* Projection mode can survive across menu-only frames, but the temporal
 	 * scene target starts anew each frame. Always select the full-resolution
 	 * UI target before batching 2D geometry; begin_ui is idempotent. */

@@ -67,7 +67,7 @@ qboolean vk_pt_rr_initialize(uint32_t output_width, uint32_t output_height)
     VkPhysicalDeviceProperties limits;
     qvkGetPhysicalDeviceProperties(vk.physical_device, &limits);
     if (limits.limits.maxPerStageDescriptorStorageImages < 10 ||
-        limits.limits.maxPerStageDescriptorStorageBuffers < 49 ||
+        limits.limits.maxPerStageDescriptorStorageBuffers < 51 ||
         output_width > limits.limits.maxImageDimension2D || output_height > limits.limits.maxImageDimension2D)
         goto fail;
     pt_rr.width = output_width; pt_rr.height = output_height;
@@ -115,14 +115,14 @@ qboolean vk_pt_rr_initialize(uint32_t output_width, uint32_t output_height)
             .subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 } };
         if (qvkCreateImageView(vk.device, &view, NULL, &image->view) != VK_SUCCESS) goto fail;
     }
-    VkDescriptorSetLayoutBinding bindings[14] = {0};
-    for (int i = 0; i < 14; ++i) bindings[i] = (VkDescriptorSetLayoutBinding){
+    VkDescriptorSetLayoutBinding bindings[15] = {0};
+    for (int i = 0; i < 15; ++i) bindings[i] = (VkDescriptorSetLayoutBinding){
         i, i < 7 ? VK_DESCRIPTOR_TYPE_STORAGE_IMAGE : VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
         1, VK_SHADER_STAGE_COMPUTE_BIT, NULL };
     VkDescriptorSetLayoutCreateInfo set = { .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
-        .bindingCount = 14, .pBindings = bindings };
+        .bindingCount = 15, .pBindings = bindings };
     if (qvkCreateDescriptorSetLayout(vk.device, &set, NULL, &pt_rr.set_layout) != VK_SUCCESS) goto fail;
-    VkDescriptorPoolSize sizes[] = { { VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 7 }, { VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 7 } };
+    VkDescriptorPoolSize sizes[] = { { VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 7 }, { VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 8 } };
     VkDescriptorPoolCreateInfo pool = { .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
         .maxSets = 1, .poolSizeCount = 2, .pPoolSizes = sizes };
     if (qvkCreateDescriptorPool(vk.device, &pool, NULL, &pt_rr.pool) != VK_SUCCESS) goto fail;
@@ -238,7 +238,7 @@ qboolean vk_pt_rr_evaluate(const vk_sl_frame_resources_t *resources, VkImage *ou
     r.color_output = pt_rr.images[5].image; r.color_output_view = pt_rr.images[5].view;
     r.color_format = VK_FORMAT_R16G16B16A16_SFLOAT;
     r.color_input_layout = r.color_output_layout = VK_IMAGE_LAYOUT_GENERAL;
-    r.exposure = r_pathTracingExposure->value;
+    r.exposure = pt.exposure;
     for (int i = 0; i < 4; ++i) {
         r.rr_guides[i] = pt_rr.images[i+1].image;
         r.rr_guide_views[i] = pt_rr.images[i+1].view;

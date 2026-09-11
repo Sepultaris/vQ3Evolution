@@ -1992,7 +1992,14 @@ void R_SetTheShader( const char *name, int lightmapIndex )
 	shader.rtNormalScale = 1;
 
 	strncpy( shader.name, name, sizeof( shader.name ) );
-	
+
+	// Urban Terror night-vision screen shaders: the backend never rasterizes
+	// these; the post-processing NV pass replaces the effect at output time.
+	shader.nvOverlay =
+		( Q_stricmp( shader.name, "nvgScope2" ) == 0 ||
+		  Q_stricmp( shader.name, "nvgBrightA" ) == 0 ||
+		  Q_stricmp( shader.name, "nvgBrightB" ) == 0 );
+
     shader.lightmapIndex = lightmapIndex;
     // FIXME: set these "need" values appropriately
 	shader.needsNormal = qtrue;

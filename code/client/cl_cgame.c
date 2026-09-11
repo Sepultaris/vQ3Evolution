@@ -401,6 +401,31 @@ static int	FloatAsInt( float f ) {
 }
 
 /*
+ * Urban Terror 3.x reuses Quake 3's PW_QUAD bit for its NVG state. Its
+ * cgame then submits the stock PW_QUAD blue dlight at the player's origin.
+ * The renderer cannot identify the origin of a dlight once the VM syscall
+ * has crossed the client boundary, so reject this one UT/NVG syscall here.
+ */
+static qboolean CL_IsUrbanTerrorNVGLight( const vec3_t org, float intensity,
+	float r, float g, float b ) {
+	vec3_t delta;
+
+	if ( Q_stricmp( FS_GetCurrentGameDir(), "Q3UT3" ) != 0 || !cl.snap.valid ) {
+		return qfalse;
+	}
+
+	if ( cl.snap.ps.powerups[PW_QUAD] <= cl.snap.serverTime ||
+		intensity < 200.0f || intensity >= 232.0f ||
+		Q_fabs( r - 0.2f ) > 0.001f || Q_fabs( g - 0.2f ) > 0.001f ||
+		Q_fabs( b - 1.0f ) > 0.001f ) {
+		return qfalse;
+	}
+
+	VectorSubtract( org, cl.snap.ps.origin, delta );
+	return DotProduct( delta, delta ) <= ( 128.0f * 128.0f );
+}
+
+/*
 ====================
 CL_CgameSystemCalls
 
@@ -564,6 +589,9 @@ intptr_t CL_CgameSystemCalls( intptr_t *args ) {
 	case CG_R_LIGHTFORPOINT:
 		return re.LightForPoint( VMA(1), VMA(2), VMA(3), VMA(4) );
 	case CG_R_ADDLIGHTTOSCENE:
+		if ( CL_IsUrbanTerrorNVGLight( VMA(1), VMF(2), VMF(3), VMF(4), VMF(5) ) ) {
+			return 0;
+		}
 		re.AddLightToScene( VMA(1), VMF(2), VMF(3), VMF(4), VMF(5) );
 		return 0;
 	case CG_R_ADDADDITIVELIGHTTOSCENE:

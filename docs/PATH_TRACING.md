@@ -53,7 +53,13 @@ quality and lighting controls update live and reset relevant history.
 | `r_pathTracingExposure` | 1 | 0.01–16 linear exposure before tone mapping; 2 doubles brightness; does not brighten HUD/menu |
 | `r_pathTracingAmbient` | 0 | 0–2 diffuse ambient fill, also contributing to fog; 0 disables it |
 | `r_pathTracingSunAngle` | 0 | 0–20 degrees, full angular diameter of the map's authored sun |
+| `r_pathTracingSunScale` | 1 | 0–16 linear multiplier for the map's authored sun brightness; 2 doubles direct/indirect sunlight |
 | `r_pathTracingLightRadius` | 0 | 0–64 world units, source radius for map point/spot and dynamic lights |
+| `r_pathTracingAutoExposure` | 0 | 1: automatic exposure from the traced HDR average; manual exposure is bypassed, then reseeded when enabled |
+| `r_pathTracingAdaptiveSpeed` | 0.25 | 0.01–10 smoothing time constant (seconds) for the auto-exposure adaptation |
+| `r_pathTracingAdaptiveTarget` | 0.18 | 0.0001–20 ACES input level the frame average is mapped to; 0.18 is middle gray, 1.0 is near-white, 2+ overexposes/saturates |
+| `r_pathTracingAdaptiveMin` | 0.05 | 0–64 minimum auto exposure (never below this when auto is enabled) |
+| `r_pathTracingAdaptiveMax` | 16 | 0–4096 maximum auto exposure (never above this when auto is enabled) |
 | `r_pathTracingScale` | 1 | 0.25–1 internal render scale for path tracing; applied on `vid_restart` |
 
 For a flat two-sample budget, use `r_pathTracingSamples 2` and

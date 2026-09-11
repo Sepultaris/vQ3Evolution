@@ -98,4 +98,11 @@ typedef struct {
 
 extern trGlobals_t	tr;
 
+/* Night-vision overlay state. The legacy Q3 screen-shader stack (nvgScope2,
+   nvgBrightA, nvgBrightB) is detected in the backend, its surfaces are not
+   rasterized, and the post-processing NV pass replaces the effect. */
+void R_NvOverlaySet(void);
+qboolean R_NvOverlayActive(void);
+void R_NvOverlayClear(void);
+
 #endif

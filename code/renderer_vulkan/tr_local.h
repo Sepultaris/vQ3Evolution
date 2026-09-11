@@ -342,6 +342,8 @@ typedef struct shader_s {
     float clampTime;                                  // time this shader is clamped to
     float timeOffset;                                 // current time offset for this shader
 
+	qboolean	nvOverlay;			// Urban Terror NV overlay, replaced by the post-pass effect
+
     struct shader_s *remappedShader;                  // current shader this one is remapped too
 
 	struct	shader_s	*next;

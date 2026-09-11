@@ -1,0 +1,46 @@
+#version 460
+// HDR scene-luminance reduction for adaptive exposure (native path).
+// Each 8x8 workgroup writes one vec2(sumLog2, count) partial to the persistent
+// host-coherent buffer; the CPU geometric-mean/EMA reduction runs next frame.
+layout(local_size_x=8, local_size_y=8) in;
+layout(binding=3, rgba8) uniform readonly image2D outputSize;
+layout(binding=11, std430) readonly buffer Accumulation { vec4 accumulated[]; };
+layout(binding=26, std430) readonly buffer Specular { vec4 specular[]; };
+layout(binding=42, std430) readonly buffer Transmission { vec4 transmission[]; };
+layout(binding=27, std430) readonly buffer VisibleEmission { vec4 visibleEmission[]; };
+layout(binding=49, std430) writeonly buffer ExposurePartials { vec4 partials[]; };
+shared vec4 values[64];
+float luminance(vec3 color) { return dot(color, vec3(0.2126, 0.7152, 0.0722)); }
+void main() {
+    ivec2 size = imageSize(outputSize);
+    ivec2 p = ivec2(gl_GlobalInvocationID.xy);
+    float l = 0.0, count = 0.0, nanCount = 0.0;
+    if (!any(greaterThanEqual(p, size))) {
+        uint index = uint(p.y) * uint(size.x) + uint(p.x);
+        vec3 radiance = accumulated[index].rgb + specular[index].rgb +
+            transmission[index].rgb + visibleEmission[index].rgb;
+        /* Arithmetic-mean metering: sum LINEAR luminance. A near-black pixel
+         * contributes ~nothing while the bright content dominates, so aiming at
+         * a lamp raises the average and lowers exposure (correct direction).
+         * A single NaN lane must not poison the 8x8 group sum. */
+        float lum = luminance(radiance);
+        if (!isnan(lum)) {
+            l = clamp(lum, 1e-5, 1e24);
+            count = 1.0;
+        } else {
+            nanCount = 1.0;
+        }
+    }
+    values[gl_LocalInvocationIndex] = vec4(l, count, nanCount, 0.0);
+    barrier();
+    if (gl_LocalInvocationIndex == 0u) {
+        float sum = 0.0, sumCount = 0.0, sumNan = 0.0;
+        for (int i = 0; i < 64; ++i) {
+            sum += values[i].x;
+            sumCount += values[i].y;
+            sumNan += values[i].z;
+        }
+        uint group = gl_WorkGroupID.y * gl_NumWorkGroups.x + gl_WorkGroupID.x;
+        partials[group] = vec4(sum, sumCount, sumNan, 0.0);
+    }
+}

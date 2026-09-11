@@ -1,0 +1,44 @@
+#version 450
+
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+layout(set = 0, binding = 0) uniform sampler2D inputImage;
+layout(rgba16f, set = 0, binding = 1) uniform writeonly image2D outputImage;
+
+layout(push_constant) uniform DownPush {
+	float threshold;
+	uint width;
+	uint height;
+} pc;
+
+float luminance(vec3 c)
+{
+	return dot(c, vec3(0.299, 0.587, 0.114));
+}
+
+void main()
+{
+	ivec2 outPixel = ivec2(gl_GlobalInvocationID.xy);
+	int outWidth = (int(pc.width) + 1) >> 1;
+	int outHeight = (int(pc.height) + 1) >> 1;
+	if (outPixel.x >= outWidth || outPixel.y >= outHeight)
+		return;
+
+	/* 2x2 box downsample into the half-res bright-pass buffer. The source is
+	 * the tone-mapped LDR frame, so a soft lift above the threshold extracts
+	 * the highlights into a smooth glow mask. */
+	ivec2 inBase = outPixel << 1;
+	vec3 acc = vec3(0.0);
+	acc += texelFetch(inputImage, inBase + ivec2(0, 0), 0).rgb;
+	acc += texelFetch(inputImage, inBase + ivec2(1, 0), 0).rgb;
+	acc += texelFetch(inputImage, inBase + ivec2(0, 1), 0).rgb;
+	acc += texelFetch(inputImage, inBase + ivec2(1, 1), 0).rgb;
+	acc *= 0.25;
+
+	float weight = (luminance(acc) - pc.threshold) /
+		max(1.0 - pc.threshold, 1e-6);
+	weight = clamp(weight, 0.0, 1.0);
+	weight *= weight;
+
+	imageStore(outputImage, outPixel, vec4(acc * weight, 1.0));
+}

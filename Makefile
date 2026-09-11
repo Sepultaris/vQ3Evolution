@@ -1890,6 +1890,8 @@ Q3VKOBJ = \
 	$(B)/renderer_vulkan/vk_raytracing.o \
 	$(B)/renderer_vulkan/vk_pathtrace.o \
   $(B)/renderer_vulkan/vk_sharpen.o \
+  $(B)/renderer_vulkan/vk_bloom.o \
+  $(B)/renderer_vulkan/vk_nv.o \
   $(B)/renderer_vulkan/vk_swapchain.o \
   $(B)/renderer_vulkan/vk_screenshot.o \
   $(B)/renderer_vulkan/vk_shade_geometry.o \
@@ -1897,6 +1899,10 @@ Q3VKOBJ = \
   \
   $(B)/renderer_vulkan/vk_shaders.o \
   $(B)/renderer_vulkan/dlss_sharpen_comp.o \
+	$(B)/renderer_vulkan/post_bloom_down_comp.o \
+	$(B)/renderer_vulkan/post_bloom_blur_comp.o \
+	$(B)/renderer_vulkan/post_bloom_composite_comp.o \
+	$(B)/renderer_vulkan/post_NV_comp.o \
 	$(B)/renderer_vulkan/rt_shadows_comp.o \
 	$(B)/renderer_vulkan/pathtrace_comp.o \
 	$(B)/renderer_vulkan/pt_profile_comp.o \
@@ -1925,6 +1931,8 @@ Q3VKOBJ = \
 	$(B)/renderer_vulkan/pt_guides_comp.o \
 	$(B)/renderer_vulkan/pt_denoise_comp.o \
 	$(B)/renderer_vulkan/pt_temporal_comp.o \
+	$(B)/renderer_vulkan/pt_exposure_comp.o \
+	$(B)/renderer_vulkan/pt_exposure_rr_comp.o \
   $(B)/renderer_vulkan/multi_texture_clipping_plane_vert.o \
   $(B)/renderer_vulkan/multi_texture_frag.o \
   $(B)/renderer_vulkan/multi_texture_vert.o \

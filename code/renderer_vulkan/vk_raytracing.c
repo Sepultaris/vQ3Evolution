@@ -315,6 +315,7 @@ static qboolean world_surface_counts(const msurface_t *surface,
 	uint32_t *vertices, uint32_t *indices)
 {
 	if (!surface || !surface->data || !surface->shader ||
+		surface->shader->nvOverlay ||
 		(r_rayTracing->integer == 2 ? ((surface->shader->sort == SS_PORTAL && !world_surface_is_mirror(surface)) ||
             surface->shader->sort == SS_FOG || surface->shader->sort == SS_STENCIL_SHADOW) :
 		(surface->shader->sort > SS_OPAQUE || surface->shader->isSky)))

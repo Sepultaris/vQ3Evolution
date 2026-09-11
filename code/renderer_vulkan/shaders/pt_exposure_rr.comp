@@ -1,0 +1,38 @@
+#version 460
+// HDR scene-luminance reduction for adaptive exposure (Ray Reconstruction path).
+// Reads the always-fresh rrNoisy HDR image and writes workgroup partials.
+layout(local_size_x=8, local_size_y=8) in;
+layout(set=1, binding=0, rgba16f) uniform readonly image2D rrNoisy;
+layout(set=1, binding=14, std430) writeonly buffer ExposurePartials { vec4 partials[]; };
+shared vec4 values[64];
+float luminance(vec3 color) { return dot(color, vec3(0.2126, 0.7152, 0.0722)); }
+void main() {
+    ivec2 size = imageSize(rrNoisy);
+    ivec2 p = ivec2(gl_GlobalInvocationID.xy);
+    float l = 0.0, count = 0.0, nanCount = 0.0;
+    if (!any(greaterThanEqual(p, size))) {
+        /* Arithmetic-mean metering: sum LINEAR luminance. A near-black pixel
+         * contributes ~nothing while the bright content dominates, so aiming at
+         * a lamp raises the average and lowers exposure (correct direction).
+         * A single NaN lane must not poison the 8x8 group sum. */
+        float lum = luminance(imageLoad(rrNoisy, p).rgb);
+        if (!isnan(lum)) {
+            l = clamp(lum, 1e-5, 1e24);
+            count = 1.0;
+        } else {
+            nanCount = 1.0;
+        }
+    }
+    values[gl_LocalInvocationIndex] = vec4(l, count, nanCount, 0.0);
+    barrier();
+    if (gl_LocalInvocationIndex == 0u) {
+        float sum = 0.0, sumCount = 0.0, sumNan = 0.0;
+        for (int i = 0; i < 64; ++i) {
+            sum += values[i].x;
+            sumCount += values[i].y;
+            sumNan += values[i].z;
+        }
+        uint group = gl_WorkGroupID.y * gl_NumWorkGroups.x + gl_WorkGroupID.x;
+        partials[group] = vec4(sum, sumCount, sumNan, 0.0);
+    }
+}

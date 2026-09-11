@@ -27,7 +27,7 @@ def check(cxx,dis):
         subprocess.run([cxx,'-O2',str(ROOT/'tests/pt_fog_fixture.cpp'),'-I',tmp,'-o',str(exe)],check=True,timeout=30)
         subprocess.run([str(exe)],check=True,timeout=20)
     native=(R/'vk_pathtrace.c').read_text();loader=(R/'pt_fog.h').read_text()
-    for token in ('bindings[49]','VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 42','bind_buffer(48, pt.fog.buffer, pt.fog.size)',
+    for token in ('bindings[50]','VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 43','bind_buffer(48, pt.fog.buffer, pt.fog.size)',
                   'buffer_destroy(&pt.fog)','if (pt.fog_dirty)','buffer_upload(cmd, &pt.fog, pt.fog.size)'):
         assert token in native,token
     assert 'if (pt.fog_dirty)' in native and 'pt.fog_dirty = qfalse;' in native

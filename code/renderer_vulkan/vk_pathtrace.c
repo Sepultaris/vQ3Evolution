@@ -112,6 +112,7 @@ static struct {
     float map_colors[PT_MAX_MAP_LIGHTS][4];
     float map_cones[PT_MAX_MAP_LIGHTS][4];
     float previous_camera[32];
+    float exposure;
     vec3_t sun_color, sun_direction;
     int sky_material;
     pt_vertex_t *world_attributes;
@@ -202,6 +203,7 @@ static struct {
 #include "pt_ray_reconstruction.h"
 static uint32_t hash_bytes(uint32_t hash, const void *data, size_t size);
 #include "pt_shader_profile.h"
+#include "pt_exposure.h"
 #include "pt_pipeline_stats.h"
 #include "pt_material_cache.h"
 #include "pt_compact_transport.h"
@@ -339,7 +341,7 @@ void vk_pt_profile(VkCommandBuffer cmd, uint32_t point)
         gpu_label_pipeline(3, pt.temporal_pipeline, "VQ3E Temporal reconstruction");
         gpu_label_pipeline(4, pt.denoise_pipeline, "VQ3E Spatial reconstruction");
     }
-    if (pt.active && point == 0) shader_profile_read();
+    if (pt.active && point == 0) { shader_profile_read(); pt_exposure_read(); }
     if (!pt.active || !r_pathTracingProfile->integer) { pt.profile_mask = 0; return; }
     if (!pt.profile_pool) {
         VkPhysicalDeviceProperties properties;
@@ -1378,14 +1380,14 @@ qboolean vk_pt_initialize(uint32_t width, uint32_t height,
 {
     gpu_labels_initialize();
     uint32_t i;
-    VkDescriptorSetLayoutBinding bindings[49] = {0};
+    VkDescriptorSetLayoutBinding bindings[50] = {0};
     VkPhysicalDeviceProperties properties;
     VkDescriptorSetLayoutCreateInfo set_info = { .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO };
     VkDescriptorPoolSize sizes[] = {
         { VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR, 1 },
         { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, PT_MAX_TEXTURES + 2 },
         { VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 3 },
-        { VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 42 }
+        { VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 43 }
     };
     VkDescriptorPoolCreateInfo pool = { .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO };
     VkDescriptorSetAllocateInfo allocation = { .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO };
@@ -1574,6 +1576,7 @@ fail:
 
 void vk_pt_shutdown(void)
 {
+    pt_exposure_shutdown();
     rr_shutdown();
     memset(&pt_gpu_labels, 0, sizeof(pt_gpu_labels));
     staged_shutdown();
@@ -1660,6 +1663,7 @@ qboolean vk_pt_record(VkCommandBuffer cmd, VkAccelerationStructureKHR scene,
     const float ambient = r_pathTracingAmbient->value;
     const qboolean ambient_changed = lights->sky_environment[1] != ambient;
     const float sun_angle = r_pathTracingSunAngle->value * (float)(M_PI / 360.0);
+    const float sun_scale = r_pathTracingSunScale->value;
     const float light_radius = r_pathTracingLightRadius->value;
     const qboolean penumbra_changed = lights->sky_environment[2] != sun_angle ||
         lights->sky_environment[3] != light_radius;
@@ -1800,10 +1804,11 @@ qboolean vk_pt_record(VkCommandBuffer cmd, VkAccelerationStructureKHR scene,
     c[0] = origin[0]; c[1] = origin[1]; c[2] = origin[2]; c[3] = near_distance;
     for (i = 0; i < 3; ++i) {
         c[4+i] = axis[i]; c[8+i] = -axis[3+i]; c[12+i] = axis[6+i];
-        c[16+i] = pt.sun_direction[i]; c[24+i] = pt.sun_color[i] / 100.0f;
+        c[16+i] = pt.sun_direction[i]; c[24+i] = pt.sun_color[i] * sun_scale / 100.0f;
     }
     c[7] = far_distance; c[11] = projection[0]; c[15] = projection[5];
-    c[19] = r_pathTracingExposure->value;
+    pt.exposure = pt_exposure_current();
+    c[19] = pt.exposure;
     c[20] = 0.02f; c[21] = ray_distance;
     c[22] = projection[8]; c[23] = projection[9];
     c[27] = r_pathTracingDenoise->integer && !r_pathTracingReference->integer ? 1.0f : 0.0f;
@@ -1835,6 +1840,7 @@ qboolean vk_pt_record(VkCommandBuffer cmd, VkAccelerationStructureKHR scene,
     radiance_hash = hash_bytes(2166136261u, current_medium, sizeof(current_medium));
     radiance_hash = hash_bytes(radiance_hash, &ambient, sizeof(ambient));
     radiance_hash = hash_bytes(radiance_hash, &sun_angle, sizeof(sun_angle));
+    radiance_hash = hash_bytes(radiance_hash, &sun_scale, sizeof(sun_scale));
     radiance_hash = hash_bytes(radiance_hash, &light_radius, sizeof(light_radius));
     pt_rr.frame_ready = rr_requested();
     if (pt_rr.frame_ready != pt_rr.previous_active) pt.temporal_valid = qfalse;
@@ -1858,7 +1864,7 @@ qboolean vk_pt_record(VkCommandBuffer cmd, VkAccelerationStructureKHR scene,
             DotProduct(c + 4, previous + 4) < 0.5f ||
             fabsf(c[11] - previous[11]) > 0.0001f ||
             fabsf(c[15] - previous[15]) > 0.0001f ||
-            c[19] != previous[19] || c[21] != previous[21] ||
+            c[21] != previous[21] ||
             c[28] != previous[28] || c[29] != previous[29] ||
             pt.previous_sampling != r_pathTracingSampling->integer)
             reset_reasons |= 16u;
@@ -1897,7 +1903,11 @@ qboolean vk_pt_record(VkCommandBuffer cmd, VkAccelerationStructureKHR scene,
     /* The fixed-view reference and the live temporal estimator must not feed
      * accumulated samples into each other. Live input is always this frame. */
     if (geometry_changed || lights_changed || ambient_changed || penumbra_changed) { pt.history = 0; ++pt.scene_resets; }
-    if (memcmp(c, pt.previous_camera, sizeof(c))) { pt.history = 0; ++pt.camera_resets; }
+    /* Exposure never affects camera reprojection, so ignore it for camera resets. */
+    float camera_compare[32];
+    memcpy(camera_compare, c, sizeof(camera_compare));
+    camera_compare[19] = pt.previous_camera[19];
+    if (memcmp(camera_compare, pt.previous_camera, sizeof(camera_compare))) { pt.history = 0; ++pt.camera_resets; }
     memcpy(pt.previous_camera, c, sizeof(c));
     pt.previous_hash = hash;
     c[30] = (float)(pt.frame++ % 1048576u);
@@ -2047,6 +2057,7 @@ qboolean vk_pt_record(VkCommandBuffer cmd, VkAccelerationStructureKHR scene,
     vk_pt_profile(cmd, 4);
     if (pt.profile_instrumented) shader_profile_finish(cmd);
     if (pt_rr.frame_ready) rr_pack(cmd, c, rr_trace);
+    if (pt_exposure_enabled()) pt_exposure_dispatch(cmd, c);
     pt_rr.direct_profile_frame = rr_trace;
     if (c[27] != 0 && !pt_rr.frame_ready) {
         /* Spatial reconstruction never feeds back into the unbiased reference
@@ -2129,8 +2140,12 @@ void vk_pt_info_f(void)
         pt.active, pt.frame, pt.history, pt.camera_resets, pt.scene_resets);
     ri.Printf(PRINT_ALL, "Path tracing ambient fill: %.3f (0 disables; exposure %.3f)\n",
         r_pathTracingAmbient->value, r_pathTracingExposure->value);
-    ri.Printf(PRINT_ALL, "Path tracing penumbra: sun angle %.3f degrees, light radius %.3f units (0 = point source)\n",
-        r_pathTracingSunAngle->value, r_pathTracingLightRadius->value);
+    ri.Printf(PRINT_ALL, "Path tracing penumbra: sun angle %.3f degrees, sun scale %.3f, light radius %.3f units (0 = point source)\n",
+        r_pathTracingSunAngle->value, r_pathTracingSunScale->value, r_pathTracingLightRadius->value);
+    ri.Printf(PRINT_ALL, "Path tracing auto exposure: %s, exposure %.3f, target %.3f, speed %.2fs, range %.2f-%.2f\n",
+        pt_exposure_enabled() ? "on" : "off", pt.active ? pt.exposure : r_pathTracingExposure->value,
+        r_pathTracingAdaptiveTarget->value, r_pathTracingAdaptiveSpeed->value,
+        r_pathTracingAdaptiveMin->value, r_pathTracingAdaptiveMax->value);
     ri.Printf(PRINT_ALL, "Path tracing temporal: valid %d, resets %u, history limit %d (moving geometry limit 4)\n",
         pt.temporal_valid, pt.temporal_resets, r_pathTracingHistory->integer);
     ri.Printf(PRINT_ALL, "Temporal reset causes: renderer %u, invalid %u, lights %u, time %u, camera/settings %u\n",

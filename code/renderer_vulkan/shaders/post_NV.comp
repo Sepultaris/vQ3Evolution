@@ -1,0 +1,89 @@
+/*
+===========================================================================
+Urban Terror night-vision goggles, implemented as a post-processing pass.
+
+The classic Quake 3 screen-shader stack (nvgScope2 / nvgBrightA / nvgBrightB)
+was additive/multiply rings that only ever drew flat green. This compute pass
+replaces it with a film-style NV look derived from the KSP_True_Night_Vision
+ReShade preset (MIT: CeeJay.dk, prod80): infrared channel remap, per-channel
+gamma shaping, animated hash film grain and a procedural 4-arc goggle ring.
+===========================================================================
+*/
+
+#version 450
+
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+layout(set = 0, binding = 0) uniform sampler2D inputImage;
+layout(set = 0, binding = 1, rgba8) uniform writeonly image2D outputImage;
+
+layout(push_constant) uniform NVPush
+{
+	float  gain;       // brightness multiplier applied to the remap
+	float  grain;      // film grain strength 0..1
+	float  grainScale; // grain pattern size in pixels
+	float  time;       // seconds, drives the animated noise hash
+	uint   tint;       // 0 = classic green, 1 = white
+	uint   debug;      // 1 = raw mono IR scale, no ring/grain
+	float  vignette;   // 4-arc goggle ring strength 0..1
+	float  pad;
+} pc;
+
+float nv_hash(vec2 p)
+{
+	return fract(sin(dot(p, vec2(12.9898, 78.233))) * 43758.5453);
+}
+
+void main()
+{
+	ivec2 p = ivec2(gl_GlobalInvocationID.xy);
+	ivec2 dims = imageSize(outputImage);
+	if (p.x >= dims.x || p.y >= dims.y) {
+		return;
+	}
+
+	vec3 c = texelFetch(inputImage, p, 0).rgb;
+	vec2 uv = (vec2(p) + 0.5) / vec2(dims);
+
+	// Infrared-style remap from the KSP ((Quad)) Green preset
+	// (bw_mode "Infrared": red -0.4, green +3.0, blue -0.6, curve 4).
+	float v = -0.4 * c.r + 3.0 * c.g - 0.6 * c.b;
+	v = clamp(v, 0.0, 1.0) * pc.gain;
+
+	if (pc.debug != 0) {
+		imageStore(outputImage, p, vec4(vec3(clamp(v, 0.0, 1.0)), 1.0));
+		return;
+	}
+
+	// Per-channel gamma shaping (TVExtendedLevels-style green channel lift).
+	vec3 tinted = vec3(pow(v, 1.5), v, pow(v, 2.2));
+	if (pc.tint == 1) tinted = vec3(v);
+
+	// Animated hash film grain (prod80 grain: centered density curve).
+	vec2 gxy = vec2(p) / max(pc.grainScale, 0.5);
+	float n = nv_hash(gxy + fract(pc.time * 0.03125) * 37.0);
+	n = pow(abs(n * 2.0 - 1.0), 3.0);
+	tinted += (n - 0.5) * pc.grain;
+
+	// Procedural 4-arc goggle ring: four lenses in-line and overlapping side by
+	// side (aspect corrected). Each lens boundary is stroked separately so the
+	// overlap seams read as distinct lenses ("OOOO" in a row, not a 2x2 grid).
+	vec2 q = uv * 2.0 - 1.0;
+	const float aspect = dims.x / float(dims.y);
+	q.x *= aspect;
+	const float lens_r = 0.30 * aspect;
+	const float lens_s = 1.7 * lens_r;
+	float mask = 0.0;
+	float seams = 0.0;
+	for (int i = 0; i < 4; i++) {
+		float cx = (float(i) - 1.5) * lens_s;
+		float d = distance(q, vec2(cx, 0.0));
+		mask = max(mask, smoothstep(lens_r, lens_r - 0.015, d));
+		seams += smoothstep(lens_r - 0.03, lens_r - 0.008, d) *
+		         (1.0 - smoothstep(lens_r + 0.004, lens_r + 0.03, d));
+	}
+	tinted *= 1.0 - pc.vignette * (1.0 - mask);
+	tinted *= 1.0 - pc.vignette * 0.5 * clamp(seams, 0.0, 1.0);
+
+	imageStore(outputImage, p, vec4(clamp(tinted, 0.0, 1.0), 1.0));
+}
