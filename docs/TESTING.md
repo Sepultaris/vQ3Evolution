@@ -142,8 +142,9 @@ retained variant separately with `-Validation`; profiler/validation overhead is
 not a normal FPS result. Never measure while offline texture inference or
 another heavy GPU workload is running.
 
-Current RR runs have an unresolved shutdown timeout. A completed rendering
-script followed by watchdog termination remains diagnostic-only. Neither
+Some recorded RR runs have unresolved shutdown timeouts; the attended 2x FG
+follow-up exited normally, but does not establish a general lifecycle fix. A
+completed rendering script followed by watchdog termination remains diagnostic-only. Neither
 increasing the timeout silently, discarding errors nor counting generated frames
 turns it into an accepted performance improvement. See [current status](STATUS.md).
 
@@ -155,6 +156,74 @@ capture-only NV testing after the scenario completes, with a warning; it does
 not convert the known NVIDIA shutdown failure into a lifecycle pass. Existing
 game settings are hash-checked. FG/NR are off in these rendering checks; they
 are not performance benchmarks. See [NV evidence](archive/NIGHT_VISION_DEVELOPMENT.md).
+
+## Frame Generation menu and presentation checks
+
+These offline checks do not launch a game or use the GPU:
+
+```powershell
+python tests/menu_mfg_check.py --compiler C:/msys64/ucrt64/bin/g++.exe
+python tests/pt_frame_generation_check.py --self-test
+tests/run-engine-options-check.ps1 -Compiler C:/msys64/ucrt64/bin/gcc.exe
+```
+
+The menu checker requires the fetched Streamline 2.12.0 headers under
+`build-widescreen/deps/streamline-sdk-v2.12.0/include`. It compiles production
+menu callbacks and the SDK request/capability policy with mocked device/API
+results. The engine-options fixture covers preservation of hidden software/NR
+settings and multiplier staging/cancel. These passes do not prove that the SDK
+generates frames on a real device.
+
+For an attended functionality test, close any existing game first and use a
+complete NVIDIA-enabled release installation with its runtime DLLs and game
+data in `build-widescreen/release-mingw64-x86_64`. The runner currently expects
+the validation layer in `C:/VulkanSDK/1.4.350.0/Bin`; check that local prerequisite
+before a validation run. `-NoValidation` selects a functionality-only run:
+
+```powershell
+tests/run-mfg-menu-check.ps1 -Multiplier 2 -Foreground -NoValidation
+```
+
+The scenario uses windowed 1280x720 Q3DM6, DLAA/RR, native tracing scale, two fixed
+samples, NR off and FG on, followed by menu checks and exit. These are explicit
+functional settings, not the saved-settings performance benchmark above. Each
+run creates a unique ignored `build-widescreen/mfg-menu-audit/run-...` directory
+with an isolated settings home, console/guard logs and captures. The runner
+hash-checks existing user `baseq3/q3config.cfg` and shared `vq3e-rendering.cfg`.
+Its independent owned-process deadline defaults to 45 seconds and accepts
+15-90 seconds via `-TimeLimitSeconds`; a timeout is not a clean-exit pass.
+
+`-Foreground` makes one focus request for this test's own game window. Windows
+may refuse it; click the window if needed and keep it visible and focused
+throughout measurement. It does not repeatedly reclaim focus. `-Developer 2`
+enables verbose SDK diagnostics. `-RuntimeDirectory` selects a complete isolated
+runtime installation for SDK comparisons without replacing installed DLLs;
+the normal release directory remains the game's base-data path.
+
+After the runner prints its evidence directory, check that run's
+`home/baseq3/qconsole.log` with:
+
+```text
+python tests/menu_mfg_check.py --log <qconsole.log> --multiplier 2
+```
+
+Replace the placeholder with the actual quoted log path. For another supported
+multiplier, change both arguments together. The checker requires the configured
+multiplier to be sustained during both stationary and moving intervals, native
+Windows foreground evidence, no new focus/minimization/SDK failures during
+measurement, scenario completion and SDK teardown. Older SDL-only focus logs
+are inconclusive. A successful launcher exit, an enabled cvar or one generated
+frame is insufficient. Inspect the captured menus separately, including both
+the stock Graphics Options menu and the engine-owned panel. Omit
+`-NoValidation` for a separate validation run and review its errors explicitly;
+the counter checker is not a Vulkan-validation or image-quality certificate.
+
+The 2026-09-13 attended 2x follow-up passed both intervals and exited normally
+in 14.6 seconds with saved settings unchanged. Native-foreground verification
+of 3x-6x remains pending. Existing NVIDIA presentation-validation and older
+restart/shutdown failures remain open. Keep these limits with the
+[recorded results](DLSS.md#multiplier-verification-2026-09-13); generated
+presentations must not be reported as a rendered-FPS improvement.
 
 ## Recorded cleanup verification — 2026-09-13
 

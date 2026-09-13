@@ -192,18 +192,23 @@ exited normally in roughly 8-17 seconds and left saved settings unchanged.
 Vulkan validation also reported presentation/layout/semaphore errors; neither
 clean validation nor the older shutdown/restart issues are established fixed.
 
-Reproduce with `tests/run-mfg-menu-check.ps1 -Multiplier 6 -Foreground`; this owns an isolated
-home directory and an independent process guard (45 seconds by default).
+Reproduce the attended 2x check with
+`tests/run-mfg-menu-check.ps1 -Multiplier 2 -Foreground -NoValidation`; this owns
+an isolated home directory and an independent process guard (45 seconds by
+default). Omitting `-NoValidation` enables a separate Vulkan validation check.
 `-Foreground` requests focus once for this test's own game window; Windows may
 refuse it, in which case click the test window. It never repeatedly steals focus.
 Keep the game in the foreground throughout the measurement. `-Developer 2`
 adds verbose SDK logging, and `-RuntimeDirectory` allows an isolated SDK runtime
 comparison without replacing the installed runtime DLLs.
-`tests/menu_mfg_check.py --log <qconsole.log> --multiplier 6` checks real
+`python tests/menu_mfg_check.py --log <qconsole.log> --multiplier 2` checks real
 static/moving presentation ratios, focus, SDK errors and completed teardown,
 in addition to compiling the production request/cap policy and UI callbacks.
 The runner's process exit code alone is **not** an interpolation pass. The
 engine-options fixture covers hidden WIP persistence and slider staging/cancel.
+See [the testing guide](TESTING.md#frame-generation-menu-and-presentation-checks)
+for prerequisites, output locations and acceptance requirements. To test another
+supported multiplier, change both the runner and checker arguments together.
 
 Ray Reconstruction is a separate denoiser from Neural Rendering. When RR is
 active, it replaces native temporal/spatial filtering and the normal DLSS color

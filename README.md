@@ -17,9 +17,9 @@ network protocols.
 - Engine-owned rendering/interface options available in Team Arena and mods,
   with shared settings and compatibility scaling for older modules
 - NVIDIA DLSS Super Resolution and DLAA
-- Experimental DLSS Frame Generation integration and NVIDIA Reflex
-- Experimental DLSS Neural Rendering with live strength controls
-- Software path-traced lighting using Vulkan compute on compatible GPUs without hardware RT
+- Experimental DLSS Frame Generation with a GPU/runtime-limited 2x-6x multiplier and NVIDIA Reflex
+- WIP, console-only DLSS Neural Rendering with live strength controls
+- WIP, console-only software path-traced lighting using Vulkan compute without hardware RT
 - Experimental native path-traced world lighting (unfinished; see [current status](docs/STATUS.md))
 - DLSS Ray Reconstruction, including native-resolution DLAA; requested by default
   when supported path tracing and DLSS/DLAA are selected

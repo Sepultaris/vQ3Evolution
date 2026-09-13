@@ -26,6 +26,14 @@ menus being installed. NVIDIA features still require compatible hardware and
 runtimes. Dimmed controls cannot enable unsupported features; an existing
 unsupported setting can still be switched off.
 
+Frame Generation has separate Off/On and multiplier controls. The multiplier
+uses integer steps from 2x to 6x, capped to the reported device/runtime limit;
+it is dimmed when FG is off or the device supports only 2x. Applying a changed
+multiplier requires a renderer restart. A higher console/saved request is
+preserved even if the runtime must use a lower value. Use `nvidia_info` to see
+the requested, configured and maximum multipliers. Generated presentations are
+not additional rendered game frames; see [verification limits](DLSS.md#multiplier-verification-2026-09-13).
+
 ## Operating the panel
 
 Use the mouse, or Tab to switch categories, Up/Down to select a row and

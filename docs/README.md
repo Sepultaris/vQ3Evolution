@@ -10,13 +10,13 @@ then [current status](STATUS.md) for supported paths and known limitations.
 | [Universal options](UNIVERSAL_OPTIONS.md) | Engine-owned settings for base Quake III, Team Arena and mods; shared profiles and legacy UI scaling |
 | [Path tracing](PATH_TRACING.md) | Lighting, samples, bounces, exposure, ambient fill, penumbra, materials and fallback |
 | [Ray Reconstruction](RAY_RECONSTRUCTION.md) | NVIDIA RR with DLAA/DLSS, current defaults, input contract and limitations |
-| [NVIDIA integration](DLSS.md) | SDK/runtime setup, DLSS/DLAA, NR, Frame Generation and Reflex |
+| [NVIDIA integration](DLSS.md) | SDK/runtime setup, DLSS/DLAA, console-only WIP NR, Frame Generation multipliers and Reflex |
 | [Night-vision goggles](NIGHT_VISION.md) | White/green phosphor appearance, soft panoramic optics, grain and console controls |
-| [Software path tracing](RTX.md) | Full compute-based lighting without hardware RT; mode 2 remains the hardware backend |
+| [Software path tracing](RTX.md) | Console-only WIP compute-based lighting without hardware RT; mode 2 remains the hardware backend |
 | [Software denoising](SOFTWARE_DENOISING.md) | Local native history and optional NRD evaluation, controls, build and licensing boundary |
 | [Texture upscaling](TEXTURE_UPSCALING.md) | Optional offline asset processing, packaging and safeguards |
 | [True Combat patch](TRUECOMBAT_PATCH.md) | Optional version-checked fix for the mod's own widescreen UI bug |
-| [Testing and commit checks](TESTING.md) | Offline checks, shader payloads and bounded GPU-test policy |
+| [Testing and commit checks](TESTING.md) | Offline checks, shader payloads, bounded GPU tests and foreground Frame Generation verification |
 | [GPU profiling](GPU_PROFILING.md) | Nsight capture and evidence acceptance |
 | [Vulkan backend overview](../code/renderer_vulkan/README.md) | Source layout and rendering ownership |
 
