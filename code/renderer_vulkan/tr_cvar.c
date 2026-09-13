@@ -100,6 +100,7 @@ cvar_t* r_dlssNRLocalToneStrength;
 cvar_t* r_dlssNRLocalStructureStrength;
 cvar_t* r_dlssNRSkinStructureStrength;
 cvar_t* r_dlssFrameGeneration;
+cvar_t* r_dlssFrameGenerationMultiplier;
 cvar_t* r_dlssFGIdleHooks;
 cvar_t* r_reflex;
 cvar_t* r_dlssAvailable;
@@ -204,6 +205,7 @@ void R_Register( void )
 	r_nvDebug = ri.Cvar_Get( "r_nvDebug", "0", CVAR_TEMP );
 	ri.Cvar_CheckRange( r_nvDebug, 0, 1, qfalse );
 	r_dlssNeuralRendering = ri.Cvar_Get( "r_dlssNeuralRendering", "0", CVAR_ARCHIVE | CVAR_LATCH );
+	ri.Cvar_SetDescription( r_dlssNeuralRendering, "WIP, console-only neural rendering: 0 off, 1-3 model styles. Bypassed by Ray Reconstruction; restart to apply." );
 	ri.Cvar_CheckRange( r_dlssNeuralRendering, 0, 3, qtrue );
 	r_dlssNRIntensity = ri.Cvar_Get( "r_dlssNRIntensity", "1.0", CVAR_ARCHIVE );
 	ri.Cvar_CheckRange( r_dlssNRIntensity, 0.0f, 2.0f, qfalse );
@@ -215,6 +217,10 @@ void R_Register( void )
 	ri.Cvar_CheckRange( r_dlssNRSkinStructureStrength, 0.0f, 2.0f, qfalse );
 	r_dlssFrameGeneration = ri.Cvar_Get( "r_dlssFrameGeneration", "0", CVAR_ARCHIVE | CVAR_LATCH );
 	ri.Cvar_CheckRange( r_dlssFrameGeneration, 0, 1, qtrue );
+	r_dlssFrameGenerationMultiplier = ri.Cvar_Get( "r_dlssFrameGenerationMultiplier", "2", CVAR_ARCHIVE | CVAR_LATCH );
+	ri.Cvar_CheckRange( r_dlssFrameGenerationMultiplier, 2, 6, qtrue );
+	ri.Cvar_SetDescription( r_dlssFrameGenerationMultiplier, "Frame Generation target multiplier, 2x-6x (1-5 generated frames). Capped by GPU/runtime support; restart to apply. r_dlssFrameGeneration toggles Off/On." );
+	ri.Cvar_Get( "r_dlssFrameGenerationMaxMultiplier", "0", CVAR_ROM | CVAR_TEMP );
 	// Diagnostic baseline only: keep the old proxy/pacer while FG itself is off.
 	r_dlssFGIdleHooks = ri.Cvar_Get("r_dlssFGIdleHooks", "0", CVAR_CHEAT | CVAR_LATCH);
 	ri.Cvar_CheckRange(r_dlssFGIdleHooks, 0, 1, qtrue);
@@ -225,6 +231,7 @@ void R_Register( void )
 	r_dlssFrameGenerationAvailable = ri.Cvar_Get( "r_dlssFrameGenerationAvailable", "0", CVAR_TEMP );
 	r_reflexAvailable = ri.Cvar_Get( "r_reflexAvailable", "0", CVAR_TEMP );
 	r_rayTracing = ri.Cvar_Get( "r_rayTracing", "0", CVAR_ARCHIVE | CVAR_LATCH );
+	ri.Cvar_SetDescription( r_rayTracing, "0 raster, 1 software tracing (WIP; console-only), 2 hardware path tracing. Restart to apply." );
 	ri.Cvar_CheckRange( r_rayTracing, 0, 2, qtrue );
 	r_pathTracingScale = ri.Cvar_Get( "r_pathTracingScale", "1", CVAR_ARCHIVE | CVAR_LATCH );
 	ri.Cvar_CheckRange( r_pathTracingScale, 0.25f, 1.0f, qfalse );

@@ -1370,7 +1370,7 @@ qboolean vk_rt_record(VkCommandBuffer command_buffer,
 		vk_pt_software_scene(rt.nodes.buffer, rt.nodes.size, rt.links.buffer,
 			rt.links.size, rt.tli.buffer, rt.tli.size);
 		if (!rt.sw_logged) {
-			ri.Printf(PRINT_ALL, "Software BVH full lighting active: %u static + %u dynamic triangles; baked lightmaps excluded\n",
+			ri.Printf(PRINT_ALL, "Software BVH full lighting active: %u static + %u dynamic triangles; baked lightmaps excluded (WIP; console-only)\n",
 				world_tri, dyn_tri);
 			rt.sw_logged = qtrue;
 		}

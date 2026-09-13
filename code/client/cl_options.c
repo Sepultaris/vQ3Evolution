@@ -25,7 +25,7 @@ static const optionDef_t optionDefs[] = {
         "GL_LINEAR_MIPMAP_NEAREST|GL_LINEAR_MIPMAP_LINEAR","Bilinear|Trilinear",qfalse},
     {"r_ext_texture_filter_anisotropic","Anisotropic filtering","0",0,0,1,1,"0|1","Off|On",qtrue},
     {"r_ext_max_anisotropy","Anisotropy level","2",0,1,16,1,"1|2|4|8|16","1x|2x|4x|8x|16x",qtrue},
-    {"r_rayTracing","Lighting mode","0",1,0,2,1,"0|1|2","Raster|Software path tracing|Hardware path tracing",qtrue},
+    {"r_rayTracing","Lighting mode","0",1,0,2,1,"0|2","Raster|Path tracing",qtrue},
     {"r_pathTracingSamples","Samples per pixel","2",1,1,64,1,NULL,NULL,qfalse},
     {"r_pathTracingBounces","Maximum bounces","4",1,1,12,1,NULL,NULL,qfalse},
     {"r_pathTracingAdaptive","Adaptive sampling","0",1,0,1,1,"0|1","Off|On",qfalse},
@@ -37,13 +37,15 @@ static const optionDef_t optionDefs[] = {
         "Off|Quality|Balanced|Performance|Ultra Performance|DLAA",qtrue},
     {"r_dlssRayReconstruction","Ray reconstruction","1",2,0,1,1,"0|1","Off|On",qtrue},
     {"r_dlssFrameGeneration","Frame generation","0",2,0,1,1,"0|1","Off|On",qtrue},
-    {"r_dlssNeuralRendering","Neural rendering","0",2,0,3,1,"0|1|2|3","Off|Model 1|Model 2|Model 3",qtrue},
+    {"r_dlssFrameGenerationMultiplier","Frame generation multiplier","2",2,2,6,1,NULL,NULL,qtrue},
+    // Neural rendering (WIP) stays console-only and in the shared profile.
+    {"r_dlssNeuralRendering",NULL,"0",-1,0,3,1,"0|1|2|3",NULL,qtrue},
     {"r_reflex","NVIDIA Reflex","1",2,0,2,1,"0|1|2","Off|On|On + Boost",qtrue},
     {"r_dlssSharpness","DLSS sharpness","0",2,0,1,.05f,NULL,NULL,qfalse},
-    {"r_dlssNRIntensity","NR intensity","1",2,0,2,.05f,NULL,NULL,qfalse},
-    {"r_dlssNRLocalToneStrength","Local tone strength","1",2,0,2,.05f,NULL,NULL,qfalse},
-    {"r_dlssNRLocalStructureStrength","Local structure strength","1",2,0,2,.05f,NULL,NULL,qfalse},
-    {"r_dlssNRSkinStructureStrength","Skin structure strength","1",2,0,2,.05f,NULL,NULL,qfalse},
+    {"r_dlssNRIntensity",NULL,"1",-1,0,2,.05f,NULL,NULL,qfalse},
+    {"r_dlssNRLocalToneStrength",NULL,"1",-1,0,2,.05f,NULL,NULL,qfalse},
+    {"r_dlssNRLocalStructureStrength",NULL,"1",-1,0,2,.05f,NULL,NULL,qfalse},
+    {"r_dlssNRSkinStructureStrength",NULL,"1",-1,0,2,.05f,NULL,NULL,qfalse},
     {"ui_scale","Menu scale","1",3,.5f,1.5f,.05f,NULL,NULL,qfalse},
     {"cg_hudScale","HUD scale","1",3,.5f,1.5f,.05f,NULL,NULL,qfalse},
     {"cl_legacyUIScale","Legacy menu scaling","1",3,0,2,1,"1|0|2","Automatic|Disabled|Force engine scaling",qfalse},
@@ -107,6 +109,8 @@ static qboolean OptionValid(int i, const char *value) {
         number=strtod(value,&end);
         return !*end && isfinite(number) && number>=-2 && number<=100 && floor(number)==number;
     }
+    // Preserve console-only software tracing (WIP), without offering it in UI.
+    if (!strcmp(d->name,"r_rayTracing") && !strcmp(value,"1")) return qtrue;
     if (d->choices) return OptionIndex(d->choices,value)>=0;
     number=strtod(value,&end);
     return !*end && isfinite(number) && number>=d->minimum && number<=d->maximum &&
@@ -227,6 +231,14 @@ static qboolean OptionEnabled(int i) {
     if (optionDefs[i].page!=2) return qtrue;
     if (!vulkan) return qfalse;
     if (!strcmp(name,"r_dlssFrameGeneration")) return Cvar_VariableIntegerValue("r_dlssFrameGenerationAvailable")!=0;
+    if (!strcmp(name,"r_dlssFrameGenerationMultiplier")) {
+        int j;
+        if (!Cvar_VariableIntegerValue("r_dlssFrameGenerationAvailable") ||
+            Cvar_VariableIntegerValue("r_dlssFrameGenerationMaxMultiplier")<=2) return qfalse;
+        for (j=0;j<ARRAY_LEN(optionDefs);++j)
+            if (!strcmp(optionDefs[j].name,"r_dlssFrameGeneration")) return atoi(options.pending[j])!=0;
+        return qfalse;
+    }
     if (!strcmp(name,"r_reflex")) return Cvar_VariableIntegerValue("r_reflexAvailable")!=0;
     if (!strcmp(name,"r_dlssRayReconstruction")) return Cvar_VariableIntegerValue("r_dlssRayReconstructionAvailable")!=0;
     if (!strncmp(name,"r_dlssNR",8) || !strcmp(name,"r_dlssNeuralRendering"))
@@ -262,6 +274,8 @@ static void OptionChange(int i, int direction, float fraction) {
         if (fraction>=0) v=d->minimum+Com_Clamp(0,1,fraction)*(d->maximum-d->minimum);
         else v+=direction*d->step;
         v=Com_Clamp(d->minimum,d->maximum,roundf(v/d->step)*d->step);
+        if (!strcmp(d->name,"r_dlssFrameGenerationMultiplier"))
+            v=MIN(v,Com_Clamp(2,6,Cvar_VariableIntegerValue("r_dlssFrameGenerationMaxMultiplier")));
         Com_sprintf(options.pending[i],OPTIONS_VALUE,"%.4g",v);
     }
 }
@@ -383,11 +397,15 @@ void CL_OptionsDraw(void) {
             int index=OptionIndex(d->choices,options.pending[i]);
             if (!OptionToken(d->labels,index,label,sizeof(label)))
                 Com_sprintf(label,sizeof(label),"Current: %s",options.pending[i]);
+            if (!strcmp(d->name,"r_rayTracing") && !strcmp(options.pending[i],"1"))
+                Q_strncpyz(label,"Software (WIP; console)",sizeof(label));
             OptionsText(430,y+8,16,"<",muted); OptionsText(463,y+8,16,label,color); OptionsText(840,y+8,16,">",muted);
         } else {
             float fraction=Com_Clamp(0,1,(atof(options.pending[i])-d->minimum)/(d->maximum-d->minimum));
             OptionsRect(430,y+15,310,4,muted); OptionsRect(430+fraction*310-3,y+9,6,16,accent);
-            OptionsText(765,y+8,16,options.pending[i],color);
+            Com_sprintf(label,sizeof(label),"%s%s",options.pending[i],
+                !strcmp(d->name,"r_dlssFrameGenerationMultiplier") ? "x":"");
+            OptionsText(765,y+8,16,label,color);
         }
     }
     if (options.page==3) {

@@ -16,6 +16,8 @@ STATS = re.compile(
 
 
 def check(text, neural_rendering=False):
+    if 'NVIDIA focus source: Windows foreground process' not in text:
+        raise ValueError('inconclusive; log lacks native Windows foreground-focus evidence')
     if "VK_PRESENT_MODE_IMMEDIATE_KHR mode" not in text:
         raise ValueError("Vulkan Frame Generation did not select unsynchronized presentation")
     if "Could not find a window corresponding to this application" in text:
@@ -63,7 +65,8 @@ def check(text, neural_rendering=False):
 
 class CounterChecks(unittest.TestCase):
     def fixture(self, static=180, moving=380):
-        return ("VK_PRESENT_MODE_IMMEDIATE_KHR mode\n"
+        return ("NVIDIA focus source: Windows foreground process\n"
+                "VK_PRESENT_MODE_IMMEDIATE_KHR mode\n"
                 "NVIDIA DLSS Neural Rendering evaluation active\n"
                 "PT_FG_BASELINE\nFrame Generation: requested 1, viewport active 1, "
                 "queries 1000, presented 1000, peak 1, result 0, status 0x0\n"
@@ -117,6 +120,10 @@ class CounterChecks(unittest.TestCase):
     def test_old_logs_cannot_claim_full_interval_focus(self):
         with self.assertRaisesRegex(ValueError, "missing full-interval"):
             check(re.sub(r"NVIDIA FG query history:.*\n", "", self.fixture()))
+
+    def test_sdl_focus_alone_is_insufficient(self):
+        with self.assertRaisesRegex(ValueError, 'native Windows'):
+            check(self.fixture().replace('NVIDIA focus source: Windows foreground process', ''))
 
 
 if __name__ == "__main__":

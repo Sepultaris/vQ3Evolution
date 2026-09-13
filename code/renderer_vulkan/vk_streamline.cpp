@@ -77,6 +77,9 @@ struct StreamlineState {
 	bool frameGenerationEnabled = false;
 	bool frameGenerationActive = false;
 	bool frameGenerationResourcesAllocated = false;
+	uint32_t frameGenerationMaxMultiplier = 0;
+	uint32_t frameGenerationRequestedMultiplier = 2;
+	uint32_t frameGenerationMultiplier = 0;
 	sl::FrameToken *frameToken = nullptr;
 	sl::float4x4 previousCameraToWorld {};
 	sl::float4x4 previousProjection {};
@@ -172,6 +175,15 @@ void appendUnique(std::vector<const char *> &extensions, const char *name)
 	extensions.push_back(name);
 }
 
+bool gameWindowHasForegroundFocus()
+{
+	// DLSS-G checks Windows foreground ownership, not SDL's cached focus flag.
+	// A stale com_unfocused=0 must not make a background test appear valid.
+	DWORD foregroundProcess = 0;
+	GetWindowThreadProcessId(GetForegroundWindow(), &foregroundProcess);
+	return foregroundProcess == GetCurrentProcessId();
+}
+
 void queryFrameGenerationState()
 {
 	if (!g_sl.frameGenerationActive || !g_sl.dlssGGetState)
@@ -181,7 +193,7 @@ void queryFrameGenerationState()
 	const sl::Result result = g_sl.dlssGGetState(sl::ViewportHandle(0), state,
 		nullptr);
 	++g_sl.frameGenerationQueries;
-	g_sl.frameGenerationUnfocusedQueries += !!ri.Cvar_VariableIntegerValue("com_unfocused");
+	g_sl.frameGenerationUnfocusedQueries += !gameWindowHasForegroundFocus();
 	g_sl.frameGenerationMinimizedQueries += !!ri.Cvar_VariableIntegerValue("com_minimized");
 	g_sl.frameGenerationFailedQueries += result != sl::Result::eOk || state.status != sl::DLSSGStatus::eOk;
 	g_sl.frameGenerationResult = result;
@@ -257,6 +269,7 @@ void clearState(bool unload)
 		FreeLibrary(g_sl.module);
 	}
 	g_sl = StreamlineState{};
+	ri.Cvar_Set("r_dlssFrameGenerationMaxMultiplier", "0");
 }
 
 } // namespace
@@ -385,7 +398,8 @@ extern "C" qboolean vk_sl_initialize(void)
 		sl::kFeatureDLSS_G
 	};
 	sl::Preferences preferences;
-	preferences.logLevel = sl::LogLevel::eDefault;
+	preferences.logLevel = ri.Cvar_VariableIntegerValue("developer") > 1 ?
+		sl::LogLevel::eVerbose : sl::LogLevel::eDefault;
 	preferences.logMessageCallback = logMessage;
 	preferences.flags = sl::PreferenceFlags::eUseManualHooking |
 		sl::PreferenceFlags::eDisableCLStateTracking |
@@ -582,6 +596,17 @@ extern "C" void vk_sl_check_feature_support(VkInstance instance,
 	if (g_sl.frameGenerationSupported &&
 		g_sl.getFeatureFunction(sl::kFeatureDLSS_G, "slDLSSGGetState", function) == sl::Result::eOk)
 		g_sl.dlssGGetState = reinterpret_cast<PFun_slDLSSGGetState *>(function);
+	// Cache capability before idle FG hooks are unloaded. A failed query must
+	// not expose an unverified multiplier or leave FG enabled without interfaces.
+	if (g_sl.dlssGGetState && g_sl.dlssGSetOptions) {
+		sl::DLSSGState state;
+		if (g_sl.dlssGGetState(sl::ViewportHandle(0), state, nullptr) == sl::Result::eOk &&
+			state.numFramesToGenerateMax > 0)
+			g_sl.frameGenerationMaxMultiplier = std::min(5u, state.numFramesToGenerateMax) + 1;
+	}
+	g_sl.frameGenerationSupported = g_sl.frameGenerationSupported && g_sl.frameGenerationMaxMultiplier >= 2;
+	ri.Cvar_Set("r_dlssFrameGenerationMaxMultiplier", std::to_string(g_sl.frameGenerationMaxMultiplier).c_str());
+	ri.Cvar_Set("r_dlssFrameGenerationAvailable", g_sl.frameGenerationSupported ? "1" : "0");
 	function = nullptr;
 	if (g_sl.reflexSupported &&
 		g_sl.getFeatureFunction(sl::kFeatureReflex, "slReflexSetOptions", function) == sl::Result::eOk)
@@ -598,7 +623,7 @@ extern "C" void vk_sl_check_feature_support(VkInstance instance,
 	g_sl.status = g_sl.dlssSupported
 		? "DLSS Super Resolution is supported"
 		: "DLSS Super Resolution is unavailable on this GPU/driver";
-	ri.Printf(PRINT_ALL, "NVIDIA Streamline: DLSS SR %s, Neural Rendering %s, Frame Generation %s, Reflex %s\n",
+	ri.Printf(PRINT_ALL, "NVIDIA Streamline: DLSS SR %s, Neural Rendering (WIP) %s, Frame Generation %s, Reflex %s\n",
 		g_sl.dlssSupported ? "supported" : "unavailable",
 		neuralRenderingSupported ? "available" : "unavailable",
 		g_sl.frameGenerationSupported ? "supported" : "unavailable",
@@ -682,6 +707,9 @@ extern "C" void vk_sl_info_f(void)
 		g_sl.initialized, g_sl.dlssEnabled, vk_dlssnr_supported());
 	ri.Printf(PRINT_ALL, "NVIDIA idle FG hooks: unloaded %d, FG capability retained %d\n",
 		g_sl.frameGenerationHooksUnloaded, g_sl.frameGenerationSupported);
+	ri.Printf(PRINT_ALL, "Frame Generation multiplier: requested %ux, configured %ux, supported maximum %ux\n",
+		g_sl.frameGenerationRequestedMultiplier, g_sl.frameGenerationMultiplier, g_sl.frameGenerationMaxMultiplier);
+	ri.Printf(PRINT_ALL, "Neural Rendering is WIP; console control: r_dlssNeuralRendering (0-3)\n");
 	ri.Printf(PRINT_ALL, "Frame Generation: enabled %d, viewport active %d, queries %u, presented %u, peak %u, result %d, status 0x%x\n",
 		g_sl.frameGenerationEnabled, g_sl.frameGenerationActive, g_sl.frameGenerationQueries,
 		g_sl.frameGenerationPresented, g_sl.frameGenerationPeakPresented,
@@ -689,8 +717,9 @@ extern "C" void vk_sl_info_f(void)
 	ri.Printf(PRINT_ALL, "NVIDIA frame history: %u constant frames, %u resets\n",
 		g_sl.constantFrames, g_sl.constantResets);
 	ri.Printf(PRINT_ALL, "NVIDIA window state: focused %d, minimized %d\n",
-		!ri.Cvar_VariableIntegerValue("com_unfocused"),
+		gameWindowHasForegroundFocus(),
 		ri.Cvar_VariableIntegerValue("com_minimized"));
+	ri.Printf(PRINT_ALL, "NVIDIA focus source: Windows foreground process\n");
 	ri.Printf(PRINT_ALL, "NVIDIA FG query history: unfocused %u, minimized %u, failed %u\n",
 		g_sl.frameGenerationUnfocusedQueries, g_sl.frameGenerationMinimizedQueries,
 		g_sl.frameGenerationFailedQueries);
@@ -747,6 +776,13 @@ extern "C" qboolean vk_sl_configure(int dlssMode, int frameGeneration, int refle
 	frameGeneration = frameGeneration && g_sl.frameGenerationSupported &&
 		g_sl.frameGenerationPresentationSupported;
 	g_sl.frameGenerationEnabled = frameGeneration != 0;
+	g_sl.frameGenerationRequestedMultiplier = std::max(2, std::min(6,
+		ri.Cvar_VariableIntegerValue("r_dlssFrameGenerationMultiplier")));
+	g_sl.frameGenerationMultiplier = g_sl.frameGenerationSupported ?
+		std::min(g_sl.frameGenerationRequestedMultiplier, g_sl.frameGenerationMaxMultiplier) : 0;
+	if (frameGeneration && g_sl.frameGenerationMultiplier != g_sl.frameGenerationRequestedMultiplier)
+		ri.Printf(PRINT_WARNING, "Frame Generation: requested %ux exceeds GPU/runtime maximum; using %ux (saved request unchanged)\n",
+			g_sl.frameGenerationRequestedMultiplier, g_sl.frameGenerationMultiplier);
 	g_sl.frameGenerationActive = false;
 	g_sl.havePreviousCamera = false;
 
@@ -804,14 +840,19 @@ extern "C" qboolean vk_sl_configure(int dlssMode, int frameGeneration, int refle
 		sl::DLSSGOptions options;
 		/* Enable only after a gameplay frame has supplied valid constants/tags. */
 		options.mode = sl::DLSSGMode::eOff;
-		options.numFramesToGenerate = 1;
+		options.numFramesToGenerate = g_sl.frameGenerationMultiplier >= 2 ? g_sl.frameGenerationMultiplier - 1 : 1;
 		options.mvecDepthWidth = renderWidth ? *renderWidth : outputWidth;
 		options.mvecDepthHeight = renderHeight ? *renderHeight : outputHeight;
 		options.colorWidth = outputWidth;
 		options.colorHeight = outputHeight;
 		g_sl.dlssGOptions = options;
 		g_sl.frameGenerationStateLogged = false;
-		g_sl.dlssGSetOptions(sl::ViewportHandle(0), g_sl.dlssGOptions);
+		const sl::Result result = g_sl.dlssGSetOptions(sl::ViewportHandle(0), g_sl.dlssGOptions);
+		if (result != sl::Result::eOk) {
+			g_sl.frameGenerationEnabled = false;
+			frameGeneration = 0;
+			ri.Printf(PRINT_WARNING, "Frame Generation configuration rejected (result %d); disabled\n", (int)result);
+		}
 	}
 
 	ri.Printf(PRINT_ALL, "NVIDIA DLSS mode %d: render %ux%u -> output %ux%u, Frame Generation %s, Reflex %d\n",
@@ -1061,6 +1102,9 @@ extern "C" void vk_sl_set_frame_generation_active(qboolean active)
 		return;
 	g_sl.frameGenerationActive = enable;
 	g_sl.dlssGOptions.mode = enable ? sl::DLSSGMode::eOn : sl::DLSSGMode::eOff;
+	ri.Printf(PRINT_DEVELOPER, "NVIDIA FG options: mode %u, generated frames %u, flags 0x%x\n",
+		(unsigned)g_sl.dlssGOptions.mode, g_sl.dlssGOptions.numFramesToGenerate,
+		(unsigned)g_sl.dlssGOptions.flags);
 	g_sl.frameGenerationStateLogged = false;
 	const sl::Result result = g_sl.dlssGSetOptions(sl::ViewportHandle(0), g_sl.dlssGOptions);
 	if (result != sl::Result::eOk) {

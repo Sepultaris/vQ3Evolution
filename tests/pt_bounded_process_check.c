@@ -16,6 +16,12 @@ int wmain(int argc,wchar_t **argv)
     assert(bounded_process(exe,directory,L"--exit",2000,CREATE_NO_WINDOW)==23);
     assert(bounded_process(exe,directory,L"--exit",90000,CREATE_NO_WINDOW)==23);
     assert(bounded_process(exe,directory,L"--sleep",120001,CREATE_NO_WINDOW)==2);
+    SetEnvironmentVariableW(L"VQ3E_BOUNDED_FOREGROUND",L"1");
+    start=GetTickCount64();
+    assert(bounded_process(exe,directory,L"--sleep",150,CREATE_NO_WINDOW)==124);
+    assert(GetTickCount64()-start<2500); // No SDL window: focus wait shares the deadline.
+    assert(bounded_process(exe,directory,L"--exit",2000,CREATE_NO_WINDOW)==23);
+    SetEnvironmentVariableW(L"VQ3E_BOUNDED_FOREGROUND",NULL);
     assert(bounded_process(L"C:\\not-a-real-vq3e-test.exe",directory,L"",100,CREATE_NO_WINDOW)==4);
     puts("PASS: owned job timeout, normal exit, hard limit and failed launch; no game/GPU used");
     return 0;

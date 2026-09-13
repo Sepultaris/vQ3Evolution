@@ -44,8 +44,11 @@ the [documentation archive](README.md#historical-evidence).
   Mode 1 has local object history limits and an optional, default-off
   [NRD evaluation adapter](SOFTWARE_DENOISING.md); no distribution/license
   compatibility or game-performance improvement is claimed for that SDK path.
-  Experimental Neural Rendering is bypassed by RR; its runtime initializes
-  only when used. Frame Generation and Reflex have separate capability checks.
+  WIP Neural Rendering is console-only and bypassed by RR; its runtime initializes
+  only when used. WIP software tracing is also console-only; both menus offer
+  Raster and Path tracing without resetting hidden preferences. Frame Generation
+  retains Off/On and adds a 2x-6x multiplier slider capped to the SDK-reported
+  device/runtime limit. Frame Generation and Reflex have separate capability checks.
 - [Native night vision](NIGHT_VISION.md) with white/green phosphor, panoramic
   masking and grain, activated by supported Urban Terror overlays. Legacy mod
   overlays remain available when the replacement cannot run or is disabled.
@@ -59,7 +62,7 @@ the [documentation archive](README.md#historical-evidence).
 | --- | --- |
 | NVIDIA shutdown | A 2026-09-13 current-renderer stack confirms NGX waiting in `NvTelemetryAPI64!UninitializeTelemetry`. An approved `NvContainerLocalSystem` restart succeeded but raster/DLAA and RTX/RR still required their guards after completing the NV scenario. Underlying cause remains unresolved; see [NV repair evidence](archive/NIGHT_VISION_DEVELOPMENT.md#rasterdlaa-repair-and-remaining-lifecycle-fault-2026-09-13). |
 | Raster/DLAA post-processing | Black world repaired: sampled usage for sharpen output, initial bloom/NV layouts, combined depth/stencil transitions and raster motion-input layout corrected. Urban Terror on/off captures inspected; no raster Vulkan errors, but a stock NVIDIA motion-image format warning remains. RTX/RR also renders the NV sequence but still reports descriptor-lifetime validation errors. |
-| Frame Generation / restart | Activation has varied between lifetimes; historical FG-on validation and restart failures are not closed by later FG-off successes. Check `nvidia_info`, actual presented-frame counters and window focus. Do not count generated frames as rendered-FPS improvement. |
+| Frame Generation / restart | The 2026-09-13 attended 2x retest passed native Windows foreground checks and sustained exactly 2x in stationary/moving gameplay, exiting normally in 14.6 seconds with settings unchanged. The earlier 2x-4x failures used inaccurate SDL focus diagnostics; the SDK was correctly rejecting background interpolation. Earlier tests observed 5x/6x, but native-foreground verification of 3x-6x remains pending. NVIDIA presentation validation errors and older restart/shutdown issues remain open. See [multiplier evidence](DLSS.md#multiplier-verification-2026-09-13). Do not count generated frames as rendered-FPS improvement. |
 | Vulkan validation | Several scoped FG-off runs passed. The muzzle-control mode-1 run was clean; mode 2 reported descriptor-update/invalid-command-buffer errors also reproduced with the unchanged pre-control backup. The True Combat menu audit separately reproduced depth/stencil errors with the original mod. There is no whole-renderer validation-clean claim. |
 | RR image quality | Rough reflections use an approximate hit-distance guide; dedicated specular object motion and separate transparency guides remain incomplete. Fine texture motion, particles and complex glass/water paths need broader validation. |
 | Materials and effects | Native nested optics are bounded; arbitrary mod shader programs and moving/nonplanar portals are not guaranteed. Planar BSP camera portals have targeted Q3DM0 coverage. Unsupported cases remain visible development work, not presumed supported. |

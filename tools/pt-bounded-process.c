@@ -7,6 +7,18 @@
 #include <stdlib.h>
 #include <wchar.h>
 
+typedef struct { DWORD pid; HWND window; } ForegroundTarget;
+static BOOL CALLBACK find_game_window(HWND window, LPARAM data)
+{
+    ForegroundTarget *target = (ForegroundTarget *)data;
+    DWORD pid = 0; wchar_t name[64];
+    GetWindowThreadProcessId(window, &pid);
+    if (pid != target->pid || !IsWindowVisible(window)) return TRUE;
+    if (!GetClassNameW(window, name, 64) || wcscmp(name, L"SDL_app")) return TRUE;
+    target->window = window;
+    return FALSE;
+}
+
 static DWORD bounded_process(const wchar_t *exe, const wchar_t *directory,
     const wchar_t *arguments, DWORD timeout_ms, DWORD flags)
 {
@@ -65,7 +77,23 @@ static DWORD bounded_process(const wchar_t *exe, const wchar_t *directory,
         CloseHandle(process.hThread); CloseHandle(process.hProcess); CloseHandle(job); return 6;
     }
     CloseHandle(process.hThread);
-    DWORD result = WaitForSingleObject(process.hProcess,timeout_ms), code=0;
+    // Opt-in, one-shot focus request for an attended FG functional test. Never
+    // keep stealing focus if the user switches away, and never touch other apps.
+    const wchar_t *foreground = _wgetenv(L"VQ3E_BOUNDED_FOREGROUND");
+    if (foreground && !wcscmp(foreground,L"1")) {
+        ForegroundTarget target = { process.dwProcessId, NULL };
+        while (GetTickCount64()-start < timeout_ms && !target.window &&
+            WaitForSingleObject(process.hProcess,50)==WAIT_TIMEOUT) {
+            EnumWindows(find_game_window,(LPARAM)&target);
+        }
+        if (target.window) {
+            BOOL requested = SetForegroundWindow(target.window);
+            printf("VQ3E_BOUNDED foreground_requested=%d foreground_confirmed=%d\n",
+                requested,GetForegroundWindow()==target.window); fflush(stdout);
+        }
+    }
+    ULONGLONG elapsed = GetTickCount64()-start;
+    DWORD result = WaitForSingleObject(process.hProcess,elapsed < timeout_ms ? timeout_ms-(DWORD)elapsed : 0), code=0;
     if (result!=WAIT_OBJECT_0) {
         TerminateJobObject(job,124);
         WaitForSingleObject(process.hProcess,2000);

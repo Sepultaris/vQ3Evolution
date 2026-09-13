@@ -253,11 +253,6 @@ GRAPHICS OPTIONS MENU
 #define ID_DLSS			113
 #define ID_DLSSFG		114
 #define ID_REFLEX		115
-#define ID_DLSSNR		116
-#define ID_NRINTENSITY	117
-#define ID_NRLOCALTONE	118
-#define ID_NRLOCALSTRUCTURE 119
-#define ID_NRSKINSTRUCTURE 120
 #define ID_DLSSSHARPNESS 121
 #define ID_RAYTRACING	122
 #define ID_RTSHADOWSTRENGTH 123
@@ -290,6 +285,7 @@ typedef struct {
 	menulist_s  	geometry;
 	menulist_s  	filter;
 	menulist_s		raytracing;
+	int             raytracingMode; // Preserve console-only software mode on unrelated Apply.
 	menuslider_s	rtshadowstrength;
 	menuslider_s	ptexposure;
 	menutext_s	ptexposurereset;
@@ -298,11 +294,7 @@ typedef struct {
 	menulist_s		dlss;
 	menulist_s		dlssrr;
 	menuslider_s	dlsssharpness;
-	menulist_s		dlssnr;
-	menuslider_s	nrintensity;
-	menuslider_s	nrlocaltone;
-	menuslider_s	nrlocalstructure;
-	menuslider_s	nrskinstructure;
+	menuslider_s	fgmultiplier;
 	menulist_s		dlssfg;
 	menulist_s		reflex;
 	menutext_s		driverinfo;
@@ -324,7 +316,7 @@ typedef struct
 	int driver;
 	qboolean extensions;
 	int dlss;
-	int dlssnr;
+	int fgmultiplier;
 	int dlssfg;
 	int reflex;
 	int raytracing;
@@ -518,10 +510,10 @@ static void GraphicsOptions_GetInitialVideo( void )
 	s_ivo.texturebits = s_graphicsoptions.texturebits.curvalue;
 	s_ivo.dlss        = s_graphicsoptions.dlss.curvalue;
 	s_ivo.dlssrr      = s_graphicsoptions.dlssrr.curvalue;
-	s_ivo.dlssnr      = s_graphicsoptions.dlssnr.curvalue;
+	s_ivo.fgmultiplier = s_graphicsoptions.fgmultiplier.curvalue;
 	s_ivo.dlssfg      = s_graphicsoptions.dlssfg.curvalue;
 	s_ivo.reflex      = s_graphicsoptions.reflex.curvalue;
-	s_ivo.raytracing  = s_graphicsoptions.raytracing.curvalue;
+	s_ivo.raytracing  = s_graphicsoptions.raytracingMode;
 }
 
 /*
@@ -618,8 +610,8 @@ static float GraphicsOptions_ExposureStep( float exposure ) {
 
 static void GraphicsOptions_UpdateExposureItems( void ) {
 	int hidden = QMF_HIDDEN | QMF_INACTIVE;
-	qboolean pathTracing = s_graphicsoptions.raytracing.curvalue != 0;
-	/* The two RTX modes use the same row; no extra off-screen menu controls. */
+	qboolean pathTracing = s_graphicsoptions.raytracingMode != 0;
+	/* Hardware PT and console-only software tracing share the exposure row. */
 	if ( pathTracing ) {
 		s_graphicsoptions.rtshadowstrength.generic.flags |= hidden;
 		s_graphicsoptions.ptexposure.generic.flags &= ~hidden;
@@ -671,40 +663,22 @@ static void GraphicsOptions_UpdateMenuItems( void )
 
 	if ( Q_stricmp(UI_Cvar_VariableString("cl_renderer"), "vulkan") ||
 		!trap_Cvar_VariableValue("r_dlssRayReconstructionAvailable") ||
-		s_graphicsoptions.raytracing.curvalue != 2 || s_graphicsoptions.dlss.curvalue == 0 )
+		s_graphicsoptions.raytracingMode != 2 || s_graphicsoptions.dlss.curvalue == 0 )
 		s_graphicsoptions.dlssrr.generic.flags |= QMF_GRAYED;
 	else
 		s_graphicsoptions.dlssrr.generic.flags &= ~QMF_GRAYED;
-	if ( s_graphicsoptions.dlssrr.curvalue && !(s_graphicsoptions.dlssrr.generic.flags & QMF_GRAYED) )
-		s_graphicsoptions.dlssnr.generic.flags |= QMF_GRAYED;
-	else if ( !Q_stricmp(UI_Cvar_VariableString("cl_renderer"), "vulkan") &&
-		trap_Cvar_VariableValue("r_dlssNeuralRenderingAvailable") )
-		s_graphicsoptions.dlssnr.generic.flags &= ~QMF_GRAYED;
-	if ( (s_graphicsoptions.dlssnr.generic.flags & QMF_GRAYED) ||
-		s_graphicsoptions.dlssnr.curvalue == 0 )
-	{
-		s_graphicsoptions.nrintensity.generic.flags |= QMF_GRAYED;
-		s_graphicsoptions.nrlocaltone.generic.flags |= QMF_GRAYED;
-		s_graphicsoptions.nrlocalstructure.generic.flags |= QMF_GRAYED;
-		s_graphicsoptions.nrskinstructure.generic.flags |= QMF_GRAYED;
-	}
+	if ( (s_graphicsoptions.dlssfg.generic.flags & QMF_GRAYED) ||
+		!s_graphicsoptions.dlssfg.curvalue || trap_Cvar_VariableValue("r_dlssFrameGenerationMaxMultiplier") <= 2 )
+		s_graphicsoptions.fgmultiplier.generic.flags |= QMF_GRAYED;
 	else
-	{
-		s_graphicsoptions.nrintensity.generic.flags &= ~QMF_GRAYED;
-		s_graphicsoptions.nrlocaltone.generic.flags &= ~QMF_GRAYED;
-		s_graphicsoptions.nrlocalstructure.generic.flags &= ~QMF_GRAYED;
-		s_graphicsoptions.nrskinstructure.generic.flags &= ~QMF_GRAYED;
-	}
+		s_graphicsoptions.fgmultiplier.generic.flags &= ~QMF_GRAYED;
 	if ( (s_graphicsoptions.dlss.generic.flags & QMF_GRAYED) ||
 		s_graphicsoptions.dlss.curvalue == 0 )
 		s_graphicsoptions.dlsssharpness.generic.flags |= QMF_GRAYED;
 	else
 		s_graphicsoptions.dlsssharpness.generic.flags &= ~QMF_GRAYED;
-	if ( (s_graphicsoptions.raytracing.generic.flags & QMF_GRAYED) ||
-		s_graphicsoptions.raytracing.curvalue != 1 )
-		s_graphicsoptions.rtshadowstrength.generic.flags |= QMF_GRAYED;
-	else
-		s_graphicsoptions.rtshadowstrength.generic.flags &= ~QMF_GRAYED;
+	// Shadow-only lighting is no longer a selectable renderer.
+	s_graphicsoptions.rtshadowstrength.generic.flags |= QMF_GRAYED;
 	GraphicsOptions_UpdateExposureItems();
 
 	s_graphicsoptions.apply.generic.flags |= QMF_HIDDEN|QMF_INACTIVE;
@@ -751,13 +725,13 @@ static void GraphicsOptions_UpdateMenuItems( void )
 	}
 	if ( s_ivo.dlss != s_graphicsoptions.dlss.curvalue ||
 		s_ivo.dlssrr != s_graphicsoptions.dlssrr.curvalue ||
-		s_ivo.dlssnr != s_graphicsoptions.dlssnr.curvalue ||
+		s_ivo.fgmultiplier != s_graphicsoptions.fgmultiplier.curvalue ||
 		s_ivo.dlssfg != s_graphicsoptions.dlssfg.curvalue ||
 		s_ivo.reflex != s_graphicsoptions.reflex.curvalue )
 	{
 		s_graphicsoptions.apply.generic.flags &= ~(QMF_HIDDEN|QMF_INACTIVE);
 	}
-	if ( s_ivo.raytracing != s_graphicsoptions.raytracing.curvalue )
+	if ( s_ivo.raytracing != s_graphicsoptions.raytracingMode )
 		s_graphicsoptions.apply.generic.flags &= ~(QMF_HIDDEN|QMF_INACTIVE);
 
 	GraphicsOptions_CheckConfig();
@@ -836,14 +810,12 @@ static void GraphicsOptions_ApplyChanges( void *unused, int notification )
 	trap_Cvar_SetValue( "r_dlss", s_graphicsoptions.dlss.curvalue );
 	trap_Cvar_SetValue( "r_dlssRayReconstruction", s_graphicsoptions.dlssrr.curvalue );
 	trap_Cvar_SetValue( "r_dlssSharpness", s_graphicsoptions.dlsssharpness.curvalue * 0.1f );
-	trap_Cvar_SetValue( "r_dlssNeuralRendering", s_graphicsoptions.dlssnr.curvalue );
-	trap_Cvar_SetValue( "r_dlssNRIntensity", s_graphicsoptions.nrintensity.curvalue * 0.1f );
-	trap_Cvar_SetValue( "r_dlssNRLocalToneStrength", s_graphicsoptions.nrlocaltone.curvalue * 0.1f );
-	trap_Cvar_SetValue( "r_dlssNRLocalStructureStrength", s_graphicsoptions.nrlocalstructure.curvalue * 0.1f );
-	trap_Cvar_SetValue( "r_dlssNRSkinStructureStrength", s_graphicsoptions.nrskinstructure.curvalue * 0.1f );
+	// NR is console-only (WIP); do not overwrite its saved tuning here.
+	if ( s_ivo.fgmultiplier != s_graphicsoptions.fgmultiplier.curvalue )
+		trap_Cvar_SetValue( "r_dlssFrameGenerationMultiplier", s_graphicsoptions.fgmultiplier.curvalue );
 	trap_Cvar_SetValue( "r_dlssFrameGeneration", s_graphicsoptions.dlssfg.curvalue );
 	trap_Cvar_SetValue( "r_reflex", s_graphicsoptions.reflex.curvalue );
-	trap_Cvar_SetValue( "r_rayTracing", s_graphicsoptions.raytracing.curvalue );
+	trap_Cvar_SetValue( "r_rayTracing", s_graphicsoptions.raytracingMode );
 	trap_Cvar_SetValue( "r_rayTracingShadowStrength",
 		s_graphicsoptions.rtshadowstrength.curvalue * 0.1f );
 
@@ -1002,44 +974,18 @@ static void GraphicsOptions_ScaleEvent( void *ptr, int event ) {
 	}
 }
 
-/*
-================
-GraphicsOptions_NRTuningEvent
-================
-*/
-static void GraphicsOptions_NRTuningEvent( void *ptr, int event ) {
-	menuslider_s *slider;
-	const char *cvar;
-	int value;
+// Only interaction changes the mode; opening the menu preserves console mode 1.
+static void GraphicsOptions_RayTracingEvent( void *ptr, int event ) {
+	if ( event == QM_ACTIVATED )
+		s_graphicsoptions.raytracingMode = s_graphicsoptions.raytracing.curvalue ? 2 : 0;
+}
 
-	if ( event != QM_ACTIVATED ) {
-		return;
-	}
-
-	slider = (menuslider_s *)ptr;
-	value = (int)( slider->curvalue + 0.5f );
-	if ( value < 0 ) {
-		value = 0;
-	} else if ( value > 20 ) {
-		value = 20;
-	}
-	slider->curvalue = value;
-
-	switch ( slider->generic.id ) {
-	case ID_NRINTENSITY:
-		cvar = "r_dlssNRIntensity";
-		break;
-	case ID_NRLOCALTONE:
-		cvar = "r_dlssNRLocalToneStrength";
-		break;
-	case ID_NRLOCALSTRUCTURE:
-		cvar = "r_dlssNRLocalStructureStrength";
-		break;
-	default:
-		cvar = "r_dlssNRSkinStructureStrength";
-		break;
-	}
-	trap_Cvar_SetValue( cvar, value * 0.1f );
+static void GraphicsOptions_FGMultiplierEvent( void *ptr, int event ) {
+	int maximum;
+	menuslider_s *slider = (menuslider_s *)ptr;
+	if ( event != QM_ACTIVATED ) return;
+	maximum = (int)Com_Clamp( 2, 6, trap_Cvar_VariableValue("r_dlssFrameGenerationMaxMultiplier") );
+	slider->curvalue = Com_Clamp( 2, maximum, (int)(slider->curvalue + 0.5f) );
 }
 
 /*
@@ -1127,18 +1073,12 @@ void GraphicsOptions_MenuDraw (void)
 			va( "%i%%", (int)s_graphicsoptions.rtshadowstrength.curvalue * 10 ),
 			UI_LEFT|UI_SMALLFONT, text_color_normal );
 	}
-	UI_DrawString( 520, s_graphicsoptions.nrintensity.generic.y,
-		va( "%i%%", (int)s_graphicsoptions.nrintensity.curvalue * 10 ),
-		UI_LEFT|UI_SMALLFONT, text_color_normal );
-	UI_DrawString( 520, s_graphicsoptions.nrlocaltone.generic.y,
-		va( "%i%%", (int)s_graphicsoptions.nrlocaltone.curvalue * 10 ),
-		UI_LEFT|UI_SMALLFONT, text_color_normal );
-	UI_DrawString( 520, s_graphicsoptions.nrlocalstructure.generic.y,
-		va( "%i%%", (int)s_graphicsoptions.nrlocalstructure.curvalue * 10 ),
-		UI_LEFT|UI_SMALLFONT, text_color_normal );
-	UI_DrawString( 520, s_graphicsoptions.nrskinstructure.generic.y,
-		va( "%i%%", (int)s_graphicsoptions.nrskinstructure.curvalue * 10 ),
-		UI_LEFT|UI_SMALLFONT, text_color_normal );
+	UI_DrawString( 520, s_graphicsoptions.fgmultiplier.generic.y,
+		va( "%ix", (int)s_graphicsoptions.fgmultiplier.curvalue ),
+		UI_LEFT|UI_SMALLFONT, (s_graphicsoptions.fgmultiplier.generic.flags & QMF_GRAYED) ?
+		text_color_disabled : text_color_normal );
+	if ( s_graphicsoptions.raytracingMode == 1 )
+		UI_DrawString( 320, 440, "Software tracing (WIP) active via console", UI_CENTER|UI_SMALLFONT, text_color_normal );
 }
 
 /*
@@ -1277,22 +1217,15 @@ static void GraphicsOptions_SetMenuItems( void )
 		Com_Clamp( 0, 1, trap_Cvar_VariableValue( "r_dlssRayReconstruction" ) );
 	s_graphicsoptions.dlsssharpness.curvalue =
 		Com_Clamp( 0, 10, trap_Cvar_VariableValue( "r_dlssSharpness" ) * 10.0f );
-	s_graphicsoptions.dlssnr.curvalue =
-		Com_Clamp( 0, 3, trap_Cvar_VariableValue( "r_dlssNeuralRendering" ) );
-	s_graphicsoptions.nrintensity.curvalue =
-		Com_Clamp( 0, 20, trap_Cvar_VariableValue( "r_dlssNRIntensity" ) * 10.0f );
-	s_graphicsoptions.nrlocaltone.curvalue =
-		Com_Clamp( 0, 20, trap_Cvar_VariableValue( "r_dlssNRLocalToneStrength" ) * 10.0f );
-	s_graphicsoptions.nrlocalstructure.curvalue =
-		Com_Clamp( 0, 20, trap_Cvar_VariableValue( "r_dlssNRLocalStructureStrength" ) * 10.0f );
-	s_graphicsoptions.nrskinstructure.curvalue =
-		Com_Clamp( 0, 20, trap_Cvar_VariableValue( "r_dlssNRSkinStructureStrength" ) * 10.0f );
+	s_graphicsoptions.fgmultiplier.curvalue =
+		Com_Clamp( 2, 6, trap_Cvar_VariableValue( "r_dlssFrameGenerationMultiplier" ) );
 	s_graphicsoptions.dlssfg.curvalue =
 		Com_Clamp( 0, 1, trap_Cvar_VariableValue( "r_dlssFrameGeneration" ) );
 	s_graphicsoptions.reflex.curvalue =
 		Com_Clamp( 0, 2, trap_Cvar_VariableValue( "r_reflex" ) );
-	s_graphicsoptions.raytracing.curvalue =
+	s_graphicsoptions.raytracingMode =
 		Com_Clamp( 0, 2, trap_Cvar_VariableValue( "r_rayTracing" ) );
+	s_graphicsoptions.raytracing.curvalue = s_graphicsoptions.raytracingMode == 2 ? 1 : 0;
 	s_graphicsoptions.rtshadowstrength.curvalue =
 		Com_Clamp( 0, 10, trap_Cvar_VariableValue( "r_rayTracingShadowStrength" ) * 10.0f );
 	s_graphicsoptions.ptexposure.curvalue =
@@ -1370,9 +1303,7 @@ void GraphicsOptions_MenuInit( void )
 		"On",
 		NULL
 	};
-	/* Path tracing remains explicitly marked unfinished until reconstruction
-	 * and material/effect coverage meet the renderer's completion criteria. */
-	static const char *raytracing_names[] = { "Off", "Software tracing", "Path tracing (WIP)", NULL };
+	static const char *raytracing_names[] = { "Raster", "Path tracing", NULL };
 	static const char *dlss_names[] =
 	{
 		"Off",
@@ -1381,14 +1312,6 @@ void GraphicsOptions_MenuInit( void )
 		"Performance",
 		"Ultra Performance",
 		"DLAA",
-		NULL
-	};
-	static const char *dlssnr_names[] =
-	{
-		"Off",
-		"Model 1",
-		"Model 2",
-		"Model 3",
 		NULL
 	};
 	static const char *reflex_names[] =
@@ -1592,11 +1515,12 @@ void GraphicsOptions_MenuInit( void )
 	y += 12;
 
 	s_graphicsoptions.raytracing.generic.type      = MTYPE_SPINCONTROL;
-	s_graphicsoptions.raytracing.generic.name      = "NVIDIA RTX Mode:";
+	s_graphicsoptions.raytracing.generic.name      = "Lighting Mode:";
 	s_graphicsoptions.raytracing.generic.flags     = QMF_PULSEIFFOCUS|QMF_SMALLFONT;
 	s_graphicsoptions.raytracing.generic.x         = 400;
 	s_graphicsoptions.raytracing.generic.y         = y;
 	s_graphicsoptions.raytracing.generic.id        = ID_RAYTRACING;
+	s_graphicsoptions.raytracing.generic.callback  = GraphicsOptions_RayTracingEvent;
 	s_graphicsoptions.raytracing.itemnames         = raytracing_names;
 	y += 12;
 
@@ -1683,59 +1607,6 @@ void GraphicsOptions_MenuInit( void )
 	s_graphicsoptions.dlsssharpness.maxvalue         = 10;
 	y += BIGCHAR_HEIGHT+2;
 
-	s_graphicsoptions.dlssnr.generic.type    = MTYPE_SPINCONTROL;
-	s_graphicsoptions.dlssnr.generic.name    = "DLSS Neural Render:";
-	s_graphicsoptions.dlssnr.generic.flags   = QMF_PULSEIFFOCUS|QMF_SMALLFONT;
-	s_graphicsoptions.dlssnr.generic.x       = 400;
-	s_graphicsoptions.dlssnr.generic.y       = y;
-	s_graphicsoptions.dlssnr.generic.id      = ID_DLSSNR;
-	s_graphicsoptions.dlssnr.itemnames       = dlssnr_names;
-	y += 12;
-
-	s_graphicsoptions.nrintensity.generic.type     = MTYPE_SLIDER;
-	s_graphicsoptions.nrintensity.generic.name     = "NR Intensity:";
-	s_graphicsoptions.nrintensity.generic.flags    = QMF_PULSEIFFOCUS|QMF_SMALLFONT;
-	s_graphicsoptions.nrintensity.generic.x        = 400;
-	s_graphicsoptions.nrintensity.generic.y        = y;
-	s_graphicsoptions.nrintensity.generic.id       = ID_NRINTENSITY;
-	s_graphicsoptions.nrintensity.generic.callback = GraphicsOptions_NRTuningEvent;
-	s_graphicsoptions.nrintensity.minvalue         = 0;
-	s_graphicsoptions.nrintensity.maxvalue         = 20;
-	y += BIGCHAR_HEIGHT+2;
-
-	s_graphicsoptions.nrlocaltone.generic.type     = MTYPE_SLIDER;
-	s_graphicsoptions.nrlocaltone.generic.name     = "NR Local Tone:";
-	s_graphicsoptions.nrlocaltone.generic.flags    = QMF_PULSEIFFOCUS|QMF_SMALLFONT;
-	s_graphicsoptions.nrlocaltone.generic.x        = 400;
-	s_graphicsoptions.nrlocaltone.generic.y        = y;
-	s_graphicsoptions.nrlocaltone.generic.id       = ID_NRLOCALTONE;
-	s_graphicsoptions.nrlocaltone.generic.callback = GraphicsOptions_NRTuningEvent;
-	s_graphicsoptions.nrlocaltone.minvalue         = 0;
-	s_graphicsoptions.nrlocaltone.maxvalue         = 20;
-	y += BIGCHAR_HEIGHT+2;
-
-	s_graphicsoptions.nrlocalstructure.generic.type     = MTYPE_SLIDER;
-	s_graphicsoptions.nrlocalstructure.generic.name     = "NR Local Structure:";
-	s_graphicsoptions.nrlocalstructure.generic.flags    = QMF_PULSEIFFOCUS|QMF_SMALLFONT;
-	s_graphicsoptions.nrlocalstructure.generic.x        = 400;
-	s_graphicsoptions.nrlocalstructure.generic.y        = y;
-	s_graphicsoptions.nrlocalstructure.generic.id       = ID_NRLOCALSTRUCTURE;
-	s_graphicsoptions.nrlocalstructure.generic.callback = GraphicsOptions_NRTuningEvent;
-	s_graphicsoptions.nrlocalstructure.minvalue         = 0;
-	s_graphicsoptions.nrlocalstructure.maxvalue         = 20;
-	y += BIGCHAR_HEIGHT+2;
-
-	s_graphicsoptions.nrskinstructure.generic.type     = MTYPE_SLIDER;
-	s_graphicsoptions.nrskinstructure.generic.name     = "NR Skin Structure:";
-	s_graphicsoptions.nrskinstructure.generic.flags    = QMF_PULSEIFFOCUS|QMF_SMALLFONT;
-	s_graphicsoptions.nrskinstructure.generic.x        = 400;
-	s_graphicsoptions.nrskinstructure.generic.y        = y;
-	s_graphicsoptions.nrskinstructure.generic.id       = ID_NRSKINSTRUCTURE;
-	s_graphicsoptions.nrskinstructure.generic.callback = GraphicsOptions_NRTuningEvent;
-	s_graphicsoptions.nrskinstructure.minvalue         = 0;
-	s_graphicsoptions.nrskinstructure.maxvalue         = 20;
-	y += BIGCHAR_HEIGHT+2;
-
 	s_graphicsoptions.dlssfg.generic.type    = MTYPE_SPINCONTROL;
 	s_graphicsoptions.dlssfg.generic.name    = "DLSS Frame Gen:";
 	s_graphicsoptions.dlssfg.generic.flags   = QMF_PULSEIFFOCUS|QMF_SMALLFONT;
@@ -1743,6 +1614,16 @@ void GraphicsOptions_MenuInit( void )
 	s_graphicsoptions.dlssfg.generic.y       = y;
 	s_graphicsoptions.dlssfg.generic.id      = ID_DLSSFG;
 	s_graphicsoptions.dlssfg.itemnames       = enabled_names;
+
+	y += 13;
+	s_graphicsoptions.fgmultiplier.generic.type     = MTYPE_SLIDER;
+	s_graphicsoptions.fgmultiplier.generic.name     = "Frame Gen Multiplier:";
+	s_graphicsoptions.fgmultiplier.generic.flags    = QMF_PULSEIFFOCUS|QMF_SMALLFONT;
+	s_graphicsoptions.fgmultiplier.generic.x        = 400;
+	s_graphicsoptions.fgmultiplier.generic.y        = y;
+	s_graphicsoptions.fgmultiplier.generic.callback = GraphicsOptions_FGMultiplierEvent;
+	s_graphicsoptions.fgmultiplier.minvalue         = 2;
+	s_graphicsoptions.fgmultiplier.maxvalue         = 6;
 	y += 12;
 
 	s_graphicsoptions.reflex.generic.type    = MTYPE_SPINCONTROL;
@@ -1815,12 +1696,8 @@ void GraphicsOptions_MenuInit( void )
 	Menu_AddItem( &s_graphicsoptions.menu, ( void * ) &s_graphicsoptions.dlss );
 	Menu_AddItem( &s_graphicsoptions.menu, ( void * ) &s_graphicsoptions.dlssrr );
 	Menu_AddItem( &s_graphicsoptions.menu, ( void * ) &s_graphicsoptions.dlsssharpness );
-	Menu_AddItem( &s_graphicsoptions.menu, ( void * ) &s_graphicsoptions.dlssnr );
-	Menu_AddItem( &s_graphicsoptions.menu, ( void * ) &s_graphicsoptions.nrintensity );
-	Menu_AddItem( &s_graphicsoptions.menu, ( void * ) &s_graphicsoptions.nrlocaltone );
-	Menu_AddItem( &s_graphicsoptions.menu, ( void * ) &s_graphicsoptions.nrlocalstructure );
-	Menu_AddItem( &s_graphicsoptions.menu, ( void * ) &s_graphicsoptions.nrskinstructure );
 	Menu_AddItem( &s_graphicsoptions.menu, ( void * ) &s_graphicsoptions.dlssfg );
+	Menu_AddItem( &s_graphicsoptions.menu, ( void * ) &s_graphicsoptions.fgmultiplier );
 	Menu_AddItem( &s_graphicsoptions.menu, ( void * ) &s_graphicsoptions.reflex );
 	Menu_AddItem( &s_graphicsoptions.menu, ( void * ) &s_graphicsoptions.driverinfo );
 
@@ -1833,9 +1710,6 @@ void GraphicsOptions_MenuInit( void )
 	if ( Q_stricmp( UI_Cvar_VariableString( "cl_renderer" ), "vulkan" ) ||
 		!trap_Cvar_VariableValue( "r_dlssAvailable" ) )
 		s_graphicsoptions.dlss.generic.flags |= QMF_GRAYED;
-	if ( Q_stricmp( UI_Cvar_VariableString( "cl_renderer" ), "vulkan" ) ||
-		!trap_Cvar_VariableValue( "r_dlssNeuralRenderingAvailable" ) )
-		s_graphicsoptions.dlssnr.generic.flags |= QMF_GRAYED;
 	if ( Q_stricmp( UI_Cvar_VariableString( "cl_renderer" ), "vulkan" ) ||
 		!trap_Cvar_VariableValue( "r_dlssFrameGenerationAvailable" ) )
 		s_graphicsoptions.dlssfg.generic.flags |= QMF_GRAYED;

@@ -9,11 +9,16 @@ The four categories cover:
 
 - **Display:** renderer, fullscreen, custom/desktop resolution, VSync, texture
   filtering and anisotropy through 16x.
-- **Lighting:** raster/shadow/path-traced mode, samples, bounces, adaptive
-  sampling, exposure, ambient light, sun/local penumbra and shadow strength.
-- **NVIDIA:** DLSS/DLAA, ray reconstruction, frame generation, neural rendering,
-  Reflex, sharpening and the four neural-rendering strength controls.
+- **Lighting:** Raster or Path tracing, samples, bounces, adaptive
+  sampling, exposure, ambient light and sun/local penumbra.
+- **NVIDIA:** DLSS/DLAA, ray reconstruction, frame generation with a 2x-6x
+  multiplier slider (limited by GPU/runtime support), Reflex and sharpening.
 - **Interface:** menu and HUD scale plus legacy-module compatibility controls.
+
+Software tracing (`r_rayTracing 1`) and Neural Rendering
+(`r_dlssNeuralRendering 0`-`3`, plus its four strength controls) are WIP and
+console-only. They remain in the shared profile; unrelated menu changes do not
+reset them. The selectable Path tracing entry (`r_rayTracing 2`) has no WIP tag.
 
 The existing base-game Graphics Options menu and console variables still work.
 The engine panel is an additional entry point that does not depend on those

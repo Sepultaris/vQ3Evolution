@@ -114,6 +114,7 @@ extern cvar_t* r_dlssNRLocalToneStrength;
 extern cvar_t* r_dlssNRLocalStructureStrength;
 extern cvar_t* r_dlssNRSkinStructureStrength;
 extern cvar_t* r_dlssFrameGeneration;
+extern cvar_t* r_dlssFrameGenerationMultiplier;
 extern cvar_t* r_dlssFGIdleHooks;
 extern cvar_t* r_reflex;
 extern cvar_t* r_dlssAvailable;

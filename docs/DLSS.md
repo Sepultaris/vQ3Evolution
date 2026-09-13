@@ -7,8 +7,8 @@ provides:
 - DLSS Super Resolution: Quality, Balanced, Performance, and Ultra Performance
 - DLAA at native rendering resolution
 - DLSS Ray Reconstruction for the path tracer, including native-resolution DLAA
-- Experimental DLSS Neural Rendering: three runtime-provided model styles
-- Experimental DLSS Frame Generation (2x)
+- WIP, console-only DLSS Neural Rendering: three runtime-provided model styles
+- Experimental DLSS Frame Generation (2x-6x, subject to GPU/runtime capability)
 - NVIDIA Reflex: On and On + Boost
 
 The 3D scene is rendered to dedicated temporal color and depth images at the
@@ -122,29 +122,92 @@ The resulting executable is
 
 ## Settings
 
-The Graphics Options menu exposes the NVIDIA settings below. Mode changes apply with a
-renderer restart; the four Neural Rendering strength sliders update live, even
-while a map is loaded. Their console equivalents are:
+The Graphics Options and universal engine menus expose DLSS, RR, sharpening,
+Frame Generation and Reflex. Mode/multiplier changes apply with a renderer
+restart. Neural Rendering and its tuning are WIP and console-only; its four
+strength commands still update live. Opening or applying either menu preserves
+these hidden settings. Console controls:
 
 | Setting | Values |
 | --- | --- |
 | `r_dlss` | `0` Off, `1` Quality, `2` Balanced, `3` Performance, `4` Ultra Performance, `5` DLAA |
 | `r_dlssRayReconstruction` | `0` Native reconstruction, `1` NVIDIA RR (default); requires path tracing and a DLSS/DLAA mode; restart to apply |
 | `r_dlssSharpness` | Contrast-adaptive post-upscale sharpness, `0.0` to `1.0` (default `0.0`) |
-| `r_dlssNeuralRendering` | `0` Off, `1` Model 1, `2` Model 2, `3` Model 3 |
+| `r_dlssNeuralRendering` | WIP, console-only: `0` Off, `1` Model 1, `2` Model 2, `3` Model 3 |
 | `r_dlssNRIntensity` | Overall Neural Rendering strength, `0.0` to `2.0` (default `1.0`) |
 | `r_dlssNRLocalToneStrength` | Local tone strength, `0.0` to `2.0` (default `1.0`) |
 | `r_dlssNRLocalStructureStrength` | Local structure strength, `0.0` to `2.0` (default `1.0`) |
 | `r_dlssNRSkinStructureStrength` | Skin structure strength, `0.0` to `2.0` (default `1.0`) |
 | `r_dlssFrameGeneration` | `0` Off, `1` On |
+| `r_dlssFrameGenerationMultiplier` | Integer `2`-`6`, default `2`; total target frames per rendered frame; restart required |
+| `r_dlssFrameGenerationMaxMultiplier` | Read-only GPU/runtime limit; `0` means unavailable/unverified |
 | `r_reflex` | `0` Off, `1` On, `2` On + Boost |
 
 The controls are disabled automatically unless the Vulkan renderer and the
 corresponding GPU/driver feature are available.
 
+Frame Generation keeps its Off/On switch and has a separate 2x-6x slider.
+2x requests one generated frame per rendered frame; 6x requests five. The slider
+cannot select above the SDK-reported limit. A higher console/saved request is
+capped at runtime without rewriting the saved preference. `nvidia_info` reports
+requested, configured and maximum multipliers separately from presentation
+counters. This is not an increase in the game's rendered FPS, nor a guarantee
+that every present interpolates (focus, frame pacing and SDK status still matter).
+
+### Multiplier verification (2026-09-13)
+
+On the local RTX 5070 / Streamline 2.12.0 setup, the SDK reported a maximum of
+6x. Isolated Q3DM6 tests used windowed 1280x720 DLAA/RR, fixed two samples and
+NR off. These are functionality checks, not performance comparisons:
+
+| Requested | Static / moving presentations per rendered-frame query | Result |
+| --- | --- | --- |
+| 2x | 2 / 2 | Passed follow-up with native Windows foreground verification; 120 presentations per 60 rendered-frame queries in each interval |
+| 3x | 1 / 1 | Earlier test inconclusive: lacked reliable native foreground evidence; focused retest pending |
+| 4x | 1 / 1 | Earlier test inconclusive: lacked reliable native foreground evidence; focused retest pending |
+| 5x | 5 / 5 | Sustained requested multiplier in earlier test; native-foreground recheck pending |
+| 6x | 6 / 6 | Sustained requested multiplier on initial and final builds; native-foreground recheck pending |
+
+Correction: the initial range tests checked cached SDL focus, which was insufficient. A
+follow-up debugger capture of the 2x case found the SDK declining interpolation
+at its Windows foreground-ownership check, while another application actually
+owned the foreground. SDK mode/count were correct, its startup cooldown had
+expired, and the engine's old focus diagnostic incorrectly reported focused.
+The initial 2x-4x failures were therefore inconclusive background-test results,
+not proof that those multipliers were broken.
+
+The user-attended 2x follow-up (`run-6eb1fcc21b104256baab6a73337c3bfc` under
+the ignored `build-widescreen/mfg-menu-audit` directory) passed the current
+counter checker. Both stationary and moving intervals sustained exactly 2x;
+native unfocused/minimized/error counters stayed zero. The process exited
+normally after 14,593 ms and saved-settings hashes were unchanged. This run used
+the production NVIDIA runtime without the validation layer. No interpolation
+algorithm change was needed. Native-foreground verification of the other
+multipliers is still pending; this is not a full-range or validation-clean pass.
+
+`nvidia_info` and the whole-interval focus counters now use Windows foreground
+ownership. The checker rejects older logs without that evidence. This does not
+force background interpolation or change the path tracer. Completed tests
+exited normally in roughly 8-17 seconds and left saved settings unchanged.
+Vulkan validation also reported presentation/layout/semaphore errors; neither
+clean validation nor the older shutdown/restart issues are established fixed.
+
+Reproduce with `tests/run-mfg-menu-check.ps1 -Multiplier 6 -Foreground`; this owns an isolated
+home directory and an independent process guard (45 seconds by default).
+`-Foreground` requests focus once for this test's own game window; Windows may
+refuse it, in which case click the test window. It never repeatedly steals focus.
+Keep the game in the foreground throughout the measurement. `-Developer 2`
+adds verbose SDK logging, and `-RuntimeDirectory` allows an isolated SDK runtime
+comparison without replacing the installed runtime DLLs.
+`tests/menu_mfg_check.py --log <qconsole.log> --multiplier 6` checks real
+static/moving presentation ratios, focus, SDK errors and completed teardown,
+in addition to compiling the production request/cap policy and UI callbacks.
+The runner's process exit code alone is **not** an interpolation pass. The
+engine-options fixture covers hidden WIP persistence and slider staging/cancel.
+
 Ray Reconstruction is a separate denoiser from Neural Rendering. When RR is
 active, it replaces native temporal/spatial filtering and the normal DLSS color
-evaluation; Neural Rendering is bypassed and its menu controls are disabled.
+evaluation; console-only Neural Rendering is bypassed.
 The saved NR value is retained for use when RR is off. RR runs before exposure,
 tone mapping, sharpening and the HUD. Enable **DLAA** in NVIDIA DLSS to retain
 native rendering resolution; RR does not silently lower samples or bounces.

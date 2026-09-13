@@ -1,4 +1,8 @@
-# Software path tracing (mode 1)
+# Software path tracing (mode 1, WIP)
+
+Software tracing is console-only while performance work continues. Both settings
+menus offer only Raster (`0`) and Path tracing (`2`). Existing software-mode
+preferences survive unrelated menu changes and shared-profile loads.
 
 `r_rayTracing 1` shades the world with a software ray-tracing compute kernel.
 It replaces baked lightmap lighting, not just the shadow term. Triangle

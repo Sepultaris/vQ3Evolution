@@ -145,21 +145,20 @@ The original base-game Graphics Options menu also exposes these controls:
 | HUD Scale | `cg_hudScale` | 0.5-1.5 |
 | UI Scale | `ui_scale` | 0.5-1.5 |
 | Texture Filtering | `r_textureMode`, `r_ext_max_anisotropy` | Bilinear through anisotropic 16x |
-| NVIDIA RTX Mode (legacy menu label) | `r_rayTracing` | Off / Software tracing / hardware Path tracing (WIP) |
+| Lighting Mode | `r_rayTracing` | Raster (`0`) / Path tracing (`2`) |
 | RTX Exposure (software or hardware tracing) | `r_pathTracingExposure` | 0.0625x-16x, quarter-stop slider; Reset = 1x |
 | DLSS Mode | `r_dlss` | Off, Quality, Balanced, Performance, Ultra Performance, DLAA |
 | DLSS Ray Reconstruction | `r_dlssRayReconstruction` | Off/On; path tracing plus supported DLSS/DLAA required |
 | DLSS Sharpness | `r_dlssSharpness` | 0.0-1.0 |
-| Neural Rendering | `r_dlssNeuralRendering` | Off or model 1-3 |
-| NR Intensity | `r_dlssNRIntensity` | 0.0-2.0 |
-| NR Local Tone | `r_dlssNRLocalToneStrength` | 0.0-2.0 |
-| NR Local Structure | `r_dlssNRLocalStructureStrength` | 0.0-2.0 |
-| NR Skin Structure | `r_dlssNRSkinStructureStrength` | 0.0-2.0 |
 | Frame Generation | `r_dlssFrameGeneration` | Off/On |
+| Frame Gen Multiplier | `r_dlssFrameGenerationMultiplier` | Integer 2x-6x, limited by GPU/runtime support |
 | NVIDIA Reflex | `r_reflex` | Off, On, On + Boost |
 
-HUD, UI, sharpening, RTX exposure, and Neural Rendering strength controls
-update live. Lighting mode changes apply after a renderer restart.
+HUD, UI, sharpening and RTX exposure controls update live. Lighting mode and
+Frame Generation multiplier changes apply after a renderer restart. Software
+tracing (`r_rayTracing 1`) and Neural Rendering (`r_dlssNeuralRendering 0`-`3`,
+plus live strength commands) are WIP and console-only; both menus preserve their
+saved values when other settings change. See [NVIDIA controls](docs/DLSS.md#settings).
 See [docs/RTX.md](docs/RTX.md) for software tracing requirements,
 architecture, controls, and current scope.
 
