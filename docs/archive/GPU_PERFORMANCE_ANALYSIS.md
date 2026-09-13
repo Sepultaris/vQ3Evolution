@@ -4,8 +4,8 @@ Historical hardware analysis of the **pre-Ray-Reconstruction** renderer.
 The state/register follow-up below was subsequently implemented, and RR plus
 combined-radiance tracing changed the active workload. These counters and old
 "next target" statements must not be presented as a fresh profile of today's
-RR shader. See [current status](STATUS.md) and the
-[later RR measurements](archive/RAY_RECONSTRUCTION_DEVELOPMENT.md).
+RR shader. See [current status](../STATUS.md) and the
+[later RR measurements](RAY_RECONSTRUCTION_DEVELOPMENT.md).
 
 ## Implemented follow-up: workgroup register budget
 

@@ -185,6 +185,7 @@ void RE_AddPolyToScene( qhandle_t hShader, int numVerts, const polyVert_t *verts
 		poly = &backEndData->polys[r_numpolys];
 		poly->surfaceType = SF_POLY;
 		poly->hShader = hShader;
+		poly->renderfx = 0;
 		poly->numVerts = numVerts;
 		poly->verts = &backEndData->polyVerts[r_numpolyverts];
 		
@@ -237,6 +238,14 @@ RE_AddRefEntityToScene
 
 =====================
 */
+void RE_AddPolyTagged(qhandle_t hShader, int numVerts, const polyVert_t *verts, int renderfx) {
+    int first = r_numpolys;
+    if (numVerts < 3 || numVerts > max_polyverts || !verts) return;
+    RE_AddPolyToScene(hShader, numVerts, verts, 1);
+    // Only tag the newly accepted polygon; never modify an earlier one on overflow.
+    if (r_numpolys > first) backEndData->polys[first].renderfx = renderfx;
+}
+
 void RE_AddRefEntityToScene( const refEntity_t *ent ) {
 	if ( !tr.registered ) {
 		return;

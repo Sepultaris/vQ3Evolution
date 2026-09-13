@@ -24,7 +24,7 @@ def run(cc,sdk,pak):
             entities=Path(tmp)/'entities.txt'; entities.write_bytes(bsp[start:start+length]); args.append(str(entities))
         subprocess.run(args,check=True,timeout=10)
     native=(R/'vk_raytracing.c').read_text()
-    assert 'surface->shader->sort == SS_PORTAL && !world_surface_is_mirror(surface)' in native
+    assert 'surface->shader->sort == SS_PORTAL && !world_surface_portal_kind(surface)' in native
     assert native.count('world_surface_counts(')==3
     print('PASS: both geometry sizing and upload use entity-confirmed mirror inclusion')
 

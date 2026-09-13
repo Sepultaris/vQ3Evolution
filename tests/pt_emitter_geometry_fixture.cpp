@@ -9,6 +9,7 @@ using uint=uint32_t;
 struct vec2 { float x,y; };
 struct vec3 { float x,y,z; vec3(float v=0):x(v),y(v),z(v){} vec3(float x,float y,float z):x(x),y(y),z(z){} };
 struct vec4 { vec3 xyz; float w; };
+struct uvec2 { uint x,y; };
 struct uvec3 { uint x,y,z; };
 struct uvec4 { uint x,y,z,w; };
 static vec3 operator+(vec3 a,vec3 b){return {a.x+b.x,a.y+b.y,a.z+b.z};}
@@ -22,6 +23,10 @@ static vec3 positions[64*3];
 static uint triangleMaterials[64];
 static struct { struct {float x,y,z,w;} emission; } materials[64];
 static struct { vec4 a,b,c; } emitterGeometry[64];
+static struct { uvec2 zw; } emitterSearchControl;
+static struct { float x,y,z,w; } rocketEmission;
+static vec2 uintBitsToFloat(uvec2 bits){vec2 value;std::memcpy(&value,&bits,sizeof(value));return value;}
+#include "shaders/pt_muzzle_flash.glsl"
 static bool ptEmitterGeometry;
 static unsigned gathers;
 static uvec3 triangle(uint i){++gathers;return {i*3,i*3+1,i*3+2};}
@@ -48,9 +53,21 @@ int main(){
         for(unsigned v=0;v<3;++v) positions[primitive*3+v]={randomInput()*100000-50000,randomInput()*100000-50000,randomInput()*100000-50000};
         if(trial%17==0) positions[primitive*3+2]=positions[primitive*3+1]; // Degenerate.
         if(trial%19==0) for(unsigned v=0;v<3;++v) positions[primitive*3+v].z=0; // Planar world.
-        triangleMaterials[primitive]=primitive|0x10000000u;
+        bool flash=trial%6==1 || trial%6==5,rocket=trial%6==2;
+        bool explosion=trial%6==3,lightning=trial%6>=4;
+        triangleMaterials[primitive]=primitive|0x10000000u|(flash ? 0x04000000u:0u)|(rocket ? 0x02000000u:0u)|
+            (explosion ? 0x01000000u:0u)|(lightning ? 0x00800000u:0u);
+        const float scales[]={0,0.25f,1,2,8};
+        vec2 control={scales[trial%5],scales[(trial/5)%5]};
+        std::memcpy(&emitterSearchControl.zw,&control,sizeof(control));
+        rocketEmission={scales[(trial/7)%5],scales[(trial/11)%5],scales[(trial/13)%5],scales[(trial/17)%5]};
+        assert(weaponEmissionScale(primitive,true)==(flash ? control.x:(rocket ? rocketEmission.x:1)));
+        float expectedScale=(flash ? control.y:(rocket ? rocketEmission.y:1)) *
+            (explosion ? rocketEmission.z:1)*(lightning ? rocketEmission.w:1);
+        assert(weaponEmissionScale(primitive,false)==expectedScale);
         float power=trial%13==0 ? 0:randomInput()*100000;
         materials[primitive].emission.y=power;
+        power*=expectedScale;
         pt_emitter_geometry_t packed;
         cache_emitter_geometry(&packed,&positions[primitive*3].x,&positions[primitive*3+1].x,&positions[primitive*3+2].x,power);
         std::memcpy(&emitterGeometry[slot],&packed,48);
@@ -73,5 +90,5 @@ int main(){
     }
     for(unsigned kind=0;kind<3;++kind) std::printf("kind=%u differences=%u max_absolute=%.9g max_relative=%.9g\n",kind,differences[kind],worstAbsolute[kind],worstRelative[kind]);
     assert(differences[0]==0 && differences[1]==0 && differences[2]==0);
-    puts("PASS: 300000 animated/planar/degenerate emitter cases; bit-identical targets, normals, power and PDFs; dependent geometry gathers 4 -> 0");
+    puts("PASS: 300000 emitter cases including rocket, muzzle, explosion and lightning scales; visible effects independent; bit-identical cached/uncached targets, normals, power and PDFs");
 }

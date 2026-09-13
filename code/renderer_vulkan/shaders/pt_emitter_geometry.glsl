@@ -11,7 +11,7 @@ void sampledEmitterGeometry(uint primitive,uint emitter,float root,vec2 bary,
     } else {
         uvec3 t=triangle(primitive);
         a=position(t.x); b=position(t.y); c=position(t.z);
-        power=materials[triangleMaterials[primitive]&0xffffu].emission.y;
+        power=emissionPower(primitive);
     }
     target=a*(1-root)+b*bary.x+c*bary.y;
     vec3 crossEdges=cross(b-a,c-a);

@@ -133,6 +133,13 @@ static void create_image(temporal_image_t *target, uint32_t width, uint32_t heig
 	target->format = format;
 	target->usage = usage;
 	target->aspect = aspect;
+	/* Views sample depth only, but layout transitions must include stencil
+	 * too on combined formats: separateDepthStencilLayouts is not enabled. */
+	if ((aspect & VK_IMAGE_ASPECT_DEPTH_BIT) &&
+		(format == VK_FORMAT_D16_UNORM_S8_UINT ||
+		 format == VK_FORMAT_D24_UNORM_S8_UINT ||
+		 format == VK_FORMAT_D32_SFLOAT_S8_UINT))
+		target->aspect |= VK_IMAGE_ASPECT_STENCIL_BIT;
 	target->layout = VK_IMAGE_LAYOUT_UNDEFINED;
 }
 
@@ -259,6 +266,19 @@ static void initialize_layouts(void)
 		VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT,
 		VK_IMAGE_LAYOUT_GENERAL);
 	temporal.motion_vectors.layout = VK_IMAGE_LAYOUT_GENERAL;
+	{
+		/* Bloom/NV are shared by raster, software tracing and RTX. Every
+		 * storage target must really enter GENERAL before its first use. */
+		temporal_image_t *outputs[] = { &temporal.bloom_half, &temporal.bloom_q_a,
+			&temporal.bloom_q_b, &temporal.bloomed_color, &temporal.nv_color };
+		for (unsigned i = 0; i < ARRAY_LEN(outputs); ++i) {
+			if (!outputs[i]->image) continue;
+			record_image_layout_transition(command_buffer, outputs[i]->image,
+				VK_IMAGE_ASPECT_COLOR_BIT, 0, VK_IMAGE_LAYOUT_UNDEFINED,
+				VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT, VK_IMAGE_LAYOUT_GENERAL);
+			outputs[i]->layout = VK_IMAGE_LAYOUT_GENERAL;
+		}
+	}
 
 	/* Feature creation may compile NVIDIA pipelines on a cold driver cache.
 	 * Record that work during renderer initialization so the first gameplay
@@ -351,7 +371,8 @@ void vk_temporal_initialize(uint32_t render_width, uint32_t render_height,
 	create_image(&temporal.output_color, output_width, output_height,
 		vk.surface_format.format, color_usage, VK_IMAGE_ASPECT_COLOR_BIT);
 	if (r_dlss->integer && vk_sl_dlss_supported()) {
-		const VkImageUsageFlags sharpen_usage = VK_IMAGE_USAGE_STORAGE_BIT |
+		/* The sharpened image also feeds the sampled bloom/NV inputs. */
+		const VkImageUsageFlags sharpen_usage = VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT |
 			VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
 		create_image(&temporal.sharpened_color, output_width, output_height,
 			VK_FORMAT_R8G8B8A8_UNORM, sharpen_usage,
@@ -391,7 +412,7 @@ void vk_temporal_initialize(uint32_t render_width, uint32_t render_height,
 	}
 	create_image(&temporal.motion_vectors, render_width, render_height,
 		VK_FORMAT_R32G32_SFLOAT, motion_usage, VK_IMAGE_ASPECT_COLOR_BIT);
-    if (r_rayTracing->integer == 2 && temporal.raytraced_color.image)
+    if (r_rayTracing->integer && temporal.raytraced_color.image)
         create_image(&temporal.path_depth, render_width, render_height,
             VK_FORMAT_R32_SFLOAT, motion_usage, VK_IMAGE_ASPECT_COLOR_BIT);
 	initialize_layouts();
@@ -459,6 +480,7 @@ void vk_temporal_shutdown(void)
 }
 
 qboolean vk_temporal_active(void) { return temporal.active; }
+qboolean vk_temporal_nv_available(void) { return temporal.active && temporal.nv_ready; }
 qboolean vk_temporal_scene_pass_active(void) { return temporal.scene_pass; }
 
 /* A different depth attachment format requires compatible graphics pipelines. */
@@ -634,6 +656,18 @@ void vk_temporal_begin_ui(void)
 		resources.jitter_x = temporal.jitter_x;
 		resources.jitter_y = temporal.jitter_y;
 		resources.reset = temporal.reset;
+		if (!raytraced) {
+			/* Streamline's camera-motion shader samples our zero/object-motion
+			 * input before its NGX transitions. Its sampled binding expects
+			 * SHADER_READ_ONLY_OPTIMAL; GENERAL is not interchangeable. */
+			record_image_layout_transition(vk.command_buffer, temporal.motion_vectors.image,
+				VK_IMAGE_ASPECT_COLOR_BIT,
+				VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT,
+				temporal.motion_vectors.layout, VK_ACCESS_SHADER_READ_BIT,
+				VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+			temporal.motion_vectors.layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+			resources.motion_vectors_layout = temporal.motion_vectors.layout;
+		}
 
 		if (temporal.neural_color.image && vk_sl_neural_rendering_supported()) {
 			if (!raytraced) {
@@ -713,7 +747,7 @@ void vk_temporal_begin_ui(void)
 			VK_IMAGE_LAYOUT_GENERAL);
 		temporal.output_color.layout = VK_IMAGE_LAYOUT_GENERAL;
 		resources.color_output_layout = temporal.output_color.layout;
-        if (raytraced && r_rayTracing->integer == 2) {
+        if (raytraced && r_rayTracing->integer) {
             record_image_layout_transition(vk.command_buffer, temporal.path_depth.image,
                 VK_IMAGE_ASPECT_COLOR_BIT, VK_ACCESS_SHADER_WRITE_BIT, VK_IMAGE_LAYOUT_GENERAL,
                 VK_ACCESS_SHADER_READ_BIT, VK_IMAGE_LAYOUT_GENERAL);
@@ -796,9 +830,9 @@ void vk_temporal_begin_ui(void)
 
 	/* Night-vision post-pass. Reads the converged frame (bloomed when bloom
 	 * ran, otherwise the source) and becomes the blit source while active.
-	 * The legacy overlay shaders are auto-detected in the backend and set
+	 * The legacy overlays are detected during front-end submission and set
 	 * the R_NvOverlayActive() flag; r_nvOverride forces the effect on. */
-	if (temporal.nv_ready && source_at_output &&
+	if (temporal.nv_ready &&
 		(r_nvOverride->integer ||
 		 (r_nvNightVision->integer && R_NvOverlayActive()))) {
 		temporal_image_t *nv_input = bloomed ? &temporal.bloomed_color : source;
@@ -810,6 +844,10 @@ void vk_temporal_begin_ui(void)
 			VK_IMAGE_ASPECT_COLOR_BIT, nv_input_access, nv_input->layout,
 			VK_ACCESS_SHADER_READ_BIT, VK_IMAGE_LAYOUT_GENERAL);
 		nv_input->layout = VK_IMAGE_LAYOUT_GENERAL;
+		record_image_layout_transition(vk.command_buffer, temporal.nv_color.image,
+			VK_IMAGE_ASPECT_COLOR_BIT,
+			VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_TRANSFER_READ_BIT,
+			temporal.nv_color.layout, VK_ACCESS_SHADER_WRITE_BIT, VK_IMAGE_LAYOUT_GENERAL);
 		temporal.nv_color.layout = VK_IMAGE_LAYOUT_GENERAL;
 		qboolean nv_applied = vk_nv_record(vk.command_buffer, nv_input->view,
 			temporal.output_width, temporal.output_height,
@@ -834,12 +872,15 @@ void vk_temporal_begin_ui(void)
 		vk.swapchain_images_array[vk.idx_swapchain_image], VK_IMAGE_ASPECT_COLOR_BIT,
 		0, VK_IMAGE_LAYOUT_UNDEFINED, VK_ACCESS_TRANSFER_WRITE_BIT,
 		VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+	if(r_rayTracing->integer==1) vk_pt_profile(vk.command_buffer,11);
 	VkImageBlit blit;
 	memset(&blit, 0, sizeof(blit));
 	blit.srcSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
 	blit.srcSubresource.layerCount = 1;
-	blit.srcOffsets[1].x = evaluated ? (int32_t)temporal.output_width : (int32_t)temporal.render_width;
-	blit.srcOffsets[1].y = evaluated ? (int32_t)temporal.output_height : (int32_t)temporal.render_height;
+	const qboolean blit_at_output = evaluated || rr_evaluated ||
+		blit_source == &temporal.nv_color || blit_source == &temporal.bloomed_color;
+	blit.srcOffsets[1].x = blit_at_output ? (int32_t)temporal.output_width : (int32_t)temporal.render_width;
+	blit.srcOffsets[1].y = blit_at_output ? (int32_t)temporal.output_height : (int32_t)temporal.render_height;
 	blit.srcOffsets[1].z = 1;
 	blit.dstSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
 	blit.dstSubresource.layerCount = 1;
@@ -849,6 +890,7 @@ void vk_temporal_begin_ui(void)
 	qvkCmdBlitImage(vk.command_buffer, blit_source->image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
 		vk.swapchain_images_array[vk.idx_swapchain_image], VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
 		1, &blit, VK_FILTER_LINEAR);
+	if(r_rayTracing->integer==1) vk_pt_profile(vk.command_buffer,12);
 	record_image_layout_transition(vk.command_buffer, blit_source->image, VK_IMAGE_ASPECT_COLOR_BIT,
 		VK_ACCESS_TRANSFER_READ_BIT, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
 		VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT, blit_source->layout);
@@ -858,10 +900,14 @@ void vk_temporal_begin_ui(void)
 		VK_ACCESS_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
 		VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
 
-	if (frame_generation_valid)
-		vk_sl_tag_hudless(vk.command_buffer, source->image, source->view, source->format,
-			source->layout, evaluated ? temporal.output_width : temporal.render_width,
-			evaluated ? temporal.output_height : temporal.render_height, source->usage);
+	if (frame_generation_valid) {
+		/* Generated frames must see the same goggles image as real frames. */
+		const qboolean nv_output = blit_source == &temporal.nv_color;
+		temporal_image_t *fg_source = nv_output ? blit_source : source;
+		vk_sl_tag_hudless(vk.command_buffer, fg_source->image, fg_source->view, fg_source->format,
+			fg_source->layout, (nv_output || evaluated) ? temporal.output_width : temporal.render_width,
+			(nv_output || evaluated) ? temporal.output_height : temporal.render_height, fg_source->usage);
+	}
 	begin_pass(temporal.ui_render_pass, vk.framebuffers[vk.idx_swapchain_image],
 		temporal.output_width, temporal.output_height);
 	temporal.ui_pass = qtrue;
@@ -878,8 +924,8 @@ void vk_temporal_end_frame(void)
 		qvkCmdEndRenderPass(vk.command_buffer);
 		temporal.ui_pass = qfalse;
 	}
-	/* The NV overlay flag is backend state set per drawsurf; it belongs to a
-	 * single frame, so clear it once the frame's commands are exhausted. */
+	/* Submission detection belongs to one frame; clear it once that frame's
+	 * commands are exhausted. */
 	R_NvOverlayClear();
 #endif
 }

@@ -1,7 +1,9 @@
 /* Compile-only driver diagnostic. No window, swapchain, resource allocations,
  * command pools, command buffers, queue submissions or rendered workload.
  * The descriptor layout and feature subset match the native PT integrator.
- * Usage: pt_compile_stats.exe [--packed-emitters] [--rows=8|64|128] shader.cspv [more shader.cspv ...] */
+ * Usage: pt_compile_stats.exe [--rr|--staged] [--packed-emitters] [--rows=8|64|128] shader.cspv [...]
+ * --rr uses the production two-set RR layout and disables statistics capture
+ * to check ordinary driver compilation without a game window. */
 #include <vulkan/vulkan.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -29,6 +31,8 @@ static int vk_rt_pipeline_statistics_supported(void) { return 1; }
 
 int main(int argc, char **argv) {
     int firstFile=1;
+    int rr=0;
+    if(argc>1 && !strcmp(argv[1],"--rr")) { rr=1; stats_cvar.integer=0; ++firstFile; }
     VkBool32 packed=VK_FALSE;
     int staged=0;
     if(argc>1 && !strcmp(argv[1],"--staged")) { staged=1; ++firstFile; }
@@ -83,8 +87,8 @@ int main(int argc, char **argv) {
         .queueCreateInfoCount=1, .pQueueCreateInfos=&queue_info,
         .enabledExtensionCount=4, .ppEnabledExtensionNames=extensions };
     CHECK(vkCreateDevice(physical, &device_info, NULL, &vk.device));
-    VkDescriptorSetLayoutBinding bindings[48] = {0};
-    for (uint32_t i=0; i<48; ++i) {
+    VkDescriptorSetLayoutBinding bindings[50] = {0};
+    for (uint32_t i=0; i<50; ++i) {
         bindings[i].binding=i; bindings[i].descriptorCount=i==9 ? 512:1;
         bindings[i].stageFlags=VK_SHADER_STAGE_COMPUTE_BIT;
         bindings[i].descriptorType=VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
@@ -93,10 +97,19 @@ int main(int argc, char **argv) {
     bindings[1].descriptorType=bindings[2].descriptorType=bindings[9].descriptorType=VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
     bindings[3].descriptorType=bindings[24].descriptorType=bindings[25].descriptorType=VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
     VkDescriptorSetLayoutCreateInfo set_info = { .sType=VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
-        .bindingCount=48, .pBindings=bindings };
+        .bindingCount=50, .pBindings=bindings };
     VkDescriptorSetLayout set;
     CHECK(vkCreateDescriptorSetLayout(vk.device, &set_info, NULL, &set));
     VkDescriptorSetLayout sets[2]={set,VK_NULL_HANDLE};
+    if(rr) {
+        VkDescriptorSetLayoutBinding rr_bindings[15]={0};
+        for(int i=0;i<15;++i) rr_bindings[i]=(VkDescriptorSetLayoutBinding){
+            i,i<7 ? VK_DESCRIPTOR_TYPE_STORAGE_IMAGE:VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+            1,VK_SHADER_STAGE_COMPUTE_BIT,NULL };
+        VkDescriptorSetLayoutCreateInfo rr_info={ .sType=VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
+            .bindingCount=15, .pBindings=rr_bindings };
+        CHECK(vkCreateDescriptorSetLayout(vk.device,&rr_info,NULL,&sets[1]));
+    }
     if(staged) {
         VkDescriptorSetLayoutBinding state_bindings[2] = {
             {0,VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,1,VK_SHADER_STAGE_COMPUTE_BIT,NULL},
@@ -107,7 +120,7 @@ int main(int argc, char **argv) {
     }
     VkPushConstantRange push = { VK_SHADER_STAGE_COMPUTE_BIT, 0, 128 };
     VkPipelineLayoutCreateInfo layout_info = { .sType=VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
-        .setLayoutCount=staged ? 2:1, .pSetLayouts=sets, .pushConstantRangeCount=1, .pPushConstantRanges=&push };
+        .setLayoutCount=(staged || rr) ? 2:1, .pSetLayouts=sets, .pushConstantRangeCount=1, .pPushConstantRanges=&push };
     VkPipelineLayout layout;
     CHECK(vkCreatePipelineLayout(vk.device, &layout_info, NULL, &layout));
     for (int file=firstFile; file<argc; ++file) {

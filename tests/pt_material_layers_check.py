@@ -25,6 +25,10 @@ def run(cc, cxx, sdk):
     alpha = integrator[integrator.index("bool passesAlpha("):integrator.index('#include "pt_glow_coverage.glsl"')]
     alpha += (RENDERER / "shaders/pt_glow_coverage.glsl").read_text()
     shell = (RENDERER / "shaders/pt_reflective_shell.glsl").read_text().split("vec4 reflectiveShellAppearance(")[0]
+    portal = (RENDERER / "shaders/pt_portal.glsl").read_text().split("bool portalRay(")[0]
+    portal = portal.replace("source.rgb=linearColor(source.rgb);", "source=vec4(linearColor(source.rgb),source.a);")
+    portal = portal.replace("display.r", "display.x").replace("display.g", "display.y").replace("display.b", "display.z")
+    tone_map = integrator[integrator.index("vec3 toneMap("):integrator.index("vec3 primaryDirection(")]
     vertex_type = source[source.index("typedef struct { float normal["):source.index("typedef struct {\n    uint32_t key[")]
     vertex_upload = source[source.index("void vk_pt_world_vertex("):source.index("void vk_pt_world_surface(")]
     with tempfile.TemporaryDirectory(prefix="pt-material-layers-") as folder:
@@ -35,6 +39,8 @@ def run(cc, cxx, sdk):
         (folder / "pt_material_emission.inc").write_text(emission.replace(".rgb", ".rgb()"))
         (folder / "pt_glow_coverage.inc").write_text(alpha)
         (folder / "pt_reflective_shell.inc").write_text(shell.replace(".rgb", ".rgb()").replace("out vec3 ", "vec3 &"))
+        (folder / "pt_portal_coating.inc").write_text(portal.replace(".rgb", ".rgb()").replace("out vec3 ", "vec3 &"))
+        (folder / "pt_portal_tonemap.inc").write_text(tone_map)
         (folder / "pt_world_vertex_type.inc").write_text(vertex_type)
         (folder / "pt_world_vertex_upload.inc").write_text(vertex_upload)
         for compiler, fixture, name, includes in (

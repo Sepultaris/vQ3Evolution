@@ -19,7 +19,7 @@ network protocols.
 - NVIDIA DLSS Super Resolution and DLAA
 - Experimental DLSS Frame Generation integration and NVIDIA Reflex
 - Experimental DLSS Neural Rendering with live strength controls
-- NVIDIA RTX ray-query shadows cast by live world and model geometry
+- Software path-traced lighting using Vulkan compute on compatible GPUs without hardware RT
 - Experimental native path-traced world lighting (unfinished; see [current status](docs/STATUS.md))
 - DLSS Ray Reconstruction, including native-resolution DLAA; requested by default
   when supported path tracing and DLSS/DLAA are selected
@@ -27,6 +27,9 @@ network protocols.
 - Native surface-aware denoising with camera/object history and path-hit DLSS inputs
 - Local lighting-change reconstruction, planar-mirror target motion, and native blue-noise/spatial light sampling
 - Animated path materials, layered additive emitters, cutouts and thin transparency (experimental)
+- Native BSP camera portals, including Q3DM0's animated aperture
+- Separate console controls for weapon-effect brightness and emitted light
+- Native Urban Terror night vision with white/green phosphor and panoramic optics
 - Native Vulkan post-DLSS contrast-adaptive sharpening
 - Bilinear, trilinear, and 2x/4x/8x/16x anisotropic texture filtering
 - Native source-built game, cgame, and UI modules
@@ -59,7 +62,7 @@ are included in the normal build; the original game/update assets remain
 separate from engine and renderer changes.
 
 Game data, local configurations, screenshots, demos, logs, downloaded SDKs, and
-compiled build trees are excluded from Git.
+compiled build trees and compiled/extracted QVM modules are excluded from Git.
 
 ## Building on Windows x64
 
@@ -105,8 +108,8 @@ See [docs/DLSS.md](docs/DLSS.md) for architecture, settings, runtime requirement
 and verification details.
 
 For a build without NVIDIA integration, omit the fetch step and set
-`USE_NVIDIA_DLSS=0` in the build command. Raster and hardware-capable native
-path-tracing paths do not require the optional NVIDIA runtime. The Vulkan SDK
+`USE_NVIDIA_DLSS=0` in the build command. Raster, software tracing and
+hardware-capable native path tracing do not require the optional NVIDIA runtime. The Vulkan SDK
 is needed to regenerate shaders, not to link the checked-in embedded payloads;
 see [testing/build checks](docs/TESTING.md).
 
@@ -142,9 +145,8 @@ The original base-game Graphics Options menu also exposes these controls:
 | HUD Scale | `cg_hudScale` | 0.5-1.5 |
 | UI Scale | `ui_scale` | 0.5-1.5 |
 | Texture Filtering | `r_textureMode`, `r_ext_max_anisotropy` | Bilinear through anisotropic 16x |
-| NVIDIA RTX Mode | `r_rayTracing` | Off / Shadows / Path tracing (WIP) |
-| RTX Shadow Strength | `r_rayTracingShadowStrength` | 0.0-1.0 |
-| RTX Exposure (Path tracing mode) | `r_pathTracingExposure` | 0.0625x-16x, quarter-stop slider; Reset = 1x |
+| NVIDIA RTX Mode (legacy menu label) | `r_rayTracing` | Off / Software tracing / hardware Path tracing (WIP) |
+| RTX Exposure (software or hardware tracing) | `r_pathTracingExposure` | 0.0625x-16x, quarter-stop slider; Reset = 1x |
 | DLSS Mode | `r_dlss` | Off, Quality, Balanced, Performance, Ultra Performance, DLAA |
 | DLSS Ray Reconstruction | `r_dlssRayReconstruction` | Off/On; path tracing plus supported DLSS/DLAA required |
 | DLSS Sharpness | `r_dlssSharpness` | 0.0-1.0 |
@@ -156,12 +158,16 @@ The original base-game Graphics Options menu also exposes these controls:
 | Frame Generation | `r_dlssFrameGeneration` | Off/On |
 | NVIDIA Reflex | `r_reflex` | Off, On, On + Boost |
 
-HUD, UI, sharpening, RTX exposure/shadow strength, and Neural Rendering strength controls
-update live. Renderer mode changes, including enabling RTX shadows, apply after a
-renderer restart. See [docs/RTX.md](docs/RTX.md) for hardware requirements,
+HUD, UI, sharpening, RTX exposure, and Neural Rendering strength controls
+update live. Lighting mode changes apply after a renderer restart.
+See [docs/RTX.md](docs/RTX.md) for software tracing requirements,
 architecture, controls, and current scope.
 
-In Path tracing mode, **RTX Exposure** occupies the shadow-strength row. Raise it
+Mode 1 also has local native history and an optional NRD denoiser controlled
+through the console. See [software denoising](docs/SOFTWARE_DENOISING.md) for
+commands, local build requirements and the SDK licensing boundary.
+
+In either tracing mode, **RTX Exposure** occupies the old shadow-strength row. Raise it
 to brighten the scene (2x is one stop brighter, 4x is two); **Reset** restores 1x.
 It affects scene tone mapping, not the HUD or menu brightness, and is saved
 automatically. You can also enter `/r_pathTracingExposure 2` in the console for

@@ -62,7 +62,7 @@ void vk_initialize(void)
     // let runtime evaluation (DLSS/ray reconstruction) or the final present
     // blit upscale it back to the output resolution. Uniform scale keeps the
     // aspect ratio, so projection, jitter and DLSS extents stay consistent.
-    if (r_rayTracing->integer == 2 && r_pathTracingScale->value < 1.0f) {
+    if (r_rayTracing->integer != 0 && r_pathTracingScale->value < 1.0f) {
         const float pt_scale = r_pathTracingScale->value;
         render_width = (uint32_t)((float)render_width * pt_scale);
         render_height = (uint32_t)((float)render_height * pt_scale);

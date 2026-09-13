@@ -473,6 +473,7 @@ CG_AddExplosion
 */
 static void CG_AddExplosion( localEntity_t *ex ) {
 	refEntity_t	*ent;
+	float scale;
 
 	ent = &ex->refEntity;
 
@@ -490,7 +491,9 @@ static void CG_AddExplosion( localEntity_t *ex ) {
 			light = 1.0 - ( light - 0.5 ) * 2;
 		}
 		light = ex->light * light;
-		trap_R_AddLightToScene(ent->origin, light, ex->lightColor[0], ex->lightColor[1], ex->lightColor[2] );
+		scale = (ent->renderfx & RF_ROCKET_EXPLOSION) ? CG_WeaponLightScale(cg_rocketExplosionLightScale.value) : 1;
+		if (scale > 0)
+			trap_R_AddLightToScene(ent->origin, light, ex->lightColor[0] * scale, ex->lightColor[1] * scale, ex->lightColor[2] * scale );
 	}
 }
 
@@ -502,6 +505,7 @@ CG_AddSpriteExplosion
 static void CG_AddSpriteExplosion( localEntity_t *le ) {
 	refEntity_t	re;
 	float c;
+	float scale;
 
 	re = le->refEntity;
 
@@ -531,7 +535,9 @@ static void CG_AddSpriteExplosion( localEntity_t *le ) {
 			light = 1.0 - ( light - 0.5 ) * 2;
 		}
 		light = le->light * light;
-		trap_R_AddLightToScene(re.origin, light, le->lightColor[0], le->lightColor[1], le->lightColor[2] );
+		scale = (re.renderfx & RF_ROCKET_EXPLOSION) ? CG_WeaponLightScale(cg_rocketExplosionLightScale.value) : 1;
+		if (scale > 0)
+			trap_R_AddLightToScene(re.origin, light, le->lightColor[0] * scale, le->lightColor[1] * scale, le->lightColor[2] * scale );
 	}
 }
 
@@ -877,7 +883,5 @@ void CG_AddLocalEntities( void ) {
 		}
 	}
 }
-
-
 
 

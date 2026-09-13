@@ -432,7 +432,7 @@ comparison improved tracing from 55.540 to 35.870 ms and real-frame medians from
 The 8x64 intermediate result was separately reproduced. These are bounded,
 stationary-scene measurements, not a claim that performance is now sufficient
 everywhere. Full evidence, rejected experiments and the separate NR cost test:
-[GPU_PERFORMANCE_ANALYSIS.md](../GPU_PERFORMANCE_ANALYSIS.md).
+[GPU_PERFORMANCE_ANALYSIS.md](GPU_PERFORMANCE_ANALYSIS.md).
 
 Performance tests now force Frame Generation off in isolated profiles and record
 that override; the user's saved settings are never rewritten. In PowerShell 7,

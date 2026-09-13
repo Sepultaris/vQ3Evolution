@@ -1904,6 +1904,15 @@ Q3VKOBJ = \
 	$(B)/renderer_vulkan/post_bloom_composite_comp.o \
 	$(B)/renderer_vulkan/post_NV_comp.o \
 	$(B)/renderer_vulkan/rt_shadows_comp.o \
+	$(B)/renderer_vulkan/pt_software_comp.o \
+	$(B)/renderer_vulkan/pt_software_guides_comp.o \
+	$(B)/renderer_vulkan/pt_software_temporal_comp.o \
+	$(B)/renderer_vulkan/pt_software_nrd_comp.o \
+	$(B)/renderer_vulkan/pt_software_nrd_guides_comp.o \
+	$(B)/renderer_vulkan/pt_software_profile_comp.o \
+	$(B)/renderer_vulkan/pt_software_nrd_profile_comp.o \
+	$(B)/renderer_vulkan/pt_software_counts_comp.o \
+	$(B)/renderer_vulkan/pt_software_nrd_counts_comp.o \
 	$(B)/renderer_vulkan/pathtrace_comp.o \
 	$(B)/renderer_vulkan/pt_profile_comp.o \
 	$(B)/renderer_vulkan/pt_brdf_comp.o \

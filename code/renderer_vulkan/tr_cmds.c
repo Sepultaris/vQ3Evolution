@@ -38,13 +38,17 @@ Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
 
 static renderCommandList_t	BE_Commands;
 
-/* Set when the Urban Terror night-vision overlay shaders would have been
-   drawn this frame; the post-processing NV pass consumes the result. */
+/* Set during FRONT-END submission, before any backend HUD command can finish
+   the scene. Discovering a late overlay while executing it is too late for NV. */
 static qboolean nv_overlay_active;
 
 void R_NvOverlaySet(void) { nv_overlay_active = qtrue; }
 qboolean R_NvOverlayActive(void) { return nv_overlay_active; }
 void R_NvOverlayClear(void) { nv_overlay_active = qfalse; }
+
+static qboolean R_NvReplaceOverlay(void) {
+	return vk_temporal_nv_available() && (r_nvNightVision->integer || r_nvOverride->integer);
+}
 
 /*
 ============
@@ -145,6 +149,7 @@ void RE_StretchPic ( float x, float y, float w, float h,
 	}
 	cmd->commandId = RC_STRETCH_PIC;
 	cmd->shader = R_GetShaderByHandle( hShader );
+	if (cmd->shader->nvOverlay) R_NvOverlaySet();
 	cmd->x = x;
 	cmd->y = y;
 	cmd->w = w;
@@ -158,6 +163,7 @@ void RE_StretchPic ( float x, float y, float w, float h,
 
 void RE_BeginFrame( stereoFrame_t stereoFrame )
 {
+	R_NvOverlayClear();
 
 	if ( !tr.registered || vk_swapchain_restart_pending() ) {
 		return;
@@ -277,7 +283,7 @@ static void RB_RenderDrawSurfList( drawSurf_t* drawSurfs, int numDrawSurfs )
 
 	for (i = 0, drawSurf = drawSurfs ; i < numDrawSurfs ; i++, drawSurf++)
     {
-		qboolean rayPolys = r_rayTracing->integer == 2 && *drawSurf->surface == SF_POLY;
+		qboolean rayPolys = r_rayTracing->integer != 0 && *drawSurf->surface == SF_POLY;
 		if ( (int)drawSurf->sort == oldSort && rayPolys == oldRayPolys ) {
 			// fast path, same as previous sort
 			rb_surfaceTable[ *drawSurf->surface ]( drawSurf->surface );
@@ -285,11 +291,11 @@ static void RB_RenderDrawSurfList( drawSurf_t* drawSurfs, int numDrawSurfs )
 		}
 		R_DecomposeSort( drawSurf->sort, &entityNum, &shader, &fogNum, &dlighted );
 
-		/* Urban Terror night-vision overlay shaders are never rasterized;
-		   the post-processing NV pass replaces the effect at output time.
+		/* Skip legacy NV layers only when the post-pass can replace them.
+		   Otherwise retain the mod's original goggles as the fallback.
 		   oldSort/oldShader stay untouched so the pre-NV batch is not
 		   disturbed and the fast path can never pick up an NV surface. */
-		if (shader->nvOverlay) {
+		if (shader->nvOverlay && R_NvReplaceOverlay()) {
 			R_NvOverlaySet();
 			continue;
 		}
@@ -300,7 +306,7 @@ static void RB_RenderDrawSurfList( drawSurf_t* drawSurfs, int numDrawSurfs )
 		// a "entityMergable" shader is a shader that can have surfaces from seperate
 		// entities merged into a single batch, like smoke and blood puff sprites
 		if (shader != oldShader || fogNum != oldFogNum || dlighted != oldDlighted || rayPolys != oldRayPolys
-			|| ( entityNum != oldEntityNum && (!shader->entityMergable || r_rayTracing->integer == 2) ) ) {
+			|| ( entityNum != oldEntityNum && (!shader->entityMergable || r_rayTracing->integer != 0) ) ) {
 			if (oldShader != NULL) {
 				RB_EndSurface();
 			}
@@ -378,9 +384,8 @@ static void RB_RenderDrawSurfList( drawSurf_t* drawSurfs, int numDrawSurfs )
 
 void RB_StretchPic( const stretchPicCommand_t * const cmd )
 {
-	/* Legacy Urban Terror NV overlay drawn as a 2D stretch-pic: never
-	 * rasterize it; the post-processing NV pass replaces the effect. */
-	if (cmd->shader->nvOverlay) {
+	/* Replace the legacy 2D filter only when the NV post-pass is available. */
+	if (cmd->shader->nvOverlay && R_NvReplaceOverlay()) {
 		R_NvOverlaySet();
 		return;
 	}
@@ -654,6 +659,7 @@ void R_IssueRenderCommands( qboolean runPerformanceCounters )
     }
 
 discard_commands:
+	R_NvOverlayClear();
     // Never run remaining draws/readbacks/present after failed acquisition.
     // Clear CPU batches too, so a later flush cannot revive the skipped frame.
     tess.numIndexes = 0;

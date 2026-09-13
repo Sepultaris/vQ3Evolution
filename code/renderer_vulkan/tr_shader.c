@@ -27,6 +27,7 @@ Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
 #include "tr_shader.h"
 #include "R_Parser.h"
 #include "ref_import.h"
+#include "nv_overlay.h"
 
 // tr_shader.c -- this file deals with the parsing and definition of shaders
 
@@ -1940,7 +1941,7 @@ shader_t* FinishShader( void )
 	//
 	// if we are in r_vertexLight mode, never use a lightmap texture
 	//
-	if ( r_rayTracing->integer != 2 && iStage > 1 && ( r_vertexLight->integer && !r_uiFullScreen->integer ) ) {
+	if ( r_rayTracing->integer == 0 && iStage > 1 && ( r_vertexLight->integer && !r_uiFullScreen->integer ) ) {
 		VertexLightingCollapse();
 		iStage = 1;
 		hasLightmapStage = qfalse;
@@ -1950,7 +1951,7 @@ shader_t* FinishShader( void )
 	// look for multitexture potential
 	//
 	// Path materials require each source layer's independent blend/animation.
-	if ( r_rayTracing->integer != 2 && iStage > 1 && CollapseMultitexture() ) {
+	if ( r_rayTracing->integer == 0 && iStage > 1 && CollapseMultitexture() ) {
 		iStage--;
 	}
 
@@ -1993,12 +1994,9 @@ void R_SetTheShader( const char *name, int lightmapIndex )
 
 	strncpy( shader.name, name, sizeof( shader.name ) );
 
-	// Urban Terror night-vision screen shaders: the backend never rasterizes
-	// these; the post-processing NV pass replaces the effect at output time.
-	shader.nvOverlay =
-		( Q_stricmp( shader.name, "nvgScope2" ) == 0 ||
-		  Q_stricmp( shader.name, "nvgBrightA" ) == 0 ||
-		  Q_stricmp( shader.name, "nvgBrightB" ) == 0 );
+	// Tag Urban Terror screen effects for early detection and conditional
+	// replacement; retain their original stages for the legacy fallback.
+	shader.nvOverlay = R_IsNvOverlayName(shader.name);
 
     shader.lightmapIndex = lightmapIndex;
     // FIXME: set these "need" values appropriately

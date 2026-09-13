@@ -10,7 +10,7 @@ typedef int qboolean;
 enum { qfalse, qtrue, PRINT_ALL, PRINT_WARNING };
 static struct { VkDevice device; VkPhysicalDevice physical_device; } vk;
 typedef struct { VkBuffer buffer; VkDeviceSize size; } pt_buffer_t;
-static struct { int active, temporal_valid; uint32_t width, height;
+static struct { int active, temporal_valid, lighting_mode; float exposure; uint32_t width, height;
     VkDescriptorSetLayout set_layout; VkDescriptorSet set;
     pt_buffer_t reflection_guide, previous_reflection_guide, moments[2], light_change, history_color[2]; } pt;
 static struct { int integer; float value; } off, exposure = { 0, 1 }, sharpness;
@@ -40,6 +40,7 @@ static VkBuffer sampling_buffers[7];
 static qboolean vk_sl_ray_reconstruction_enabled(void) { return enabled; }
 static qboolean vk_sl_evaluate_ray_reconstruction(const vk_sl_frame_resources_t *r) {
     assert(r->color_format==VK_FORMAT_R16G16B16A16_SFLOAT);
+    assert(r->exposure==pt.exposure);
     for(int i=0;i<4;++i) assert(r->rr_guides[i] && r->rr_guide_views[i]);
     return evaluate_ok;
 }
@@ -110,6 +111,7 @@ static void record_dispatch(void) {
 }
 static void reset(void) {
     assert(!live_count); operations=next_handle=0; pt.active=1; pt.width=1920; pt.height=1080;
+    pt.lighting_mode=0; pt.exposure=1.75f;
     pt_buffer_t *buffers[]={&pt.reflection_guide,&pt.previous_reflection_guide,&pt.moments[0],
         &pt.moments[1],&pt.light_change,&pt.history_color[0],&pt.history_color[1]};
     for(uintptr_t i=0;i<7;++i) *buffers[i]=(pt_buffer_t){(VkBuffer)(i+100),4096};
@@ -118,7 +120,12 @@ int main(void) {
     reset(); assert(vk_pt_rr_initialize(1920,1080));
     int total=operations; assert(total>30 && pt_rr.ready && rr_requested());
     off.integer=1; assert(!rr_requested()); off.integer=0;
-    float push[32]={0}; rr_prepare(VK_NULL_HANDLE,push); rr_pack(VK_NULL_HANDLE,push,qfalse);
+    float push[32]={0}; rr_prepare(VK_NULL_HANDLE,push);
+    assert(bound_pipeline==pt_rr.guide[0]);
+    pt.lighting_mode=4; rr_prepare(VK_NULL_HANDLE,push);
+    assert(bound_pipeline==pt_rr.guide[1]);
+    pt.lighting_mode=0;
+    rr_pack(VK_NULL_HANDLE,push,qfalse);
     assert(pack_dispatches==1);
     int old_barriers=barrier_count;
     push[23]=123.0f;

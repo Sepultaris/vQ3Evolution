@@ -1,0 +1,90 @@
+#version 460
+#extension GL_GOOGLE_include_directive : require
+#include "rt_software_trace.glsl"
+
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+layout(set = 0, binding = 4) uniform sampler2D sceneColor;
+layout(set = 0, binding = 5) uniform sampler2D sceneDepth;
+layout(set = 0, binding = 6, rgba8) uniform writeonly image2D shadowedColor;
+
+layout(push_constant) uniform ShadowConstants {
+    vec4 cameraOriginAndNear;
+    vec4 cameraForwardAndFar;
+    vec4 cameraRightAndProjectionX;
+    vec4 cameraUpAndProjectionY;
+    vec4 sunDirectionAndStrength;
+    vec4 parameters; // ray bias, maximum shadow distance, projection jitter.xy
+    vec4 bvh; // dynamic root, dynamic present, dynamic triangle-list base, static present
+} pc;
+
+void main()
+{
+    ivec2 pixel = ivec2(gl_GlobalInvocationID.xy);
+    ivec2 size = imageSize(shadowedColor);
+    if (any(greaterThanEqual(pixel, size))) return;
+#ifdef RT_SOFTWARE_DEBUG_SHADOW
+    if (pixel.x % 32 != 0 || pixel.y % 32 != 0) return;
+#endif
+
+    vec4 color = texelFetch(sceneColor, pixel, 0);
+    float depth = texelFetch(sceneDepth, pixel, 0).r;
+    // First-person geometry uses the renderer's separate 0..0.01 depth range.
+    if (depth <= 0.010001 || depth >= 1.0 || pc.sunDirectionAndStrength.w <= 0.0) {
+        imageStore(shadowedColor, pixel, color);
+        return;
+    }
+
+    vec2 ndc = (vec2(pixel) + 0.5) / vec2(size) * 2.0 - 1.0;
+    float nearPlane = pc.cameraOriginAndNear.w;
+    float farPlane = pc.cameraForwardAndFar.w;
+    float linearDepth = nearPlane * farPlane /
+        max(farPlane - depth * (farPlane - nearPlane), 0.0001);
+    vec2 view = (ndc + pc.parameters.zw) /
+        vec2(pc.cameraRightAndProjectionX.w, pc.cameraUpAndProjectionY.w);
+    vec3 ray = pc.cameraForwardAndFar.xyz +
+        pc.cameraRightAndProjectionX.xyz * view.x + pc.cameraUpAndProjectionY.xyz * view.y;
+    vec3 world = pc.cameraOriginAndNear.xyz + ray * linearDepth;
+
+    vec3 cameraDir = normalize(ray);
+#ifdef RT_SOFTWARE_DEBUG_DEPTH
+    float primary = traceScene(pc.bvh, pc.cameraOriginAndNear.xyz, cameraDir, pc.parameters.y, false);
+    float error = primary - length(world - pc.cameraOriginAndNear.xyz);
+    imageStore(shadowedColor, pixel, vec4(primary < 0.0 ? vec3(0,0,1) :
+        mix(vec3(0,1,0), error < 0.0 ? vec3(1,0,0) : vec3(1,1,0), clamp(abs(error)/4.0,0.0,1.0)),1));
+    return;
+#endif
+    // Resolve the receiver and its normal with an exact primary intersection.
+    // Accept it only near the raster surface: excluded alpha geometry must
+    // not inherit a receiver from a wall farther behind it.
+    float snap = max(2.0 * pc.parameters.x,
+        linearDepth * linearDepth * length(ray) / nearPlane * 0.00000024);
+    vec3 normal;
+    float hit = traceSceneNormal(pc.bvh, pc.cameraOriginAndNear.xyz, cameraDir,
+        max(pc.parameters.y, linearDepth * length(ray) + snap), false, normal);
+    bool receiver = hit >= 0.0 && abs(hit - linearDepth * length(ray)) <= snap;
+    if (receiver) world = pc.cameraOriginAndNear.xyz + cameraDir * hit;
+
+    vec3 light = normalize(pc.sunDirectionAndStrength.xyz);
+    // Face the geometric normal toward the visible side. Biasing toward the
+    // sun alone can jump through a thin wall and leak light through its back.
+    if (dot(normal, cameraDir) > 0.0) normal = -normal;
+    bool occluded = receiver && dot(normal, light) <= 0.0;
+    if (!occluded) occluded = traceScene(pc.bvh, world + light * pc.parameters.x,
+        light, pc.parameters.y, true) >= 0.0;
+#ifdef RT_SOFTWARE_DEBUG_SHADOW
+    bool brute = false;
+    for (uint tri = 0u; tri < uint(pc.bvh.z); ++tri) {
+        float t; vec3 n;
+        if (intersectTriangleT(tri, world + light * pc.parameters.x, light, pc.parameters.y, t, n)) { brute = true; break; }
+    }
+    bool tree = traceScene(vec4(0,0,0,1), world + light * pc.parameters.x, light, pc.parameters.y, true) >= 0.0;
+    vec4 debugColor = vec4(tree != brute ? vec3(1,0,0) : tree ? vec3(0,0,1) : vec3(0,1,0), 1);
+    for (int y = 0; y < 32; ++y) for (int x = 0; x < 32; ++x) {
+        ivec2 p = pixel + ivec2(x,y);
+        if (all(lessThan(p,size))) imageStore(shadowedColor, p, debugColor);
+    }
+    return;
+#endif
+    if (occluded) color.rgb *= 1.0 - clamp(pc.sunDirectionAndStrength.w, 0.0, 1.0);
+    imageStore(shadowedColor, pixel, color);
+}

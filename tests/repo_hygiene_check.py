@@ -75,10 +75,14 @@ def check_ignore(errors):
                 "missionpack/pak3.pk3", "screenshots/test.png", "capture.nsys-rep",
                 "capture.ngfx-gputrace", "capture.dmp", "capture.rdc", "renderer.dll",
                 "old-game.exe", "test.obj", "model.safetensors", "model.pth",
-                "model.onnx", ".env", ".env.local", "tests/__pycache__/test.pyc"]
+                "model.onnx", ".env", ".env.local", "tests/__pycache__/test.pyc",
+                ".build-tmp/nvg-inspect/vm/cgame.qvm", "mods/vm/ui.qvm",
+                "pt_bloom.log", "filesystem-write-errors.log", "q3history",
+                "q3history.tmp"]
     retained = ["tests/pt_rr_workgroup.cfg", "tests/repo_hygiene_check.py",
                 "docs/STATUS.md", ".env.example", "code/renderer_vulkan/pt_blue_noise.h",
                 "code/renderer_vulkan/shaders/pt_rr_trace.comp",
+                "code/renderer_vulkan/nrd/adapter.cpp", "tests/rt_urban_nv.cfg",
                 "code/renderer_vulkan/shaders/Compiled/pt_rr_trace_comp.c",
                 "code/renderer_vulkan/shaders/Compiled/pt_rr_trace.cspv"]
     ignored = set(git("check-ignore", "--no-index", "--stdin",
@@ -96,7 +100,8 @@ def check_documented_defaults(errors):
     source = (ROOT / "code/renderer_vulkan/tr_cvar.c").read_text(encoding="utf-8")
     defaults = dict(re.findall(r'Cvar_Get\s*\(\s*"([^"]+)"\s*,\s*"([^"]+)"', source))
     checked = 0
-    for name in ("PATH_TRACING.md", "RAY_RECONSTRUCTION.md", "RTX.md"):
+    for name in ("PATH_TRACING.md", "RAY_RECONSTRUCTION.md", "RTX.md",
+                 "NIGHT_VISION.md", "SOFTWARE_DENOISING.md"):
         text = (ROOT / "docs" / name).read_text(encoding="utf-8")
         for cvar, value in re.findall(r'^\| `(r_\w+)` \| ([0-9.]+) \|', text, re.M):
             checked += 1
@@ -110,7 +115,7 @@ def check_candidates(errors):
     candidates = tracked | names(git("ls-files", "--others", "--exclude-standard", "-z"))
     ignored_tracked = names(git("ls-files", "--cached", "--ignored", "--exclude-standard", "-z"))
     for name in ignored_tracked:
-        if not name.startswith("code/libs/"):
+        if (ROOT / name).is_file() and not name.startswith("code/libs/"):
             errors.append("Generated/local file is already tracked: " + name)
     patterns = {
         "private-key block": rb"-----BEGIN (?:RSA |EC |OPENSSH |DSA )?PRIVATE KEY-----",
@@ -129,7 +134,8 @@ def check_candidates(errors):
         largest = max(largest, (size, name))
         if size >= 100 * 1024 * 1024:
             errors.append("File exceeds 100 MiB source-repository policy: " + name)
-        if name not in tracked and path.suffix.lower() in {".dll", ".exe", ".pk3", ".pdb", ".dmp"}:
+        if path.suffix.lower() in {".qvm", ".pk3"} or (name not in tracked and
+                path.suffix.lower() in {".dll", ".exe", ".pdb", ".dmp"}):
             errors.append("Unexpected binary/game payload: " + name)
         data = path.read_bytes()
         if b"\0" in data[:8192]:
@@ -147,6 +153,10 @@ def check_shaders(errors):
     compiled = ROOT / "code/renderer_vulkan/shaders/Compiled"
     count = 0
     for suffix, stage in (("cspv", "comp"), ("vspv", "vert"), ("fspv", "frag")):
+        for array in sorted(compiled.glob("*_" + stage + ".c")):
+            binary = array.with_name(array.name.removesuffix("_" + stage + ".c") + "." + suffix)
+            if not binary.is_file():
+                errors.append("Missing shader bytecode: " + str(binary.relative_to(ROOT)))
         for binary in sorted(compiled.glob("*." + suffix)):
             array = binary.with_name(binary.stem + "_" + stage + ".c")
             if not array.is_file():

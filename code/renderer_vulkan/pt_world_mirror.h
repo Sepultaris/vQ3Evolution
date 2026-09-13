@@ -1,12 +1,12 @@
+#include <float.h>
 /* Static BSP portal ownership. A shader's `portal` keyword alone cannot
  * distinguish a mirror from a remote camera, even when both share a shader.
  * Read a private entity cursor at world load; never consume the game cursor.
  * No per-frame work, material copies, or GPU storage is needed. */
-static qboolean world_surface_is_mirror(const msurface_t *surface)
+static qboolean world_portal_geometry(const msurface_t *surface, vec3_t normal,
+    float *plane_distance, vec3_t mins, vec3_t maxs)
 {
-    vec3_t normal, mins, maxs;
-    float distance, nearest = FLT_MAX;
-    qboolean mirror = qfalse;
+    float distance;
     if (!surface || !surface->shader || surface->shader->sort != SS_PORTAL ||
         !surface->data || !tr.world || !tr.world->entityString) return qfalse;
     ClearBounds(mins, maxs);
@@ -31,6 +31,18 @@ static qboolean world_surface_is_mirror(const msurface_t *surface)
         }
     } else return qfalse; // Curved/deformed portals are not planar mirrors.
 
+    *plane_distance = distance;
+    return qtrue;
+}
+
+// 0: no owner, 1: mirror, 2: remote camera. Geometry is the undeformed BSP
+// plane; a wave-deformed aperture must not wobble its camera orientation.
+static int world_surface_portal_kind(const msurface_t *surface)
+{
+    vec3_t normal, mins, maxs;
+    float distance, nearest = FLT_MAX;
+    int kind = 0;
+    if (!world_portal_geometry(surface, normal, &distance, mins, maxs)) return 0;
     char *cursor = tr.world->entityString;
     const char *token;
     while (*(token = R_ParseExt(&cursor, qtrue))) {
@@ -58,7 +70,12 @@ static qboolean world_surface_is_mirror(const msurface_t *surface)
             float delta = fmaxf(mins[axis]-origin[axis], fmaxf(origin[axis]-maxs[axis], 0));
             squared += delta*delta;
         }
-        if (squared < nearest) { nearest = squared; mirror = !target[0]; }
+        if (squared < nearest) { nearest = squared; kind = target[0] ? 2 : 1; }
     }
-    return mirror;
+    return kind;
+}
+
+static qboolean world_surface_is_mirror(const msurface_t *surface)
+{
+    return world_surface_portal_kind(surface) == 1;
 }

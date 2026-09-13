@@ -232,6 +232,7 @@ void RB_SurfacePolychain( srfPoly_t *p ) {
 		VectorCopy( normal, tess.normal[numv] );
 		tess.normal[numv][3] = 0;
 		tess.rayPolyIds[numv] = tess.rayDynamicPolys ? (uint32_t)(p - backEnd.refdef.polys) + 1 : 0;
+		tess.rayPolyFlags[numv] = tess.rayDynamicPolys ? p->renderfx : 0;
 		tess.texCoords[numv][0][0] = p->verts[i].st[0];
 		tess.texCoords[numv][0][1] = p->verts[i].st[1];
 		tess.texCoords[numv][1][0] = p->verts[i].st[0];

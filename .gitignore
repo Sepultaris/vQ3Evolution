@@ -3,6 +3,7 @@
 # -----------------------------------------------------------------------------
 /build/
 /build-*/
+/.build-tmp/
 /Makefile.local
 /compile_commands.json
 /.cache/
@@ -35,6 +36,8 @@
 # Do not commit proprietary Quake III data or locally assembled packages.
 *.pk3
 *.pk3dir/
+# Compiled/extracted game modules are build output, not source.
+*.qvm
 
 # Per-user engine state and output. Source-controlled example configs should use
 # a more specific filename instead of q3config.cfg or autoexec.cfg.
@@ -46,6 +49,9 @@ games.log
 crashlog.txt
 stdout.log
 stderr.log
+*.log
+q3history
+q3history.*
 condump*.txt
 *.dmp
 # NVIDIA captures can embed shaders, game resources and local process details.

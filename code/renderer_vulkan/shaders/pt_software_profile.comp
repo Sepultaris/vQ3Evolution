@@ -1,0 +1,6 @@
+#version 460
+#extension GL_GOOGLE_include_directive : require
+#define PT_SOFTWARE_TRACE
+#define PT_SOFTWARE_PROFILE
+#define PT_PROFILE_PASS
+#include "pt_integrator.glsl"

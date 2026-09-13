@@ -1,0 +1,33 @@
+#version 460
+#extension GL_GOOGLE_include_directive : require
+layout(local_size_x=64) in;
+layout(binding=4,std430) readonly buffer Positions { float positions[]; };
+layout(binding=5,std430) readonly buffer Indices { uint indices[]; };
+layout(binding=7,std430) readonly buffer Materials { uint triangleMaterials[]; };
+uvec3 triangle(uint p) { return uvec3(indices[3*p],indices[3*p+1],indices[3*p+2]); }
+vec3 position(uint v) { return vec3(positions[3*v],positions[3*v+1],positions[3*v+2]); }
+#include "../code/renderer_vulkan/shaders/pt_software_query.glsl"
+struct Ray { vec4 origin,direction,trees,result; };
+layout(binding=52,std430) buffer Rays { Ray rays[]; };
+layout(push_constant) uniform Control { uint count; } pc;
+void main() {
+    uint i=gl_GlobalInvocationID.x;
+    if(i>=pc.count) return;
+    Ray r=rays[i];
+    SoftwareQuery q;
+    rayQueryInitializeEXT(q,0u,0u,uint(r.trees.x),r.origin.xyz,r.direction.w,r.direction.xyz,r.origin.w);
+    // Verify the actual production root selection, not only the final hit.
+    rays[i].trees.z=float(q.node);
+    while(rayQueryProceedEXT(q)) {
+        if(q.candidatePrimitive%11u!=0u) rayQueryConfirmIntersectionEXT(q);
+    }
+    rays[i].result.x=q.committed ? q.committedT:-1;
+    rays[i].result.w=float(q.committedPrimitive);
+    rays[i].trees.xy=q.committedBary;
+    rayQueryInitializeEXT(q,0u,gl_RayFlagsTerminateOnFirstHitEXT,uint(r.trees.x),
+        r.origin.xyz,r.direction.w,r.direction.xyz,r.origin.w);
+    while(rayQueryProceedEXT(q)) {
+        if(q.candidatePrimitive%11u!=0u) rayQueryConfirmIntersectionEXT(q);
+    }
+    rays[i].result.y=q.committed ? q.committedT:-1;
+}

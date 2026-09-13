@@ -54,6 +54,10 @@ Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
 #define	RF_SHADOW_PLANE		0x0100		// use refEntity->shadowPlane
 #define	RF_WRAP_FRAMES		0x0200		// mod the model frames by the maxframes to allow continuous
 										// animation without needing to know the frame count
+#define RF_MUZZLE_FLASH      0x0400      // explicitly tagged weapon flash; no refEntity ABI change
+#define RF_ROCKET           0x0800      // flying rocket only; not its launcher, trail or explosion
+#define RF_ROCKET_EXPLOSION 0x1000      // rocket impact effects, including animated particles
+#define RF_LIGHTNING_GUN    0x2000      // lightning beam, impact and muzzle light
 
 // refdef flags
 #define RDF_NOWORLDMODEL	0x0001		// used for player configuration screen

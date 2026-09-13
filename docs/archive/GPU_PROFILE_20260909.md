@@ -1,8 +1,9 @@
-# Current RR shader capture — 2026-09-09
+# RR shader capture — 2026-09-09
 
-Nsight Graphics attachment is repaired, and a current Ray Reconstruction (RR)
-capture has been opened and inspected with source-line samples. This is a
+Historical capture of the 2026-09-09 Ray Reconstruction (RR) renderer, after
+repairing Nsight Graphics attachment. It was inspected with source-line samples. This is a
 profiling result, **not a renderer optimization or a measured FPS improvement**.
+It is not a fresh profile of subsequent builds; see [current status](../STATUS.md).
 
 ## Attachment fault and repair
 

@@ -1,5 +1,9 @@
 # Dynamic opaque-geometry experiment
 
+Historical experiment from 2026-09-09. Deployment statements below describe
+that test, not the currently installed renderer. The experiment remains
+default-off in source; see [current status](../STATUS.md) for active limitations.
+
 This candidate separates ordinary solid moving geometry from callback-required
 geometry, without changing shaders, resolution, samples, bounces or materials.
 It is **disabled by default**. The matched test below found no median FPS gain.

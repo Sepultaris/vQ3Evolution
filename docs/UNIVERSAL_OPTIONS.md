@@ -78,6 +78,43 @@ The profile deliberately covers user-facing presentation controls, not every
 experimental renderer diagnostic or mod-specific variable. The engine panel
 does not silently enable RTX or change quality merely because it was opened.
 
+### Config write failures
+
+Changing an archived console variable also attempts to save the game's
+`q3config.cfg`; a failure there is separate from the shared presentation profile.
+Failed per-game file opens now print the full attempted path, C runtime error
+and Windows OS error number. They also try to append the same diagnostic to
+`fs_homepath/filesystem-write-errors.log`, outside the game directory. This is
+useful when even `condump` cannot write inside the game directory. No permissions
+are changed and config writes are not redirected to another location. If the
+home root is also unwritable or the process has exhausted its file limit, only
+the console diagnostic is available.
+
+On 2026-09-12, a screenshot identified `errno 24: Too many open files` while
+saving `q3history`. The path tracer's push-constant debug logger opened another
+`pt_push_debug.log` stream every recorded frame, overwriting its pointer without
+closing the previous stream. This was not a permissions or muzzle-control
+problem. The logger now opens only when its tracked values change and always
+closes the stream before returning; no file-limit increase or config relocation
+is used. A full game-process restart releases handles already leaked by an old
+renderer. Ray-tracing shaders and quality settings are unchanged by this fix.
+
+The old build reproduced `errno 24` for both config saves and `condump` after
+751 traced Q3Tourney1 frames (`software-lighting-audit/run-2804766ad6d74d2bbc8260e092c3da51`).
+The fixed build passed the same scenario, saving brightness `0.375` in both
+configs and creating the console dump (`run-162169aa44e94ddc9febd63d0b8b95cf`).
+Both runs closed normally within 45 seconds, with isolated settings, hardware
+tracing and NVIDIA reconstruction/Frame Generation disabled. This is a resource
+lifetime regression test, not a performance benchmark. The logger fixture also
+checks 10,000 unchanged frames, 4,096 setting changes and sticky open failure at
+normal/release optimization. Run `tests/run-pt-push-debug-check.ps1` and
+`tests/run-software-lighting.ps1 -UseSavedSettings -Mode 2 -Map q3tourney1 -Scenario rt_config_write_soak.cfg -Width 1920 -Height 1080`.
+
+Earlier short checks ended before handle exhaustion. A saved-NVIDIA-settings
+attempt stalled before its write scenario and was closed by the 45-second
+guard; it is not a passing test. A separate forced Windows open-error check
+verified diagnostic recording and subsequent successful writes.
+
 ## Legacy menu and HUD scaling
 
 Source-built modules already implement `ui_scale` and `cg_hudScale`. The engine

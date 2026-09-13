@@ -104,3 +104,4 @@ equ	testPrintInt				-110
 equ	testPrintFloat				-111
 equ acos						-112
 equ trap_R_AddRefEntityTracked       -201
+equ trap_R_AddPolyTagged             -202

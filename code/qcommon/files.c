@@ -32,6 +32,7 @@ Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
 #include "q_shared.h"
 #include "qcommon.h"
 #include "unzip.h"
+#include <errno.h>
 
 /*
 =============================================================================
@@ -912,6 +913,8 @@ FS_FOpenFileWrite
 
 ===========
 */
+#include "fs_write_error.h"
+
 fileHandle_t FS_FOpenFileWrite( const char *filename ) {
 	char			*ospath;
 	fileHandle_t	f;
@@ -939,6 +942,15 @@ fileHandle_t FS_FOpenFileWrite( const char *filename ) {
 	// when running with +set logfile 1 +set developer 1
 	//Com_DPrintf( "writing to: %s\n", ospath );
 	fsh[f].handleFiles.file.o = Sys_FOpen( ospath, "wb" );
+	if (!fsh[f].handleFiles.file.o) {
+		int error=errno;
+		unsigned long osError=0;
+#ifdef _WIN32
+		_get_doserrno(&osError);
+#endif
+		FS_ReportWriteError(ospath,error,osError);
+		return 0;
+	}
 
 	Q_strncpyz( fsh[f].name, filename, sizeof( fsh[f].name ) );
 

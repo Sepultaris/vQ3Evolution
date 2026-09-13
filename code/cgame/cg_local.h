@@ -1128,6 +1128,11 @@ extern	vmCvar_t		cg_gun_x;
 extern	vmCvar_t		cg_gun_y;
 extern	vmCvar_t		cg_gun_z;
 extern	vmCvar_t		cg_drawGun;
+extern vmCvar_t cg_muzzleFlashLightScale;
+extern vmCvar_t cg_rocketLightScale;
+extern vmCvar_t cg_rocketExplosionLightScale;
+extern vmCvar_t cg_lightningGunLightScale;
+float CG_WeaponLightScale(float value);
 extern	vmCvar_t		cg_viewsize;
 extern	vmCvar_t		cg_tracerChance;
 extern	vmCvar_t		cg_tracerWidth;
@@ -1597,6 +1602,7 @@ void trap_R_AddRefEntityTracked(const refEntity_t *re, int motionId, int generat
 // polys are intended for simple wall marks, not really for doing
 // significant construction
 void		trap_R_AddPolyToScene( qhandle_t hShader , int numVerts, const polyVert_t *verts );
+void trap_R_AddPolyTagged(qhandle_t hShader, int numVerts, const polyVert_t *verts, int renderfx);
 void		trap_R_AddPolysToScene( qhandle_t hShader , int numVerts, const polyVert_t *verts, int numPolys );
 void		trap_R_AddLightToScene( const vec3_t org, float intensity, float r, float g, float b );
 void		trap_R_AddAdditiveLightToScene( const vec3_t org, float intensity, float r, float g, float b );
@@ -1690,6 +1696,6 @@ void	CG_ParticleBulletDebris (vec3_t	org, vec3_t vel, int duration);
 void	CG_ParticleSparks (vec3_t org, vec3_t vel, int duration, float x, float y, float speed);
 void	CG_ParticleDust (centity_t *cent, vec3_t origin, vec3_t dir);
 void	CG_ParticleMisc (qhandle_t pshader, vec3_t origin, int size, int duration, float alpha);
-void	CG_ParticleExplosion (char *animStr, vec3_t origin, vec3_t vel, int duration, int sizeStart, int sizeEnd);
+void	CG_ParticleExplosion (char *animStr, vec3_t origin, vec3_t vel, int duration, int sizeStart, int sizeEnd, int renderfx);
 extern qboolean		initparticles;
 int CG_NewParticleArea ( int num );

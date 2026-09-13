@@ -450,8 +450,12 @@ static void CG_Missile( centity_t *cent ) {
 */
 	// add dynamic light
 	if ( weapon->missileDlight ) {
-		trap_R_AddLightToScene(cent->lerpOrigin, weapon->missileDlight, 
-			weapon->missileDlightColor[0], weapon->missileDlightColor[1], weapon->missileDlightColor[2] );
+		float scale = s1->weapon == WP_ROCKET_LAUNCHER ? CG_WeaponLightScale(cg_rocketLightScale.value) : 1.0f;
+		// Change only rocket radiance, preserving the authored reach and hue.
+		if (scale > 0)
+			trap_R_AddLightToScene(cent->lerpOrigin, weapon->missileDlight,
+				weapon->missileDlightColor[0] * scale, weapon->missileDlightColor[1] * scale,
+				weapon->missileDlightColor[2] * scale );
 	}
 
 	// add missile sound
@@ -481,6 +485,7 @@ static void CG_Missile( centity_t *cent ) {
 	ent.skinNum = cg.clientFrame & 1;
 	ent.hModel = weapon->missileModel;
 	ent.renderfx = weapon->missileRenderfx | RF_NOSHADOW;
+	if (s1->weapon == WP_ROCKET_LAUNCHER) ent.renderfx |= RF_ROCKET;
 
 #ifdef MISSIONPACK
 	if ( cent->currentState.weapon == WP_PROX_LAUNCHER ) {

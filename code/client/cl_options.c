@@ -25,7 +25,7 @@ static const optionDef_t optionDefs[] = {
         "GL_LINEAR_MIPMAP_NEAREST|GL_LINEAR_MIPMAP_LINEAR","Bilinear|Trilinear",qfalse},
     {"r_ext_texture_filter_anisotropic","Anisotropic filtering","0",0,0,1,1,"0|1","Off|On",qtrue},
     {"r_ext_max_anisotropy","Anisotropy level","2",0,1,16,1,"1|2|4|8|16","1x|2x|4x|8x|16x",qtrue},
-    {"r_rayTracing","Lighting mode","0",1,0,2,1,"0|1|2","Raster|Ray-traced shadows|Path tracing",qtrue},
+    {"r_rayTracing","Lighting mode","0",1,0,2,1,"0|1|2","Raster|Software path tracing|Hardware path tracing",qtrue},
     {"r_pathTracingSamples","Samples per pixel","2",1,1,64,1,NULL,NULL,qfalse},
     {"r_pathTracingBounces","Maximum bounces","4",1,1,12,1,NULL,NULL,qfalse},
     {"r_pathTracingAdaptive","Adaptive sampling","0",1,0,1,1,"0|1","Off|On",qfalse},
@@ -33,7 +33,6 @@ static const optionDef_t optionDefs[] = {
     {"r_pathTracingAmbient","Ambient light","0",1,0,2,.01f,NULL,NULL,qfalse},
     {"r_pathTracingSunAngle","Sun penumbra (degrees)","0",1,0,20,.1f,NULL,NULL,qfalse},
     {"r_pathTracingLightRadius","Local light radius","0",1,0,64,.5f,NULL,NULL,qfalse},
-    {"r_rayTracingShadowStrength","Ray-traced shadow strength","0.55",1,0,1,.05f,NULL,NULL,qfalse},
     {"r_dlss","DLSS / anti-aliasing","0",2,0,5,1,"0|1|2|3|4|5",
         "Off|Quality|Balanced|Performance|Ultra Performance|DLAA",qtrue},
     {"r_dlssRayReconstruction","Ray reconstruction","1",2,0,1,1,"0|1","Off|On",qtrue},
@@ -50,6 +49,14 @@ static const optionDef_t optionDefs[] = {
     {"cl_legacyUIScale","Legacy menu scaling","1",3,0,2,1,"1|0|2","Automatic|Disabled|Force engine scaling",qfalse},
     {"cl_legacyHUDScale","Legacy HUD scaling","1",3,0,2,1,"1|0|2","Automatic|Disabled|Force engine scaling",qfalse},
     // Persist additional presentation values without crowding the panel.
+    {"r_muzzleFlashBrightness",NULL,"1",-1,0,8,.05f,NULL,NULL,qfalse},
+    {"r_muzzleFlashLightScale",NULL,"1",-1,0,8,.05f,NULL,NULL,qfalse},
+    {"r_rocketBrightness",NULL,"1",-1,0,8,.05f,NULL,NULL,qfalse},
+    {"r_rocketLightScale",NULL,"1",-1,0,8,.05f,NULL,NULL,qfalse},
+    {"r_rocketExplosionLightScale",NULL,"1",-1,0,8,.05f,NULL,NULL,qfalse},
+    {"r_lightningGunLightScale",NULL,"1",-1,0,8,.05f,NULL,NULL,qfalse},
+    {"r_rocketExplosionLightScale",NULL,"1",-1,0,8,.05f,NULL,NULL,qfalse},
+    {"r_lightningGunLightScale",NULL,"1",-1,0,8,.05f,NULL,NULL,qfalse},
     {"r_picmip",NULL,"0",-1,0,16,1,NULL,NULL,qtrue},
     {"r_displayIndex",NULL,"0",-1,0,16,1,NULL,NULL,qtrue},
     {"r_displayRefresh",NULL,"0",-1,0,1000,1,NULL,NULL,qtrue}
@@ -400,8 +407,16 @@ void CL_OptionsDraw(void) {
 }
 
 void CL_OptionsInit(void) {
-    // Renderer defaults remain renderer-owned; only engine UI compatibility
-    // cvars are registered here. Merely opening the menu changes no settings.
+    // Register shared compatibility/weapon controls even in the main menu.
+    // Other renderer defaults remain renderer-owned.
+    Cvar_Get("r_muzzleFlashBrightness","1",CVAR_ARCHIVE);
+    Cvar_Get("r_muzzleFlashLightScale","1",CVAR_ARCHIVE);
+    Cvar_Get("r_rocketBrightness","1",CVAR_ARCHIVE);
+    Cvar_Get("r_rocketLightScale","1",CVAR_ARCHIVE);
+    Cvar_Get("r_rocketExplosionLightScale","1",CVAR_ARCHIVE);
+    Cvar_Get("r_lightningGunLightScale","1",CVAR_ARCHIVE);
+    Cvar_Get("r_rocketExplosionLightScale","1",CVAR_ARCHIVE);
+    Cvar_Get("r_lightningGunLightScale","1",CVAR_ARCHIVE);
     legacyScale[1]=Cvar_Get("ui_scale","1",CVAR_ARCHIVE);
     legacyScale[0]=Cvar_Get("cg_hudScale","1",CVAR_ARCHIVE);
     legacyMode[1]=Cvar_Get("cl_legacyUIScale","1",CVAR_ARCHIVE);

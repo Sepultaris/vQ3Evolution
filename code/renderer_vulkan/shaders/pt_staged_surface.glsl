@@ -5,7 +5,7 @@ uint stagedSurface() {
         PT_CATEGORY(0u);
         Hit hit;
         float fogDistance; uint fogVolume;
-        bool found=fogPathHit(origin,direction,segmentDistance,bounce,hit,fogDistance,fogVolume);
+        bool found=fogPathHit(origin,direction,segmentDistance,previousPDF==-2 ? 1:bounce,hit,fogDistance,fogVolume);
         PT_CATEGORY(2u);
         if(!found && fogVolume!=0xffffffffu) {
             PT_COUNT(4u);
@@ -56,6 +56,18 @@ uint stagedSurface() {
             return 0u;
         }
         vec3 world=origin+direction*hit.distance;
+        if(portalIndex(hit.primitive)!=0u) {
+            vec3 coating,transmission;
+            portalCoating(hit.primitive,hit.bary,origin,coating,transmission);
+            addIncident(coating);
+            attenuate(transmission);
+            if(++transparentLayers>=32 || !any(greaterThan(transmission,vec3(0.00001))) ||
+                !portalRay(hit.primitive,world,origin,direction)) return 0u;
+            // The destination has its own medium; never carry local glass absorption
+            // through a camera teleport. Fog volumes are queried at the new origin.
+            mediumCount=0; previousPDF=-2; segmentDistance=0;
+            continue;
+        }
         if(m.params.x==4) {
             // There is no next ray at the bounce limit. This interface emits
             // nothing, so sampling a discarded delta lobe cannot add radiance.
@@ -149,7 +161,7 @@ uint stagedSurface() {
                 vec3 normal=geometricNormal(hit.primitive,area);
                 float d=hit.distance;
                 float lightPDF=emitterPDF(hit.primitive,d*d,abs(dot(normal,-direction)));
-                addIncident(emissionAt(hit.primitive,hit.bary,true,origin)*
+                addIncident(emissionAt(hit.primitive,hit.bary,true,origin,bounce==0 || previousPDF<0)*
                     (bounce==0 || previousPDF<0 ? 1:powerWeight(previousPDF,lightPDF)));
             } else attenuate(filterTransmission(hit.primitive,hit.bary,textureBarycentrics(hit.primitive),origin));
             if(++transparentLayers>=32) return 0u;
@@ -167,7 +179,7 @@ uint stagedSurface() {
             float d=hit.distance;
             float lightPDF=emitterPDF(hit.primitive,d*d,abs(dot(normal,-direction)));
             float weight=bounce==0 || previousPDF<0 ? 1 : powerWeight(previousPDF,lightPDF);
-            addIncident(emissionAt(hit.primitive,hit.bary,true,origin)*weight);
+            addIncident(emissionAt(hit.primitive,hit.bary,true,origin,bounce==0 || previousPDF<0)*weight);
         }
         start=world+geometric*pc.parameters.x;
         visibilityAbsorption=mediumCount>0 ? MEDIUM_ABSORPTION(mediumCount-1):vec3(0);

@@ -24,11 +24,18 @@ void main()
 	if (any(greaterThanEqual(pixel, size)))
 		return;
 
+	/* LIVENESS TEST: magenta strip = HW (rt_shadows) payload active.
+	 * Temporary diagnostic; remove for release. */
+	if (pixel.y == 0 && pixel.x < 8) {
+		imageStore(shadowedColor, pixel, vec4(1.0, 0.0, 1.0, 1.0));
+		return;
+	}
+
 	vec4 color = texelFetch(sceneColor, pixel, 0);
 	float depth = texelFetch(sceneDepth, pixel, 0).r;
-	/* DEPTH_RANGE_WEAPON maps first-person models into 0.0-0.3. They are
+	/* DEPTH_RANGE_WEAPON maps first-person models into 0.0-0.01. They are
 	 * composited with a different projection and cannot use world depth. */
-	if (depth <= 0.300001 || depth >= 0.999999) {
+	if (depth <= 0.010001 || depth >= 0.999999) {
 		imageStore(shadowedColor, pixel, color);
 		return;
 	}

@@ -39,6 +39,7 @@ refexport_t* R_Export(void)
 	re.ClearScene = RE_ClearScene;
 	re.AddRefEntityToScene = RE_AddRefEntityToScene;
     re.AddRefEntityTracked = RE_AddRefEntityTracked;
+    re.AddPolyTagged = RE_AddPolyTagged;
 	re.AddPolyToScene = RE_AddPolyToScene;
 	re.LightForPoint = RE_LightForPoint;
 	re.AddLightToScene = RE_AddLightToScene;

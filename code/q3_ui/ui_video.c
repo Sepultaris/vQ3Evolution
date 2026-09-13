@@ -618,7 +618,7 @@ static float GraphicsOptions_ExposureStep( float exposure ) {
 
 static void GraphicsOptions_UpdateExposureItems( void ) {
 	int hidden = QMF_HIDDEN | QMF_INACTIVE;
-	qboolean pathTracing = s_graphicsoptions.raytracing.curvalue == 2;
+	qboolean pathTracing = s_graphicsoptions.raytracing.curvalue != 0;
 	/* The two RTX modes use the same row; no extra off-screen menu controls. */
 	if ( pathTracing ) {
 		s_graphicsoptions.rtshadowstrength.generic.flags |= hidden;
@@ -1372,7 +1372,7 @@ void GraphicsOptions_MenuInit( void )
 	};
 	/* Path tracing remains explicitly marked unfinished until reconstruction
 	 * and material/effect coverage meet the renderer's completion criteria. */
-	static const char *raytracing_names[] = { "Off", "Shadows", "Path tracing (WIP)", NULL };
+	static const char *raytracing_names[] = { "Off", "Software tracing", "Path tracing (WIP)", NULL };
 	static const char *dlss_names[] =
 	{
 		"Off",

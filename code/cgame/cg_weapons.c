@@ -22,6 +22,12 @@ Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
 //
 // cg_weapons.c -- events and effects dealing with weapons
 #include "cg_local.h"
+#include "../renderercommon/muzzle_flash.h"
+
+// One cgame definition: the QVM assembler does not isolate header-static functions.
+float CG_WeaponLightScale(float value) {
+	return R_MuzzleFlashScale(value);
+}
 
 /*
 ==========================
@@ -1034,6 +1040,7 @@ static void CG_LightningBolt( centity_t *cent, vec3_t origin ) {
 
 	beam.reType = RT_LIGHTNING;
 	beam.customShader = cgs.media.lightningShader;
+	beam.renderfx = RF_LIGHTNING_GUN;
 	trap_R_AddRefEntityToScene( &beam );
 
 	// add the impact flare if it hit something
@@ -1046,6 +1053,7 @@ static void CG_LightningBolt( centity_t *cent, vec3_t origin ) {
 
 		memset( &beam, 0, sizeof( beam ) );
 		beam.hModel = cgs.media.lightningExplosionModel;
+		beam.renderfx = RF_LIGHTNING_GUN;
 
 		VectorMA( trace.endpos, -16, dir, beam.origin );
 
@@ -1311,7 +1319,8 @@ void CG_AddPlayerWeapon( refEntity_t *parent, playerState_t *ps, centity_t *cent
 	memset( &flash, 0, sizeof( flash ) );
 	VectorCopy( parent->lightingOrigin, flash.lightingOrigin );
 	flash.shadowPlane = parent->shadowPlane;
-	flash.renderfx = parent->renderfx;
+	flash.renderfx = parent->renderfx | RF_MUZZLE_FLASH;
+	if (weaponNum == WP_LIGHTNING) flash.renderfx |= RF_LIGHTNING_GUN;
 
 	flash.hModel = weapon->flashModel;
 	if (!flash.hModel) {
@@ -1341,8 +1350,14 @@ void CG_AddPlayerWeapon( refEntity_t *parent, playerState_t *ps, centity_t *cent
 		CG_LightningBolt( nonPredictedCent, flash.origin );
 
 		if ( weapon->flashDlightColor[0] || weapon->flashDlightColor[1] || weapon->flashDlightColor[2] ) {
-			trap_R_AddLightToScene( flash.origin, 300 + (rand()&31), weapon->flashDlightColor[0],
-				weapon->flashDlightColor[1], weapon->flashDlightColor[2] );
+			// Scale radiance, not radius/reach; consume the original random draw
+			// even when disabled so this control does not alter flash animation.
+			float radius = 300 + (rand()&31);
+			float scale = CG_WeaponLightScale(cg_muzzleFlashLightScale.value);
+			if (weaponNum == WP_LIGHTNING) scale *= CG_WeaponLightScale(cg_lightningGunLightScale.value);
+			if (scale > 0)
+				trap_R_AddLightToScene( flash.origin, radius, weapon->flashDlightColor[0] * scale,
+					weapon->flashDlightColor[1] * scale, weapon->flashDlightColor[2] * scale );
 		}
 	}
 }
@@ -1831,7 +1846,7 @@ void CG_MissileHitWall( int weapon, int clientNum, vec3_t origin, vec3_t dir, im
 			VectorMA( origin, 24, dir, sprOrg );
 			VectorScale( dir, 64, sprVel );
 
-			CG_ParticleExplosion( "explode1", sprOrg, sprVel, 1400, 20, 30 );
+			CG_ParticleExplosion( "explode1", sprOrg, sprVel, 1400, 20, 30, RF_ROCKET_EXPLOSION );
 		}
 		break;
 	case WP_RAILGUN:
@@ -1911,6 +1926,7 @@ void CG_MissileHitWall( int weapon, int clientNum, vec3_t origin, vec3_t dir, im
 							   mod,	shader,
 							   duration, isSprite );
 		le->light = light;
+		if (weapon == WP_ROCKET_LAUNCHER) le->refEntity.renderfx |= RF_ROCKET_EXPLOSION;
 		VectorCopy( lightColor, le->lightColor );
 		if ( weapon == WP_RAILGUN ) {
 			// colorize with client color

@@ -183,8 +183,8 @@ qboolean vk_nv_initialize(VkImageView output_view, uint32_t width,
 	VkSamplerCreateInfo sampler_info;
 	memset(&sampler_info, 0, sizeof(sampler_info));
 	sampler_info.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
-	sampler_info.magFilter = VK_FILTER_NEAREST;
-	sampler_info.minFilter = VK_FILTER_NEAREST;
+	sampler_info.magFilter = VK_FILTER_LINEAR;
+	sampler_info.minFilter = VK_FILTER_LINEAR;
 	sampler_info.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST;
 	sampler_info.addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
 	sampler_info.addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
@@ -270,7 +270,7 @@ qboolean vk_nv_record(VkCommandBuffer command_buffer, VkImageView src_view,
 	memset(&push, 0, sizeof(push));
 	push.gain = gain;
 	push.grain = grain;
-	push.grainScale = 2.5f;
+	push.grainScale = 1.25f;
 	push.time = time;
 	push.tint = tint;
 	push.debug = debug;

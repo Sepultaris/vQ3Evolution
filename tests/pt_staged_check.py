@@ -9,6 +9,12 @@ import unittest
 ROOT = Path(__file__).resolve().parents[1]
 SHADERS = ROOT / 'code/renderer_vulkan/shaders'
 
+def hardware_source():
+    # The staged kernels are hardware-only; software profiling/NRD blocks in
+    # the shared integrator do not participate in their compiled program.
+    source=(SHADERS/'pt_integrator.glsl').read_text()
+    return re.sub(r'#ifdef PT_SOFTWARE_(?:NRD|PROFILE)\n.*?#endif\n', '', source, flags=re.S)
+
 def expected_surface(source):
     body = source[source.index('        PT_CATEGORY(0u);', source.index('for(int bounce=0;')):
                   source.index('        // Next-event estimation', source.index('void integrator'))]
@@ -35,11 +41,11 @@ def expected_lighting(source):
 class StagedTests(unittest.TestCase):
     def test_surface_preserves_actual_material_and_optical_program(self):
         actual = (SHADERS/'pt_staged_surface.glsl').read_text()
-        self.assertEqual(actual[actual.index('uint stagedSurface'):], expected_surface((SHADERS/'pt_integrator.glsl').read_text()))
+        self.assertEqual(actual[actual.index('uint stagedSurface'):], expected_surface(hardware_source()))
 
     def test_lighting_and_continuation_preserve_actual_program(self):
         actual = (SHADERS/'pt_staged_lighting.glsl').read_text()
-        self.assertEqual(actual[actual.index('uint stagedLighting'):], expected_lighting((SHADERS/'pt_integrator.glsl').read_text()))
+        self.assertEqual(actual[actual.index('uint stagedLighting'):], expected_lighting(hardware_source()))
 
     def test_rng_survives_sample_and_dispatch_boundaries(self):
         code = (SHADERS/'pt_staged.glsl').read_text()

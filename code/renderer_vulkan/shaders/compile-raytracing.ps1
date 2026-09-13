@@ -4,7 +4,7 @@ param(
     [switch]$Raster,
     [switch]$DebugSymbols,
     [string]$OutputDirectory = '',
-    [string[]]$Shaders = @('rt_shadows', 'pathtrace', 'pt_brdf', 'pt_profile', 'pt_profile_brdf', 'pt_light_loop', 'pt_light_loop_brdf', 'pt_light_loop_profile', 'pt_light_loop_profile_brdf', 'pt_cached_materials', 'pt_cached_materials_brdf', 'pt_cached_materials_loop', 'pt_cached_materials_loop_brdf', 'pt_material_cache', 'pt_compact_transport', 'pt_staged_0', 'pt_staged_1', 'pt_staged_2', 'pt_staged_3', 'pt_guides', 'pt_rr_guides', 'pt_rr_pack', 'pt_rr_post', 'pt_denoise', 'pt_temporal', 'pt_exposure', 'pt_exposure_rr', 'post_bloom_down', 'post_bloom_blur', 'post_bloom_composite', 'post_NV')
+    [string[]]$Shaders = @('rt_shadows', 'rt_shadows_cpu', 'pt_software', 'pt_software_guides', 'pathtrace', 'pt_brdf', 'pt_profile', 'pt_profile_brdf', 'pt_light_loop', 'pt_light_loop_brdf', 'pt_light_loop_profile', 'pt_light_loop_profile_brdf', 'pt_cached_materials', 'pt_cached_materials_brdf', 'pt_cached_materials_loop', 'pt_cached_materials_loop_brdf', 'pt_material_cache', 'pt_compact_transport', 'pt_staged_0', 'pt_staged_1', 'pt_staged_2', 'pt_staged_3', 'pt_guides', 'pt_rr_guides', 'pt_rr_pack', 'pt_rr_post', 'pt_denoise', 'pt_temporal', 'pt_exposure', 'pt_exposure_rr', 'post_bloom_down', 'post_bloom_blur', 'post_bloom_composite', 'post_NV')
 )
 $ErrorActionPreference = 'Stop'
 if ([string]::IsNullOrWhiteSpace($VulkanSDK)) {
@@ -24,6 +24,7 @@ function Invoke-Checked([string]$Program, [string[]]$ToolArguments) {
 }
 Invoke-Checked $CC @((Join-Path $PSScriptRoot 'bintoc.c'), '-o', $ptConverter)
 if (-not $PSBoundParameters.ContainsKey('Shaders')) { $Shaders += @('pt_rr_trace', 'pt_rr_spatial', 'pt_rr_fallback') }
+if (-not $PSBoundParameters.ContainsKey('Shaders')) { $Shaders += @('pt_software_temporal', 'pt_software_nrd', 'pt_software_nrd_guides', 'pt_software_profile', 'pt_software_nrd_profile', 'pt_software_counts', 'pt_software_nrd_counts') }
 foreach ($ptShader in $Shaders) {
     if ($ptShader -notmatch '^[a-z][a-z0-9_]+$') { throw 'Shader must be a simple source basename.' }
     $ptSource = Join-Path $PSScriptRoot "$ptShader.comp"

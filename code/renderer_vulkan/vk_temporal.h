@@ -7,6 +7,7 @@ void vk_temporal_initialize(uint32_t render_width, uint32_t render_height,
 	uint32_t output_width, uint32_t output_height);
 void vk_temporal_shutdown(void);
 qboolean vk_temporal_active(void);
+qboolean vk_temporal_nv_available(void);
 qboolean vk_temporal_scene_pass_active(void);
 VkRenderPass vk_temporal_pipeline_render_pass(void);
 uint32_t vk_temporal_render_width(void);

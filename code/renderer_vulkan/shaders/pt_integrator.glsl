@@ -1,9 +1,17 @@
+#ifndef PT_SOFTWARE_TRACE
 #extension GL_EXT_ray_query : require
+#endif
 #extension GL_EXT_nonuniform_qualifier : require
 #include "pt_shader_profile.glsl"
 // Compile-time pipeline specialization: no per-pixel quality switch/buffer.
 layout(constant_id=0) const bool ptMapLightCull=false;
 layout(constant_id=4) const bool ptDlightReservoir=false;
+#ifdef PT_SOFTWARE_NRD
+layout(binding=52,std430) buffer SoftwareMetadata { vec4 softwareMetadata[]; };
+// Measured first continuation distance; no extra visibility rays for denoising.
+vec2 softwareHitDistance;
+bool softwareDistancePending;
+#endif
 
 #ifdef PT_PARALLEL_SAMPLES
 layout(local_size_x=4, local_size_y=4, local_size_z=4) in;
@@ -14,7 +22,9 @@ layout(local_size_x=8, local_size_y=8, local_size_y_id=3) in;
 #else
 layout(local_size_x=8, local_size_y=8) in;
 #endif
+#ifndef PT_SOFTWARE_TRACE
 layout(binding=0) uniform accelerationStructureEXT sceneAS;
+#endif
 layout(binding=3, rgba8) uniform writeonly image2D outputColor;
 layout(binding=4, std430) readonly buffer Positions { float positions[]; };
 layout(binding=5, std430) readonly buffer Indices { uint indices[]; };
@@ -46,6 +56,7 @@ Layer layerProperties(uint id,int layer) {
 layout(binding=9) uniform sampler2D textures[512];
 struct Emitter { uint primitive; float cumulativePower; };
 struct EmitterGeometry { vec4 a,b,c; };
+struct Portal { vec4 rows[3]; vec4 clip; };
 layout(binding=10, std430) readonly buffer Lights {
     uvec4 lightCounts;
     vec4 lightSelection;
@@ -59,6 +70,8 @@ layout(binding=10, std430) readonly buffer Lights {
     uvec4 emitterSearchControl;
     uvec4 emitterSearchRanges[32]; // Two inclusive [low,high] pairs per vector.
     EmitterGeometry emitterGeometry[8192];
+    vec4 rocketEmission;
+    Portal portals[63];
 };
 layout(binding=11, std430) buffer Accumulation { vec4 accumulated[]; };
 struct Guide { vec4 positionDepth; vec4 normalMaterial; vec4 albedoRoughness; };
@@ -110,6 +123,8 @@ uvec3 triangle(uint primitive) {
     uint offset=primitive*3;
     return uvec3(indices[offset], indices[offset+1], indices[offset+2]);
 }
+uint portalIndex(uint primitive) { return (triangleMaterials[primitive]>>16)&63u; }
+#include "pt_muzzle_flash.glsl"
 vec2 triangleUV(uint primitive, vec2 bary) {
     uvec3 t=triangle(primitive);
     return vertices[t.x].uv.xy*(1-bary.x-bary.y) +
@@ -323,7 +338,12 @@ vec4 layerSample(uint primitive,vec2 bary,int layerIndex,mat2 baryGradients,vec3
                 viewer-worldE1*baryGradients[1].x-worldE2*baryGradients[1].y,toLocal)-uv);
     }
     }
-    return layerSampleUV(id,layerIndex,uv,gradients,context);
+    vec4 sampled=layerSampleUV(id,layerIndex,uv,gradients,context);
+    if(materials[id].layers[layerIndex].meta.y==8) {
+        vec3 world=position(t.x)*weights.x+position(t.y)*weights.y+position(t.z)*weights.z;
+        sampled.a*=clamp(length(observer-world)/max(materials[id].optical.w,1),0,1);
+    }
+    return sampled;
 }
 #ifdef PT_PROFILE_PASS
 vec4 timedLayerSample(uint primitive,vec2 bary,int layerIndex,mat2 baryGradients,vec3 observer,bool uniformTint) {
@@ -341,6 +361,7 @@ vec4 layerSample(uint primitive,vec2 bary,int layerIndex,vec3 observer) {
     return layerSample(primitive,bary,layerIndex,textureBarycentrics(primitive),observer);
 }
 #include "pt_material_layers.glsl"
+#include "pt_portal.glsl"
 #include "pt_reflective_shell.glsl"
 bool passesAlpha(uint primitive, vec2 bary,vec3 observer) {
     Material m=materialProperties(triangleMaterials[primitive]&0xffffu);
@@ -360,17 +381,23 @@ vec3 filterTransmission(uint primitive,vec2 bary,mat2 gradients,vec3 observer) {
     return materials[triangleMaterials[primitive]&0xffffu].absorption.w!=0 ? 1-color:color;
 }
 vec2 surfaceProperties(uint primitive,vec2 bary) {
+    if(portalIndex(primitive)!=0u) return vec2(1,0); // Composite guide, not a local mirror.
     Material m=materialProperties(triangleMaterials[primitive]&0xffffu);
     // ORM: R is baked occlusion (not used by physical transport), G roughness,
     // B metalness. These data channels must not undergo an sRGB conversion.
     return m.maps.z>=0 ? clamp(triangleTexture(m.maps.z,primitive,bary).gb,vec2(0.02,0),vec2(1)) : m.surface.yz;
 }
 struct Hit { float distance; uint primitive; vec2 bary; };
+#ifdef PT_SOFTWARE_TRACE
+#include "pt_software_query.glsl"
+#define queryPrimitive(query,committed) ((committed) ? (query).committedPrimitive : (query).candidatePrimitive)
+#else
 // Only the world BLAS has a second geometry; custom indices address dynamic
 // and first-person ranges. GLSL requires the committed operand to be literal.
 #define queryPrimitive(query,committed) (rayQueryGetIntersectionInstanceCustomIndexEXT(query,committed) + \
     rayQueryGetIntersectionPrimitiveIndexEXT(query,committed) + \
     (rayQueryGetIntersectionGeometryIndexEXT(query,committed)==1 ? uint(lightSelection.y):0u))
+#endif
 bool trace(vec3 origin, vec3 direction, float minimum, float maximum,
     uint purpose, out Hit hit) {
     rayQueryEXT query;
@@ -497,7 +524,7 @@ vec3 timedShadingNormal(Hit hit,vec3 direction,out vec3 geometric) {
 }
 #define shadingNormal timedShadingNormal
 #endif
-vec3 emissionAt(uint primitive, vec2 bary, bool acceptedHit,vec3 observer) {
+vec3 emissionAt(uint primitive, vec2 bary, bool acceptedHit,vec3 observer,bool visibleFlash) {
     uint id=triangleMaterials[primitive]&0xffffu;
     Material m=materialProperties(id);
     if(m.emission.y<=0) return vec3(0);
@@ -547,14 +574,20 @@ vec3 emissionAt(uint primitive, vec2 bary, bool acceptedHit,vec3 observer) {
     // q3map_lightimage is a compiler proxy, not the visible emission image.
     // Animated displays keep their own UVs; opaque foregrounds block their
     // glow for camera hits AND sampled area-light contributions.
-    return emission*m.emission.y*(!acceptedHit && m.params.x==1 ? alpha:1);
+    return emission*m.emission.y*(!acceptedHit && m.params.x==1 ? alpha:1)*weaponEmissionScale(primitive,visibleFlash);
+}
+vec3 emissionAt(uint primitive,vec2 bary,bool acceptedHit,vec3 observer) {
+    return emissionAt(primitive,bary,acceptedHit,observer,false);
 }
 #ifdef PT_PROFILE_PASS
-vec3 timedEmissionAt(uint primitive,vec2 bary,bool acceptedHit,vec3 observer) {
+vec3 timedEmissionAt(uint primitive,vec2 bary,bool acceptedHit,vec3 observer,bool visibleFlash) {
     uint previous=profileEnter(2u);
-    vec3 value=emissionAt(primitive,bary,acceptedHit,observer);
+    vec3 value=emissionAt(primitive,bary,acceptedHit,observer,visibleFlash);
     profileEnter(previous);
     return value;
+}
+vec3 timedEmissionAt(uint primitive,vec2 bary,bool acceptedHit,vec3 observer) {
+    return timedEmissionAt(primitive,bary,acceptedHit,observer,false);
 }
 #define emissionAt timedEmissionAt
 #endif
@@ -599,7 +632,11 @@ vec3 visibility(vec3 origin,vec3 direction,float distance) {
 }
 #ifdef PT_PROFILE_PASS
 vec3 timedVisibility(vec3 origin,vec3 direction,float distance) {
+#ifdef PT_SOFTWARE_PROFILE
+    uint previous=profileEnter(profileCategory==9u ? 10u:12u);
+#else
     uint previous=profileEnter(profileCategory==9u ? 10u:1u);
+#endif
     if(previous==9u) { PT_COUNT(6u); }
     PT_COUNT(2u);
     vec3 value=visibility(origin,direction,distance);
@@ -674,7 +711,7 @@ uint sampleEmitter() {
 }
 #include "pt_emitter_geometry.glsl"
 float emitterPDF(uint primitive,float distanceSquared,float cosine) {
-    float power=materials[triangleMaterials[primitive]&0xffffu].emission.y;
+    float power=emissionPower(primitive);
     // Selection probability is area * power / total, divided by area
     // and converted from area measure to solid angle at the shading point.
     return power*distanceSquared/max(lightSelection.x*cosine,0.000001);
@@ -698,6 +735,10 @@ float pointAttenuation(uint light,vec3 direction,float distanceSquared) {
 #endif
 #include "pt_fog_lighting.glsl"
 void integrator(vec3 camera,vec3 direction) {
+#ifdef PT_SOFTWARE_NRD
+    softwareHitDistance=vec2(0);
+    softwareDistancePending=false;
+#endif
     PT_CATEGORY(0u);
     PT_COUNT(0u);
 #ifdef PT_COMPACT_TRANSPORT
@@ -724,10 +765,21 @@ void integrator(vec3 camera,vec3 direction) {
     float segmentDistance=0;
     float coneWidth=0,coneSpread=pixelConeSpread();
     for(int bounce=0;bounce<int(pc.sampling.y);++bounce) {
+#ifdef PT_SOFTWARE_PROFILE
+        SW_COUNT(31u);
+#endif
         PT_CATEGORY(0u);
         Hit hit;
         float fogDistance; uint fogVolume;
-        bool found=fogPathHit(origin,direction,segmentDistance,bounce,hit,fogDistance,fogVolume);
+        bool found=fogPathHit(origin,direction,segmentDistance,previousPDF==-2 ? 1:bounce,hit,fogDistance,fogVolume);
+#ifdef PT_SOFTWARE_NRD
+        if(softwareDistancePending && (!found || materialProperties(triangleMaterials[hit.primitive]&0xffffu).params.x<2)) {
+            float distance=found ? hit.distance : pc.parameters.y;
+            softwareHitDistance=vec2(any(greaterThan(pathD,vec3(0))) ? distance:0,
+                any(greaterThan(pathS,vec3(0))) ? distance:0);
+            softwareDistancePending=false;
+        }
+#endif
         PT_CATEGORY(2u);
         if(!found && fogVolume!=0xffffffffu) {
             PT_COUNT(4u);
@@ -778,6 +830,19 @@ void integrator(vec3 camera,vec3 direction) {
             break;
         }
         vec3 world=origin+direction*hit.distance, geometric;
+        if(portalIndex(hit.primitive)!=0u) {
+            vec3 coating,transmission;
+            portalCoating(hit.primitive,hit.bary,origin,coating,transmission);
+            addIncident(coating);
+            attenuate(transmission);
+            if(++transparentLayers>=32 || !any(greaterThan(transmission,vec3(0.00001))) ||
+                !portalRay(hit.primitive,world,origin,direction)) break;
+            // The destination has its own medium; never carry local glass absorption
+            // through a camera teleport. Fog volumes are queried at the new origin.
+            mediumCount=0; previousPDF=-2; segmentDistance=0;
+            --bounce;
+            continue;
+        }
         if(m.params.x==4) {
             // There is no next ray at the bounce limit. This interface emits
             // nothing, so sampling a discarded delta lobe cannot add radiance.
@@ -871,7 +936,7 @@ void integrator(vec3 camera,vec3 direction) {
                 vec3 normal=geometricNormal(hit.primitive,area);
                 float d=hit.distance;
                 float lightPDF=emitterPDF(hit.primitive,d*d,abs(dot(normal,-direction)));
-                addIncident(emissionAt(hit.primitive,hit.bary,true,origin)*
+                addIncident(emissionAt(hit.primitive,hit.bary,true,origin,bounce==0 || previousPDF<0)*
                     (bounce==0 || previousPDF<0 ? 1:powerWeight(previousPDF,lightPDF)));
             } else attenuate(filterTransmission(hit.primitive,hit.bary,textureBarycentrics(hit.primitive),origin));
             if(++transparentLayers>=32) break;
@@ -890,7 +955,7 @@ void integrator(vec3 camera,vec3 direction) {
             float d=hit.distance;
             float lightPDF=emitterPDF(hit.primitive,d*d,abs(dot(normal,-direction)));
             float weight=bounce==0 || previousPDF<0 ? 1 : powerWeight(previousPDF,lightPDF);
-            addIncident(emissionAt(hit.primitive,hit.bary,true,origin)*weight);
+            addIncident(emissionAt(hit.primitive,hit.bary,true,origin,bounce==0 || previousPDF<0)*weight);
         }
         vec3 start=world+geometric*pc.parameters.x;
         visibilityAbsorption=mediumCount>0 ? MEDIUM_ABSORPTION(mediumCount-1):vec3(0);
@@ -1022,6 +1087,9 @@ void integrator(vec3 camera,vec3 direction) {
         pathT*=brdf*factor;
         pathE=vec3(0);
 #endif
+#ifdef PT_SOFTWARE_NRD
+        if(bounce==0) softwareDistancePending=true;
+#endif
         previousPDF=pdf;
         if(bounce>=2) {
 #ifdef PT_COMPACT_TRANSPORT
@@ -1100,13 +1168,14 @@ void writeGuide(uint index,vec3 direction) {
 #ifdef PT_RR_GUIDES
         reactive=true; // Retain full sampling under effects; no native history query.
 #else
-        if(material.params.x==3 || any(greaterThan(emissionAt(hit.primitive,hit.bary,true,pc.originNear.xyz),vec3(0.0001))))
+        if(material.params.x==3 || any(greaterThan(emissionAt(hit.primitive,hit.bary,true,pc.originNear.xyz,true),vec3(0.0001))))
             reactive=true;
 #endif
         traveled=hit.distance;
     }
     if(found) {
-        reactive=reactive || fogTransmittance(pc.originNear.xyz,direction,0,hit.distance)<0.999;
+        reactive=reactive || portalIndex(hit.primitive)!=0u ||
+            fogTransmittance(pc.originNear.xyz,direction,0,hit.distance)<0.999;
         uint id=triangleMaterials[hit.primitive]&0xffffu;
         Material m=materialProperties(id);
         vec3 world=pc.originNear.xyz+direction*hit.distance;
@@ -1118,6 +1187,9 @@ void writeGuide(uint index,vec3 direction) {
         vec3 geometric;
         vec3 n=shadingNormal(hit,direction,geometric);
         vec2 properties=surfaceProperties(hit.primitive,hit.bary);
+#ifdef PT_SOFTWARE_NRD
+        softwareMetadata[index].zw=vec2(properties.y,m.params.x==4 ? 1:0);
+#endif
 #ifndef PT_RR_GUIDES
         visibilityAbsorption=rp.cameraMedium.x>1 ? rp.cameraMedium.yzw:vec3(0);
         lightingDelta=changedLighting(hit,world,direction,n,geometric,properties);
@@ -1342,6 +1414,9 @@ void main() {
     if(any(greaterThanEqual(pixel,size))) return;
 #ifdef PT_PROFILE_PASS
     profileBegin(uvec2(size),uint(pc.sampling.z));
+#ifdef PT_SOFTWARE_PROFILE
+    if(!profileEnabled) return;
+#endif
 #endif
     uint index=uint(pixel.y*size.x+pixel.x);
     samplePixel=index; sampleNumber=uint(pc.sampling.z); sampleDimension=0;
@@ -1349,6 +1424,9 @@ void main() {
     rng=(index+1u)*747796405u+(uint(pc.sampling.z)+1u)*2891336453u;
     if(rng==0) rng=1;
 #ifdef PT_GUIDE_PASS
+#ifdef PT_SOFTWARE_NRD
+    softwareMetadata[index]=vec4(0,0,0,1);
+#endif
 #ifndef PT_RR_GUIDES
     imageStore(outputColor,pixel,vec4(0,0,0,1));
 #endif
@@ -1360,6 +1438,10 @@ void main() {
     vec3 diffuse=vec3(0), reflection=vec3(0), transmitted=vec3(0), emission=vec3(0);
 #endif
     float sampleCount=pc.sampling.x;
+#ifdef PT_SOFTWARE_NRD
+    vec2 softwareDistances=vec2(0,3.40282347e+38);
+    float softwareDiffuseCount=0;
+#endif
 #ifdef PT_RR_TRACE
     if(pc.sunRadiance.w>=2) sampleCount=clamp(rrAdaptive[index].w,1,pc.sampling.x);
 #endif
@@ -1372,6 +1454,10 @@ void main() {
         vec2 jitter=vec2(randomFloat(),randomFloat())-0.5;
         vec3 direction=primaryDirection(vec2(pixel)+0.5+jitter,size);
         integrator(pc.originNear.xyz,direction);
+#ifdef PT_SOFTWARE_NRD
+        if(softwareHitDistance.x>0) { softwareDistances.x+=softwareHitDistance.x; softwareDiffuseCount+=1; }
+        if(softwareHitDistance.y>0) softwareDistances.y=min(softwareDistances.y,softwareHitDistance.y);
+#endif
 #ifdef PT_RR_COMBINED
         // Reject a nonfinite path before it can contaminate the pixel average.
         if(!any(isnan(rrRadiance)) && !any(isinf(rrRadiance))) combined+=rrRadiance;
@@ -1382,10 +1468,21 @@ void main() {
         if(!any(isnan(radianceE)) && !any(isinf(radianceE))) emission+=radianceE;
 #endif
     }
+#ifdef PT_SOFTWARE_PROFILE
+    // Keep shading live for measurement, but never overwrite production
+    // radiance, NRD metadata, image output or temporal history during replay.
+    profileSignal=vec4((diffuse+reflection+transmitted+emission)/sampleCount,sampleCount);
+    profileEnd();
+    return;
+#endif
 #ifdef PT_RR_COMBINED
     rrStoreNoisy(pixel,index,combined/sampleCount);
 #else
     diffuse/=sampleCount; reflection/=sampleCount; transmitted/=sampleCount; emission/=sampleCount;
+#ifdef PT_SOFTWARE_NRD
+    softwareMetadata[index].xy=vec2(softwareDistances.x/max(softwareDiffuseCount,1),
+        softwareDistances.y==3.40282347e+38 ? 0:softwareDistances.y);
+#endif
     float history=pc.sampling.w;
     if(history>0) {
         diffuse=(accumulated[index].rgb*history+diffuse)/(history+1);

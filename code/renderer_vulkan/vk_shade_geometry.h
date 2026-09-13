@@ -7,7 +7,7 @@ enum Vk_Depth_Range {
 	DEPTH_RANGE_NORMAL, // [0..1]
 	DEPTH_RANGE_ZERO, // [0..0]
 	DEPTH_RANGE_ONE, // [1..1]
-	DEPTH_RANGE_WEAPON // [0..0.3]
+	DEPTH_RANGE_WEAPON // [0..0.01]
 };
 
 

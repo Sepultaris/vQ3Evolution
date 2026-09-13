@@ -110,6 +110,7 @@ vec3 applyDecals(uint receiver,vec2 receiverBary,vec3 albedo,vec3 observer,out b
     return albedo;
 }
 vec3 baseColor(uint primitive,vec2 bary,vec3 observer) {
+    if(portalIndex(primitive)!=0u) { baseColorHasDecal=false; return vec3(1); }
     Material m=materialProperties(triangleMaterials[primitive]&0xffffu);
     vec3 color=linearColor(m.maps.x>=0 ? triangleTexture(m.maps.x,primitive,bary).rgb:materialColor(primitive,bary,observer).rgb);
     return clamp(applyDecals(primitive,bary,color,observer,baseColorHasDecal),vec3(0),vec3(0.98));

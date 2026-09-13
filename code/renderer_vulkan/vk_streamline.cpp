@@ -1114,7 +1114,8 @@ extern "C" qboolean vk_sl_neural_rendering_supported(void) { return qfalse; }
 extern "C" qboolean vk_sl_frame_generation_supported(void) { return qfalse; }
 extern "C" qboolean vk_sl_reflex_supported(void) { return qfalse; }
 extern "C" const char *vk_sl_status(void) { return "NVIDIA Streamline was not included in this build"; }
-extern "C" qboolean vk_sl_configure(int, int, int, uint32_t w, uint32_t h, uint32_t *rw, uint32_t *rh) {
+extern "C" qboolean vk_sl_configure(int, int, int, uint32_t w, uint32_t h,
+	uint32_t *rw, uint32_t *rh, float) {
 	if (rw) *rw = w; if (rh) *rh = h; return qfalse;
 }
 extern "C" qboolean vk_sl_begin_frame(void) { return qfalse; }

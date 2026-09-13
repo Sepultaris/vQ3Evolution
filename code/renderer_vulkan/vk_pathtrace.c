@@ -12,6 +12,10 @@
 #include "tr_cvar.h"
 #include "R_Parser.h"
 #include "pt_blue_noise.h"
+#include "../renderercommon/muzzle_flash.h"
+#include "pt_push_debug.h"
+#include "pt_weapon_flags.h"
+#include "pt_portal_transform.h"
 
 #define PT_MAX_EMITTERS 8192
 #define PT_MAX_LIGHTS 32
@@ -78,12 +82,15 @@ typedef struct {
     uint32_t emitter_search_control[4]; // x: conservative search enabled; y: bucket count.
     uint32_t emitter_search_ranges[PT_EMITTER_SEARCH_BUCKETS][2]; // std430 uvec4[32].
     pt_emitter_geometry_t emitter_geometry[PT_MAX_EMITTERS];
+    float rocket_emission[4]; // x/y: rocket glow/light; z/w: explosion/lightning light. Same layout.
+    pt_portal_t portals[PT_MAX_PORTALS];
 } pt_lights_t;
 typedef char pt_vertex_layout_check[(sizeof(pt_vertex_t) == 96) ? 1 : -1];
 typedef char pt_layer_layout_check[(sizeof(pt_layer_t) == 352) ? 1 : -1];
 typedef char pt_material_layout_check[(sizeof(pt_material_t) == 3312) ? 1 : -1];
 typedef char pt_emitter_geometry_layout_check[(sizeof(pt_emitter_geometry_t) == 48 && offsetof(pt_lights_t, emitter_geometry) == 117856) ? 1 : -1];
-typedef char pt_lights_layout_check[(sizeof(pt_lights_t) == 80 + PT_POINT_CAPACITY * 48 + 8192 * 8 + PT_MAX_LIGHTS * 32 + 16 + 64 * 8 + PT_MAX_EMITTERS * 48) ? 1 : -1];
+typedef char pt_rocket_emission_layout_check[(offsetof(pt_lights_t, rocket_emission) == 117856 + PT_MAX_EMITTERS * 48) ? 1 : -1];
+typedef char pt_lights_layout_check[(sizeof(pt_portal_t) == 64 && sizeof(pt_lights_t) == 96 + PT_POINT_CAPACITY * 48 + 8192 * 8 + PT_MAX_LIGHTS * 32 + 16 + 64 * 8 + PT_MAX_EMITTERS * 48 + PT_MAX_PORTALS * 64) ? 1 : -1];
 typedef struct {
     VkBuffer buffer;
     VkDeviceMemory memory;
@@ -95,6 +102,7 @@ typedef struct {
 } pt_buffer_t;
 static struct {
     qboolean active, textures_dirty, logged;
+    qboolean software; // Mode 1 only; mode 2 keeps its hardware pipelines.
     qboolean frozen;
     uint32_t width, height, max_vertices, max_indices;
     uint32_t world_vertices, world_indices, texture_count;
@@ -146,6 +154,9 @@ static struct {
     float material_time, previous_material_time;
     uint32_t animated_materials, effect_materials;
     uint32_t material_count;
+    uint32_t muzzle_flash_triangles;
+    uint32_t rocket_triangles;
+    uint32_t rocket_explosion_triangles, lightning_gun_triangles;
     qboolean materials_dirty;
     int material_program_mode;
     pt_medium_t *media;
@@ -160,6 +171,7 @@ static struct {
     uint64_t timestamp_mask;
     uint32_t profile_mask;
     int profile_time;
+    double software_profile_time, software_scene_cpu;
     qboolean profile_instrumented;
     VkDescriptorSetLayout set_layout;
     VkDescriptorPool pool;
@@ -199,10 +211,13 @@ static struct {
     int texture_mode_revision;
     pt_buffer_t transmission, transmission_history[2];
     pt_buffer_t transmission_guide, previous_transmission_guide, transmission_motion;
+    pt_buffer_t software_metadata;
 } pt;
+#include "pt_software_denoise.h"
 #include "pt_ray_reconstruction.h"
 static uint32_t hash_bytes(uint32_t hash, const void *data, size_t size);
 #include "pt_shader_profile.h"
+#include "pt_software_profile.h"
 #include "pt_exposure.h"
 #include "pt_pipeline_stats.h"
 #include "pt_material_cache.h"
@@ -233,6 +248,17 @@ static qboolean lighting_pipeline_initialize(uint32_t mode)
             ((mode & 1) ? pt_cached_materials_brdf_comp_spv : pt_cached_materials_comp_spv);
         code_size = (mode & 16) ? ((mode & 1) ? pt_cached_materials_loop_brdf_comp_spv_size : pt_cached_materials_loop_comp_spv_size) :
             ((mode & 1) ? pt_cached_materials_brdf_comp_spv_size : pt_cached_materials_comp_spv_size);
+    }
+    if (pt.software) {
+        extern unsigned char pt_software_comp_spv[];
+        extern int pt_software_comp_spv_size;
+        code = pt_software_comp_spv;
+        code_size = pt_software_comp_spv_size;
+        if(sw_denoise.instance) {
+            extern unsigned char pt_software_nrd_comp_spv[];
+            extern int pt_software_nrd_comp_spv_size;
+            code=pt_software_nrd_comp_spv; code_size=pt_software_nrd_comp_spv_size;
+        }
     }
     VkShaderModule module;
     VkShaderModuleCreateInfo shader = { .sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,
@@ -278,6 +304,7 @@ static qboolean lighting_material_cache_eligible(void)
 
 static uint32_t lighting_pipeline_requested(void)
 {
+    if (pt.software) return 0; // No hardware-only specialized pipelines.
     return (r_pathTracingBRDFReuse->integer ? 1u : 0u) |
         (r_pathTracingMapLightCull->integer ? 2u : 0u) |
         (r_pathTracingAliasPDF->integer ? 4u : 0u) |
@@ -291,7 +318,7 @@ static qboolean lighting_pipeline_select(uint32_t requested)
 {
     if (requested >= ARRAY_LEN(pt.lighting_pipelines)) return qfalse;
     // Do not compile an unused reference integrator at normal startup.
-    if (compact_transport_select(requested)) {
+    if (!pt.software && compact_transport_select(requested)) {
         pt.lighting_mode = requested;
         return qtrue;
     }
@@ -341,7 +368,7 @@ void vk_pt_profile(VkCommandBuffer cmd, uint32_t point)
         gpu_label_pipeline(3, pt.temporal_pipeline, "VQ3E Temporal reconstruction");
         gpu_label_pipeline(4, pt.denoise_pipeline, "VQ3E Spatial reconstruction");
     }
-    if (pt.active && point == 0) { shader_profile_read(); pt_exposure_read(); }
+    if (pt.active && point == 0) { shader_profile_read(); if(pt.software) sw_profile_read(); pt_exposure_read(); }
     if (!pt.active || !r_pathTracingProfile->integer) { pt.profile_mask = 0; return; }
     if (!pt.profile_pool) {
         VkPhysicalDeviceProperties properties;
@@ -364,17 +391,27 @@ void vk_pt_profile(VkCommandBuffer cmd, uint32_t point)
         pt.reset_queries = (PFN_vkCmdResetQueryPool)qvkGetDeviceProcAddr(vk.device, "vkCmdResetQueryPool");
         pt.write_timestamp = (PFN_vkCmdWriteTimestamp)qvkGetDeviceProcAddr(vk.device, "vkCmdWriteTimestamp");
         VkQueryPoolCreateInfo info = { .sType = VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO,
-            .queryType = VK_QUERY_TYPE_TIMESTAMP, .queryCount = 8 };
+            .queryType = VK_QUERY_TYPE_TIMESTAMP, .queryCount = pt.software ? 13 : 8 };
         if (!create || !pt.destroy_queries || !pt.get_queries || !pt.reset_queries || !pt.write_timestamp ||
             create(vk.device, &info, NULL, &pt.profile_pool) != VK_SUCCESS) return;
     }
     if (point == 0) {
         int now = ri.Milliseconds();
-        uint64_t ticks[8];
+        uint64_t ticks[13];
+        uint32_t query_count = pt.software ? 13 : 8;
         /* The existing render fence has completed. Never introduce a profiling
          * wait: unavailable/incomplete query sets are simply discarded. */
-        if (pt.profile_mask == 255 && pt.get_queries(vk.device, pt.profile_pool, 0, 8,
-            sizeof(ticks), ticks, sizeof(uint64_t), VK_QUERY_RESULT_64_BIT) == VK_SUCCESS) {
+        if (pt.profile_mask == ((1u << query_count)-1u) && pt.get_queries(vk.device, pt.profile_pool, 0, query_count,
+            query_count*sizeof(uint64_t), ticks, sizeof(uint64_t), VK_QUERY_RESULT_64_BIT) == VK_SUCCESS) {
+            if(pt.software) {
+#define SW_MS(a,b) (((ticks[b]-ticks[a]) & pt.timestamp_mask)*pt.timestamp_period/1000000.0)
+                ri.Printf(PRINT_ALL,"%s frame=%u wall=%.3f scene_cpu=%.3f upload_bytes=%llu raster=%.3f upload=%.3f guides=%.3f trace=%.3f exposure=%.3f native=%.3f nrd=%.3f spatial=%.3f post=%.3f upscale=%.3f ui=%.3f gpu=%.3f\n",
+                    sw_profile.recorded ? "SW_PROFILE_DIAGNOSTIC":"SW_PROFILE",
+                    pt.frame, vk_pt_software_clock()-pt.software_profile_time, pt.software_scene_cpu,
+                    (unsigned long long)vk_rt_scene_upload_bytes(), SW_MS(0,1),SW_MS(1,2),SW_MS(2,3),SW_MS(3,4),
+                    SW_MS(4,8),SW_MS(8,9),SW_MS(9,10),SW_MS(5,6),SW_MS(6,11),SW_MS(11,12),SW_MS(12,7),SW_MS(0,7));
+#undef SW_MS
+            } else {
             double ms[7];
             for (int i = 0; i < 7; ++i) ms[i] = ((ticks[i+1]-ticks[i]) & pt.timestamp_mask)*pt.timestamp_period/1000000.0;
             // The direct RR writer has no packing/filter dispatch here.
@@ -383,15 +420,36 @@ void vk_pt_profile(VkCommandBuffer cmd, uint32_t point)
             ri.Printf(PRINT_ALL, "%s frame=%d raster=%.3f as=%.3f guides=%.3f trace=%.3f temporal=%.3f spatial=%.3f post=%.3f\n",
                 (pt.profile_instrumented || pt.staged.profile_written) ? "PT_PROFILE_DIAGNOSTIC" : "PT_PROFILE",
                 now-pt.profile_time, ms[0], ms[1], ms[2], ms[3], ms[4], ms[5], ms[6]);
+            }
         }
+        if(pt.software) pt.software_profile_time=vk_pt_software_clock();
         pt.profile_time = now;
         pt_rr.direct_profile_frame = qfalse;
         pt.profile_mask = 0;
-        pt.reset_queries(cmd, pt.profile_pool, 0, 8);
+        pt.reset_queries(cmd, pt.profile_pool, 0, query_count);
     }
-    if (point > 7 || (point && !(pt.profile_mask & 1))) return;
+    if (point > (pt.software ? 12u : 7u) || (point && !(pt.profile_mask & 1))) return;
     pt.write_timestamp(cmd, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, pt.profile_pool, point);
     pt.profile_mask |= 1u << point;
+}
+
+double vk_pt_software_clock(void)
+{
+    if(!r_pathTracingProfile->integer) return 0;
+#ifdef _WIN32
+    static LARGE_INTEGER frequency;
+    LARGE_INTEGER counter;
+    if(!frequency.QuadPart) QueryPerformanceFrequency(&frequency);
+    QueryPerformanceCounter(&counter);
+    return (double)counter.QuadPart*1000.0/(double)frequency.QuadPart;
+#else
+    return ri.Milliseconds();
+#endif
+}
+
+void vk_pt_software_scene_time(double start)
+{
+    if(pt.software && r_pathTracingProfile->integer) pt.software_scene_cpu=vk_pt_software_clock()-start;
 }
 
 static qboolean buffer_create(pt_buffer_t *b, VkDeviceSize size, qboolean mapped)
@@ -781,12 +839,12 @@ static uint32_t material_id(shader_t *shader)
         }
     }
     if (shader->sort == SS_PORTAL) {
-        // Only entity-confirmed static mirrors enter the PT scene. A portal
-        // texture is a coating over reflected radiance, not an opaque wall.
+        // A portal texture coats the mirror/remote radiance, not an opaque wall.
         // maps.w=2 selects that layer composition in both transport and guides.
         m->maps[3] = 2;
         m->params[0] = 0;
         m->surface[3] = 0;
+        m->optical[3] = shader->portalRange > 0 ? shader->portalRange : 256;
         if (!shader->rtMaterialDefined) {
             m->surface[1] = 0.02f;
             m->surface[2] = 1;
@@ -942,6 +1000,8 @@ static void build_light_grid(void)
     pt.sampling_dirty = qtrue;
 }
 
+#include "pt_portal.h"
+
 void vk_pt_begin_world(uint32_t vertices, uint32_t indices)
 {
     int surface;
@@ -968,6 +1028,7 @@ void vk_pt_begin_world(uint32_t vertices, uint32_t indices)
     pt.temporal_valid = qfalse;
     pt.motion_count[0] = pt.motion_count[1] = 0;
     memset(pt.motion_buckets, -1, sizeof(pt.motion_buckets));
+    portal_load_world();
     load_map_lights();
     build_light_grid();
     VectorClear(pt.sun_color);
@@ -1064,11 +1125,11 @@ void vk_pt_world_vertex(uint32_t vertex, const float *normal, const float *uv, b
     pt.world_attributes[vertex].color[3] = alpha / 255.0f;
 }
 
-void vk_pt_world_surface(uint32_t first_index, uint32_t index_count, shader_t *shader)
+void vk_pt_world_surface(uint32_t first_index, uint32_t index_count, const msurface_t *surface)
 {
     uint32_t i, id;
     if (!pt.active) return;
-    id = material_id(shader);
+    id = material_id(surface->shader) | portal_world_flags(surface);
     for (i = first_index / 3; i < (first_index + index_count) / 3; ++i)
         pt.world_materials[i] = id;
 }
@@ -1167,7 +1228,8 @@ static void test_quad(float *positions, uint32_t *indices, uint32_t *vc, uint32_
         vk_pt_world_vertex(*vc+i, normal, uv, 255);
     }
     for (int i = 0; i < 6; ++i) indices[*ic+i] = *vc+triangles[i];
-    vk_pt_world_surface(*ic, 6, R_FindShader(material, LIGHTMAP_NONE, qtrue));
+    const msurface_t surface = { .shader = R_FindShader(material, LIGHTMAP_NONE, qtrue) };
+    vk_pt_world_surface(*ic, 6, &surface);
     *vc += 4; *ic += 6;
 }
 
@@ -1346,6 +1408,7 @@ void vk_pt_capture(uint32_t first_vertex, uint32_t first_index,
     if (backEnd.currentEntity->e.renderfx & RF_THIRD_PERSON) id |= 0x80000000u;
     if (backEnd.currentEntity->e.renderfx & RF_NOSHADOW) id |= 0x40000000u;
     if (backEnd.currentEntity->e.renderfx & (RF_FIRST_PERSON | RF_DEPTHHACK)) id |= 0x20000000u;
+    id |= pt_weapon_flags(entity->e.renderfx);
     triangles = (uint32_t *)pt.triangle_materials.mapped + first_index / 3;
     for (i = 0; i < vertex_count; ++i) {
         memset(&vertices[i], 0, sizeof(vertices[i]));
@@ -1370,7 +1433,14 @@ void vk_pt_capture(uint32_t first_vertex, uint32_t first_index,
             vertices[i].previous[3] = 1;
         }
     }
-    for (i = 0; i < index_count / 3; ++i) triangles[i] = id;
+    for (i = 0; i < index_count / 3; ++i) {
+        // A batch can contain tagged and untagged polygons with the same shader.
+        unsigned flags = tess.rayDynamicPolys ? pt_weapon_flags(tess.rayPolyFlags[local_indices[i * 3]]) : 0;
+        if (shader->sort == SS_PORTAL && entity == &tr.worldEntity)
+            flags |= portal_triangle_flags(shader, world_positions+3*local_indices[i*3],
+                world_positions+3*local_indices[i*3+1], world_positions+3*local_indices[i*3+2]);
+        triangles[i] = id | flags;
+    }
 }
 
 qboolean vk_pt_initialize(uint32_t width, uint32_t height,
@@ -1380,7 +1450,11 @@ qboolean vk_pt_initialize(uint32_t width, uint32_t height,
 {
     gpu_labels_initialize();
     uint32_t i;
-    VkDescriptorSetLayoutBinding bindings[50] = {0};
+    VkDescriptorSetLayoutBinding bindings[53] = {0};
+    pt.software = r_rayTracing->integer == 1;
+    pt.width=width; pt.height=height;
+    if(pt.software) sw_denoise_initialize(output);
+    const uint32_t binding_count = pt.software ? (sw_denoise.instance ? 53:52) : 50;
     VkPhysicalDeviceProperties properties;
     VkDescriptorSetLayoutCreateInfo set_info = { .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO };
     VkDescriptorPoolSize sizes[] = {
@@ -1405,6 +1479,8 @@ qboolean vk_pt_initialize(uint32_t width, uint32_t height,
     extern int pt_denoise_comp_spv_size;
     extern unsigned char pt_temporal_comp_spv[];
     extern int pt_temporal_comp_spv_size;
+    extern unsigned char pt_software_temporal_comp_spv[];
+    extern int pt_software_temporal_comp_spv_size;
     qvkGetPhysicalDeviceProperties(vk.physical_device, &properties);
     if ((VkDeviceSize)width * height * 48 > properties.limits.maxStorageBufferRange ||
         max_vertices * sizeof(pt_vertex_t) > properties.limits.maxStorageBufferRange ||
@@ -1454,21 +1530,26 @@ qboolean vk_pt_initialize(uint32_t width, uint32_t height,
             !buffer_create(&pt.spec_history[i], (VkDeviceSize)width * height * 16, qfalse) ||
             !buffer_create(&pt.moments[i], (VkDeviceSize)width * height * 16, qfalse) ||
             !buffer_create(&pt.spec_filter[i], (VkDeviceSize)width * height * 16, qfalse)) goto fail;
+    if(sw_denoise.instance && !buffer_create(&pt.software_metadata,(VkDeviceSize)width*height*16,qfalse)) goto fail;
     pt.motion_positions[1] = malloc(max_vertices * sizeof(vec3_t));
     if (!pt.motion_positions[0] || !pt.motion_positions[1]) goto fail;
     memset(pt.motion_buckets, -1, sizeof(pt.motion_buckets));
-    for (i = 0; i < ARRAY_LEN(bindings); ++i) {
+    for (i = 0; i < binding_count; ++i) {
         bindings[i].binding = i;
         bindings[i].descriptorCount = i == 9 ? PT_MAX_TEXTURES : 1;
         bindings[i].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
         bindings[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
     }
-    bindings[0].descriptorType = VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR;
+    bindings[0].descriptorType = pt.software ? VK_DESCRIPTOR_TYPE_STORAGE_BUFFER : VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR;
+    if (pt.software) {
+        sizes[0].type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+        sizes[0].descriptorCount = sw_denoise.instance ? 4:3; // BVH + optional NRD metadata.
+    }
     bindings[1].descriptorType = bindings[2].descriptorType =
         bindings[9].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
     bindings[3].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
     bindings[24].descriptorType = bindings[25].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
-    set_info.bindingCount = ARRAY_LEN(bindings);
+    set_info.bindingCount = binding_count;
     set_info.pBindings = bindings;
     VK_CHECK(qvkCreateDescriptorSetLayout(vk.device, &set_info, NULL, &pt.set_layout));
     pool.maxSets = 1;
@@ -1493,6 +1574,18 @@ qboolean vk_pt_initialize(uint32_t width, uint32_t height,
     pipeline.layout = pt.layout;
     module_info.codeSize = pt_guides_comp_spv_size;
     module_info.pCode = (const uint32_t *)pt_guides_comp_spv;
+    if (pt.software) {
+        extern unsigned char pt_software_guides_comp_spv[];
+        extern int pt_software_guides_comp_spv_size;
+        module_info.codeSize = pt_software_guides_comp_spv_size;
+        module_info.pCode = (const uint32_t *)pt_software_guides_comp_spv;
+        if(sw_denoise.instance) {
+            extern unsigned char pt_software_nrd_guides_comp_spv[];
+            extern int pt_software_nrd_guides_comp_spv_size;
+            module_info.codeSize=pt_software_nrd_guides_comp_spv_size;
+            module_info.pCode=(const uint32_t *)pt_software_nrd_guides_comp_spv;
+        }
+    }
     VK_CHECK(qvkCreateShaderModule(vk.device, &module_info, NULL, &module));
     pipeline.stage.module = module;
     VK_CHECK(qvkCreateComputePipelines(vk.device, VK_NULL_HANDLE, 1, &pipeline, NULL, &pt.guide_pipeline));
@@ -1503,8 +1596,8 @@ qboolean vk_pt_initialize(uint32_t width, uint32_t height,
     pipeline.stage.module = module;
     VK_CHECK(qvkCreateComputePipelines(vk.device, VK_NULL_HANDLE, 1, &pipeline, NULL, &pt.denoise_pipeline));
     qvkDestroyShaderModule(vk.device, module, NULL);
-    module_info.codeSize = pt_temporal_comp_spv_size;
-    module_info.pCode = (const uint32_t *)pt_temporal_comp_spv;
+    module_info.codeSize = pt.software ? pt_software_temporal_comp_spv_size : pt_temporal_comp_spv_size;
+    module_info.pCode = (const uint32_t *)(pt.software ? pt_software_temporal_comp_spv : pt_temporal_comp_spv);
     VK_CHECK(qvkCreateShaderModule(vk.device, &module_info, NULL, &module));
     pipeline.stage.module = module;
     VK_CHECK(qvkCreateComputePipelines(vk.device, VK_NULL_HANDLE, 1, &pipeline, NULL, &pt.temporal_pipeline));
@@ -1567,6 +1660,8 @@ qboolean vk_pt_initialize(uint32_t width, uint32_t height,
     pt.max_vertices = max_vertices;
     pt.max_indices = max_indices;
     pt.active = qtrue;
+    if(sw_denoise.instance) bind_buffer(52,pt.software_metadata.buffer,pt.software_metadata.size);
+    if(pt.software) sw_profile_initialize();
     ri.Printf(PRINT_ALL, "Experimental native path tracer initialized at %ux%u\n", width, height);
     return qtrue;
 fail:
@@ -1576,6 +1671,9 @@ fail:
 
 void vk_pt_shutdown(void)
 {
+    sw_profile_shutdown();
+    sw_denoise_shutdown();
+    buffer_destroy(&pt.software_metadata);
     pt_exposure_shutdown();
     rr_shutdown();
     memset(&pt_gpu_labels, 0, sizeof(pt_gpu_labels));
@@ -1648,6 +1746,15 @@ static uint32_t hash_bytes(uint32_t hash, const void *data, size_t size)
     return hash;
 }
 
+void vk_pt_software_scene(VkBuffer nodes, VkDeviceSize node_size,
+    VkBuffer links, VkDeviceSize link_size, VkBuffer triangles, VkDeviceSize triangle_size)
+{
+    if (!pt.active || !pt.software) return;
+    bind_buffer(0, nodes, node_size);
+    bind_buffer(50, links, link_size);
+    bind_buffer(51, triangles, triangle_size);
+}
+
 qboolean vk_pt_record(VkCommandBuffer cmd, VkAccelerationStructureKHR scene,
     VkBuffer positions, VkBuffer indices, const float *cpu_positions,
     const uint32_t *cpu_indices, uint32_t vertex_count, uint32_t index_count,
@@ -1661,6 +1768,18 @@ qboolean vk_pt_record(VkCommandBuffer cmd, VkAccelerationStructureKHR scene,
     pt_temporal_params_t *reconstruction = pt.temporal_params.mapped;
     pt_lights_t *lights = pt.lights.mapped;
     const float ambient = r_pathTracingAmbient->value;
+    const float flash_brightness = R_MuzzleFlashScale(r_muzzleFlashBrightness->value);
+    const float flash_light_scale = R_MuzzleFlashScale(r_muzzleFlashLightScale->value);
+    const float rocket_brightness = R_MuzzleFlashScale(r_rocketBrightness->value);
+    const float rocket_light_scale = R_MuzzleFlashScale(r_rocketLightScale->value);
+    const float explosion_light_scale = R_MuzzleFlashScale(r_rocketExplosionLightScale->value);
+    const float lightning_light_scale = R_MuzzleFlashScale(r_lightningGunLightScale->value);
+    const qboolean rocket_changed = lights->rocket_emission[0] != rocket_brightness ||
+        lights->rocket_emission[1] != rocket_light_scale ||
+        lights->rocket_emission[2] != explosion_light_scale || lights->rocket_emission[3] != lightning_light_scale;
+    const qboolean flash_changed =
+        memcmp(&lights->emitter_search_control[2], &flash_brightness, sizeof(float)) ||
+        memcmp(&lights->emitter_search_control[3], &flash_light_scale, sizeof(float));
     const qboolean ambient_changed = lights->sky_environment[1] != ambient;
     const float sun_angle = r_pathTracingSunAngle->value * (float)(M_PI / 360.0);
     const float sun_scale = r_pathTracingSunScale->value;
@@ -1735,13 +1854,35 @@ qboolean vk_pt_record(VkCommandBuffer cmd, VkAccelerationStructureKHR scene,
         qvkUpdateDescriptorSets(vk.device, 1, &write, 0, NULL);
         pt.textures_dirty = qfalse;
     }
-    if (!r_pathTracingReference->integer || !pt.frozen) {
+    if (!r_pathTracingReference->integer || !pt.frozen || flash_changed || rocket_changed) {
+        pt.muzzle_flash_triangles = 0;
+        pt.rocket_triangles = 0;
+        pt.rocket_explosion_triangles = pt.lightning_gun_triangles = 0;
         memset(lights, 0, sizeof(*lights));
         lights->sky_environment[0] = pt.sky_material+1;
         lights->selection[1] = pt.world_opaque_indices/3;
         for (i = 0; i < index_count / 3; ++i) {
             vec3_t e1, e2, cross;
             float power = materials[triangle_materials[i] & 0xffffu].emission[1];
+            // A remote view is not a local area emitter. Its coating and
+            // remote radiance are evaluated when a ray actually enters it.
+            if (triangle_materials[i] & PT_PORTAL_MASK) power = 0;
+            if (triangle_materials[i] & 0x04000000u) {
+                ++pt.muzzle_flash_triangles;
+                power *= flash_light_scale;
+            } else if (triangle_materials[i] & 0x02000000u) {
+                ++pt.rocket_triangles;
+                power *= rocket_light_scale;
+            }
+            if (triangle_materials[i] & 0x01000000u) {
+                ++pt.rocket_explosion_triangles;
+                power *= explosion_light_scale;
+            }
+            if (triangle_materials[i] & 0x00800000u) {
+                ++pt.lightning_gun_triangles;
+                power *= lightning_light_scale;
+            }
+            float emission_power = power;
             const float *a, *b, *c;
             if (triangle_materials[i] & 0x08000000u) {
                 for (uint32_t v = 0; v < 3; ++v) {
@@ -1770,7 +1911,7 @@ qboolean vk_pt_record(VkCommandBuffer cmd, VkAccelerationStructureKHR scene,
              * camera visibility. Both NEE and BSDF-hit MIS use this same PDF. */
             lights->selection[0] += power;
             cache_emitter_geometry(&lights->emitter_geometry[lights->counts[0]], a, b, c,
-                materials[triangle_materials[i] & 0xffffu].emission[1]);
+                emission_power);
             lights->emitters[lights->counts[0]].primitive = i;
             lights->emitters[lights->counts[0]++].cumulative_power = lights->selection[0];
         }
@@ -1795,6 +1936,14 @@ qboolean vk_pt_record(VkCommandBuffer cmd, VkAccelerationStructureKHR scene,
         build_emitter_search(lights->emitters, lights->counts[0], lights->selection[0], lights->emitter_search_ranges);
     lights->emitter_search_control[0] = r_pathTracingEmitterSearch->integer != 0;
     lights->emitter_search_control[1] = PT_EMITTER_SEARCH_BUCKETS;
+    // Reuse reserved lanes; controls remain live even in reference mode.
+    memcpy(&lights->emitter_search_control[2], &flash_brightness, sizeof(float));
+    memcpy(&lights->emitter_search_control[3], &flash_light_scale, sizeof(float));
+    lights->rocket_emission[0] = rocket_brightness;
+    lights->rocket_emission[1] = rocket_light_scale;
+    lights->rocket_emission[2] = explosion_light_scale;
+    lights->rocket_emission[3] = lightning_light_scale;
+    if (!r_pathTracingReference->integer || !pt.frozen) portal_update(lights);
     pt.frozen = r_pathTracingReference->integer != 0;
     // Keep the live control outside the frozen-reference geometry/light build.
     // Reuse a reserved scalar in the existing light buffer, without changing ABI.
@@ -1807,12 +1956,19 @@ qboolean vk_pt_record(VkCommandBuffer cmd, VkAccelerationStructureKHR scene,
         c[16+i] = pt.sun_direction[i]; c[24+i] = pt.sun_color[i] * sun_scale / 100.0f;
     }
     c[7] = far_distance; c[11] = projection[0]; c[15] = projection[5];
+    /* Exposure initialization writes binding 49 of pt.set. In software mode,
+     * do it before any dispatch binds that set, including when enabled live. */
+    if (pt.software && pt_exposure_enabled()) pt_exposure_initialize();
     pt.exposure = pt_exposure_current();
     c[19] = pt.exposure;
     c[20] = 0.02f; c[21] = ray_distance;
     c[22] = projection[8]; c[23] = projection[9];
     c[27] = r_pathTracingDenoise->integer && !r_pathTracingReference->integer ? 1.0f : 0.0f;
     c[28] = r_pathTracingSamples->integer; c[29] = r_pathTracingBounces->integer;
+    /* Flood-proof PT twin of mode-1's sw_dbg: write the exact push block that
+     * this frame's PT invocations consume to a FILE (Streamline cannot flood a
+     * FILE the way it floods the console). Diff against sw_shadow_debug.log. */
+    pt_push_debug_record(c,r_rayTracing->integer,r_pathTracingSamples->integer,vertex_count/3);
     hash = hash_bytes(2166136261u, cpu_positions + pt.world_vertices * 3,
         (vertex_count - pt.world_vertices) * 3 * sizeof(float));
     hash = hash_bytes(hash, cpu_indices + pt.world_indices,
@@ -1839,10 +1995,16 @@ qboolean vk_pt_record(VkCommandBuffer cmd, VkAccelerationStructureKHR scene,
     camera_medium(origin, current_medium);
     radiance_hash = hash_bytes(2166136261u, current_medium, sizeof(current_medium));
     radiance_hash = hash_bytes(radiance_hash, &ambient, sizeof(ambient));
+    radiance_hash = hash_bytes(radiance_hash, &flash_brightness, sizeof(flash_brightness));
+    radiance_hash = hash_bytes(radiance_hash, &flash_light_scale, sizeof(flash_light_scale));
+    radiance_hash = hash_bytes(radiance_hash, &rocket_brightness, sizeof(rocket_brightness));
+    radiance_hash = hash_bytes(radiance_hash, &rocket_light_scale, sizeof(rocket_light_scale));
+    radiance_hash = hash_bytes(radiance_hash, &explosion_light_scale, sizeof(explosion_light_scale));
+    radiance_hash = hash_bytes(radiance_hash, &lightning_light_scale, sizeof(lightning_light_scale));
     radiance_hash = hash_bytes(radiance_hash, &sun_angle, sizeof(sun_angle));
     radiance_hash = hash_bytes(radiance_hash, &sun_scale, sizeof(sun_scale));
     radiance_hash = hash_bytes(radiance_hash, &light_radius, sizeof(light_radius));
-    pt_rr.frame_ready = rr_requested();
+    pt_rr.frame_ready = !pt.software && rr_requested();
     if (pt_rr.frame_ready != pt_rr.previous_active) pt.temporal_valid = qfalse;
     uint32_t rr_sampling = pt_rr.frame_ready && (pt.lighting_mode == 57 || pt.lighting_mode == 61 ||
         pt.lighting_mode == 121 || pt.lighting_mode == 125) &&
@@ -1877,7 +2039,7 @@ qboolean vk_pt_record(VkCommandBuffer cmd, VkAccelerationStructureKHR scene,
     memcpy(reconstruction->up, pt.previous_temporal_camera + 12, sizeof(float) * 4);
     reconstruction->jitter_history_reset[0] = pt.previous_temporal_camera[22];
     reconstruction->jitter_history_reset[1] = pt.previous_temporal_camera[23];
-    reconstruction->jitter_history_reset[2] = geometry_changed ?
+    reconstruction->jitter_history_reset[2] = geometry_changed && !(pt.software && sw_history->integer) ?
         MIN(r_pathTracingHistory->integer, 4) : r_pathTracingHistory->integer;
     reconstruction->jitter_history_reset[3] = reject_history ? 1 : 0;
     reconstruction->options[0] = temporal_enabled ? 1 : 0;
@@ -1917,6 +2079,7 @@ qboolean vk_pt_record(VkCommandBuffer cmd, VkAccelerationStructureKHR scene,
     if (pt.history == 32)
         ri.Printf(PRINT_ALL, "Path tracing reference accumulation: %u samples per pixel\n",
             pt.history * r_pathTracingSamples->integer);
+    if (!pt.software) {
     as.accelerationStructureCount = 1;
     as.pAccelerationStructures = &scene;
     memset(&write, 0, sizeof(write));
@@ -1925,6 +2088,7 @@ qboolean vk_pt_record(VkCommandBuffer cmd, VkAccelerationStructureKHR scene,
     write.descriptorCount = 1;
     write.descriptorType = VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR;
     qvkUpdateDescriptorSets(vk.device, 1, &write, 0, NULL);
+    }
     bind_buffer(4, positions, pt.max_vertices * sizeof(float) * 3);
     bind_buffer(5, indices, pt.max_indices * sizeof(uint32_t));
     for (i = 0; i < 2; ++i) {
@@ -2027,8 +2191,8 @@ qboolean vk_pt_record(VkCommandBuffer cmd, VkAccelerationStructureKHR scene,
     if (light_loop_active != pt.light_loop_active)
         ri.Printf(PRINT_ALL, "PT_LIGHT_LOOP enabled=%d requested=%d\n", light_loop_active, r_pathTracingLightLoop->integer);
     pt.light_loop_active = light_loop_active;
-    pt.profile_instrumented = shader_profile_bind(cmd, brdf_active, map_light_cull_active, alias_pdf_active, emitter_geometry_active, light_loop_active);
-    qboolean compact_active = !pt.profile_instrumented && compact_transport_select(pt.lighting_mode);
+    pt.profile_instrumented = !pt.software && shader_profile_bind(cmd, brdf_active, map_light_cull_active, alias_pdf_active, emitter_geometry_active, light_loop_active);
+    qboolean compact_active = !pt.software && !pt.profile_instrumented && compact_transport_select(pt.lighting_mode);
     if (compact_active != pt.compact_transport_active)
         ri.Printf(PRINT_ALL, "PT_COMPACT_TRANSPORT enabled=%d requested=%d\n", compact_active, r_pathTracingCompactTransport->integer);
     pt.compact_transport_active = compact_active;
@@ -2056,9 +2220,11 @@ qboolean vk_pt_record(VkCommandBuffer cmd, VkAccelerationStructureKHR scene,
     if (staged_active) staged_record(cmd, c);
     vk_pt_profile(cmd, 4);
     if (pt.profile_instrumented) shader_profile_finish(cmd);
+    if(pt.software) sw_profile_record(cmd,c);
     if (pt_rr.frame_ready) rr_pack(cmd, c, rr_trace);
     if (pt_exposure_enabled()) pt_exposure_dispatch(cmd, c);
     pt_rr.direct_profile_frame = rr_trace;
+    if(pt.software) vk_pt_profile(cmd,8);
     if (c[27] != 0 && !pt_rr.frame_ready) {
         /* Spatial reconstruction never feeds back into the unbiased reference
          * accumulator. Every pass reads a distinct source buffer. */
@@ -2070,9 +2236,13 @@ qboolean vk_pt_record(VkCommandBuffer cmd, VkAccelerationStructureKHR scene,
             qvkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pt.temporal_pipeline);
             qvkCmdDispatch(cmd, (pt.width + 7) / 8, (pt.height + 7) / 8, 1);
         }
+        if(pt.software) vk_pt_profile(cmd,9);
+        qboolean software_filtered = pt.software && sw_denoise_record(cmd,c);
+        if(pt.software) vk_pt_profile(cmd,10);
+        if(pt.software) qvkCmdBindDescriptorSets(cmd,VK_PIPELINE_BIND_POINT_COMPUTE,pt.layout,0,1,&pt.set,0,NULL);
         qvkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pt.denoise_pipeline);
         vk_pt_profile(cmd, 5);
-        for (i = 0; i < 3; ++i) {
+        for (i = 0; !software_filtered && i < 3; ++i) {
             qvkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
                 VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, &barrier, 0, NULL, 0, NULL);
             c[30] = (float)i;
@@ -2098,7 +2268,10 @@ qboolean vk_pt_record(VkCommandBuffer cmd, VkAccelerationStructureKHR scene,
         }
     }
     pt.temporal_valid = temporal_enabled;
-    if (c[27] == 0 || pt_rr.frame_ready) vk_pt_profile(cmd, 5);
+    if (c[27] == 0 || pt_rr.frame_ready) {
+        if(pt.software) { vk_pt_profile(cmd,9); vk_pt_profile(cmd,10); }
+        vk_pt_profile(cmd, 5);
+    }
     vk_pt_profile(cmd, 6);
     if (!r_pathTracingReference->integer) pt.motion_frame ^= 1;
     if (!pt.logged) {
@@ -2111,6 +2284,26 @@ qboolean vk_pt_record(VkCommandBuffer cmd, VkAccelerationStructureKHR scene,
 
 void vk_pt_info_f(void)
 {
+    if (pt.active) {
+        const pt_lights_t *lights = pt.lights.mapped;
+        for (uint32_t i = 0; i < pt_portal_count; ++i) {
+            const pt_portal_t *p = &lights->portals[i];
+            uint32_t id = material_id(pt_portals[i].surface->shader);
+            const pt_material_t *m = (const pt_material_t *)pt.materials.mapped+id;
+            ri.Printf(PRINT_ALL, "PT_PORTAL material %u layers %.0f range %.1f\n", id, m->composition[0], m->optical[3]);
+            for (int layer = 0; layer < (int)m->composition[0]; ++layer) {
+                const pt_layer_t *l = &m->layers[layer];
+                ri.Printf(PRINT_ALL, "PT_PORTAL layer %d %s blend %x rgb %.0f alpha %.0f program %.0f\n", layer,
+                    pt.textures[(int)l->images[0][0]]->imgName, (unsigned)l->generators[3],
+                    l->meta[0], l->meta[1], l->vectors[0][3]);
+            }
+            ri.Printf(PRINT_ALL, "PT_PORTAL %u clip %.3f %.3f %.3f %.3f\n", i,
+                p->clip[0], p->clip[1], p->clip[2], p->clip[3]);
+            for (int row = 0; row < 3; ++row)
+                ri.Printf(PRINT_ALL, "PT_PORTAL row %d %.3f %.3f %.3f %.3f\n", row,
+                    p->rows[row][0], p->rows[row][1], p->rows[row][2], p->rows[row][3]);
+        }
+    }
     ri.Printf(PRINT_ALL, "RR sampling: light reuse %u, adaptive %u, ceiling %d spp, workgroup 8x%u\n",
         pt_rr.sampling_flags & 1u, (pt_rr.sampling_flags >> 1) & 1u, r_pathTracingSamples->integer, pt_rr.rows);
     ri.Printf(PRINT_ALL, "Path tracing staged prototype: requested %d, active %d, rows %u, state %llu bytes\n",
@@ -2140,6 +2333,15 @@ void vk_pt_info_f(void)
         pt.active, pt.frame, pt.history, pt.camera_resets, pt.scene_resets);
     ri.Printf(PRINT_ALL, "Path tracing ambient fill: %.3f (0 disables; exposure %.3f)\n",
         r_pathTracingAmbient->value, r_pathTracingExposure->value);
+    ri.Printf(PRINT_ALL, "Muzzle flash controls: brightness %.3f, light %.3f, tagged triangles %u\n",
+        R_MuzzleFlashScale(r_muzzleFlashBrightness->value), R_MuzzleFlashScale(r_muzzleFlashLightScale->value),
+        pt.muzzle_flash_triangles);
+    ri.Printf(PRINT_ALL, "Rocket controls: brightness %.3f, light %.3f, tagged triangles %u\n",
+        R_MuzzleFlashScale(r_rocketBrightness->value), R_MuzzleFlashScale(r_rocketLightScale->value),
+        pt.rocket_triangles);
+    ri.Printf(PRINT_ALL, "Weapon effect lights: rocket explosion %.3f (%u triangles), lightning gun %.3f (%u triangles)\n",
+        R_MuzzleFlashScale(r_rocketExplosionLightScale->value), pt.rocket_explosion_triangles,
+        R_MuzzleFlashScale(r_lightningGunLightScale->value), pt.lightning_gun_triangles);
     ri.Printf(PRINT_ALL, "Path tracing penumbra: sun angle %.3f degrees, sun scale %.3f, light radius %.3f units (0 = point source)\n",
         r_pathTracingSunAngle->value, r_pathTracingSunScale->value, r_pathTracingLightRadius->value);
     ri.Printf(PRINT_ALL, "Path tracing auto exposure: %s, exposure %.3f, target %.3f, speed %.2fs, range %.2f-%.2f\n",

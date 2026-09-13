@@ -581,6 +581,11 @@ intptr_t CL_CgameSystemCalls( intptr_t *args ) {
             re.AddRefEntityToScene(VMA(1));
         return 0;
 	case CG_R_ADDPOLYTOSCENE:
+	case CG_R_ADDPOLYTAGGED:
+		if (args[0] == CG_R_ADDPOLYTAGGED && re.AddPolyTagged) {
+			re.AddPolyTagged(args[1], args[2], VMA(3), args[4]);
+			return 0;
+		}
 		re.AddPolyToScene( args[1], args[2], VMA(3), 1 );
 		return 0;
 	case CG_R_ADDPOLYSTOSCENE:

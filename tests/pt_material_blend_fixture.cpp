@@ -14,6 +14,7 @@ using std::min;
 using std::max;
 using std::abs;
 using std::sqrt;
+using std::pow;
 static float max(float a,float b){return std::max(a,b);}
 struct vec2 {};
 struct mat2 { int footprint; mat2():footprint(37){} mat2(int n):footprint(n){} };
@@ -29,6 +30,9 @@ static vec3 operator*(vec3 a,vec3 b){return {a.x*b.x,a.y*b.y,a.z*b.z};}
 static vec3 operator+(vec3 a,vec3 b){return {a.x+b.x,a.y+b.y,a.z+b.z};}
 static vec3 operator-(vec3 a,vec3 b){return {a.x-b.x,a.y-b.y,a.z-b.z};}
 static vec3 operator/(vec3 a,float b){return {a.x/b,a.y/b,a.z/b};}
+static vec3 operator/(vec3 a,vec3 b){return {a.x/b.x,a.y/b.y,a.z/b.z};}
+static vec3 max(vec3 a,vec3 b){return {max(a.x,b.x),max(a.y,b.y),max(a.z,b.z)};}
+static vec3 pow(vec3 a,vec3 b){return {float(pow(a.x,b.x)),float(pow(a.y,b.y)),float(pow(a.z,b.z))};}
 struct vec4 {
     float x,y,z; union {float w,a;};
     vec4(float f=0):x(f),y(f),z(f),w(f){}
@@ -67,9 +71,19 @@ static int randomCalls;
 static float randomFloat(){++randomCalls;return .5f;}
 #include "pt_glow_coverage.inc"
 #include "pt_reflective_shell.inc"
+// Weapon multipliers are independently tested by pt_emitter_geometry_check;
+// these untagged material fixtures use unit emission.
+static float weaponEmissionScale(uint,bool){return 1;}
+static struct {vec4 sunExposure;} pc;
+#include "pt_portal_coating.inc"
+#include "pt_portal_tonemap.inc"
 #include "pt_material_emission.inc"
 static vec3 emissionAt(uint p,vec2 b,bool hit){return emissionAt(p,b,hit,vec3(7,8,9));}
 static void expect(vec4 a,vec4 b){
+    if (std::abs(a.x-b.x)>=1e-6 || std::abs(a.y-b.y)>=1e-6 ||
+        std::abs(a.z-b.z)>=1e-6 || std::abs(a.w-b.w)>=1e-6)
+        fprintf(stderr,"actual %.9g %.9g %.9g %.9g; expected %.9g %.9g %.9g %.9g; exposure %.9g\n",
+            a.x,a.y,a.z,a.w,b.x,b.y,b.z,b.w,pc.sunExposure.w);
     assert(std::abs(a.x-b.x)<1e-6 && std::abs(a.y-b.y)<1e-6 &&
            std::abs(a.z-b.z)<1e-6 && std::abs(a.w-b.w)<1e-6);
 }
@@ -81,6 +95,40 @@ static void reset(int count,int base,int mask,int overlays){
     std::fill(reads,reads+9,0); physical=Material{};
 }
 int main(){
+    // Q3DM0 aperture: alpha coating, rotating multiplicative stage, additive
+    // wave, then distance-faded fog. The actual forward tone mapper must
+    // recover the authored coating at every supported scene exposure.
+    for(float exposure : {.01f,.1f,.5f,1.f,2.f,5.f,8.f,16.f})
+    for(int fade=0;fade<=100;++fade) {
+        pc.sunExposure.w=exposure;
+        reset(4,0,4,3);
+        materials[0].layers[0].generators.w=0x65;
+        materials[0].layers[1].generators.w=0x13;
+        materials[0].layers[2].generators.w=0x22;
+        materials[0].layers[3].generators.w=0x65;
+        samples[0]=vec4(.1f,.3f,.7f,.2f);
+        samples[1]=vec4(.3f,.6f,.8f,1);
+        samples[2]=vec4(.4f,.1f,.2f,1);
+        samples[3]=vec4(.1f,.2f,.4f,fade/100.f);
+        vec3 coating,transmission;
+        portalCoating(0,{},vec3(7,8,9),coating,transmission);
+        vec3 expected=samples[0].rgb()*.2f;
+        expected=expected*samples[1].rgb()+samples[2].rgb();
+        expected=samples[3].rgb()*(fade/100.f)+expected*(1-fade/100.f);
+        expect(vec4(toneMap(coating),1),vec4(expected,1));
+        vec3 expectedTransmission=linearColor(samples[1].rgb())*(.8f*(1-fade/100.f));
+        expect(vec4(transmission,1),vec4(expectedTransmission,1));
+        for(int i=0;i<4;++i) assert(reads[i]==1);
+        if(fade==100) expect(vec4(transmission,1),vec4(0,0,0,1));
+    }
+    for(float exposure : {.01f,1.f,5.f,16.f}) {
+        pc.sunExposure.w=exposure;
+        for(int shade=0;shade<=255;++shade) {
+            vec3 display(shade/255.f);
+            expect(vec4(toneMap(portalArtworkRadiance(display)),1),vec4(display,1));
+        }
+    }
+    puts("PASS: actual portal coating + forward tone mapper preserve authored brightness across exposure 0.01-16, all byte shades and alpha fades; HDR transmission unchanged");
     // Execute the real world uploader, then feed its interpolated alpha to
     // the real GLSL layer compositor. World alpha is not baked RGB lighting.
     const float terrainNormal[3]={0,0,1},terrainUV[2]={.25f,.75f};

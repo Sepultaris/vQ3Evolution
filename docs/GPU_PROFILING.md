@@ -4,13 +4,14 @@ This workflow diagnoses the normal optimized renderer. It is not a performance
 optimization and profiler frame times must not be used as FPS acceptance results.
 
 The original pre-RR captures were analyzed in
-[GPU performance diagnosis](GPU_PERFORMANCE_ANALYSIS.md). Those counters are
+[GPU performance diagnosis](archive/GPU_PERFORMANCE_ANALYSIS.md). Those counters are
 historical, not a profile of the current combined RR tracer. See
 [current status](STATUS.md) and the [later RR record](archive/RAY_RECONSTRUCTION_DEVELOPMENT.md)
 before selecting a new capture target.
 
-The current RR capture and source-line findings are recorded in
-[the 2026-09-09 profiler repair and capture](GPU_PROFILE_20260909.md).
+The dated RR capture and source-line findings are recorded in
+[the 2026-09-09 profiler repair and capture](archive/GPU_PROFILE_20260909.md).
+They describe that build and configuration, not a fresh profile of later changes.
 
 ## Tool versions used in the 2026-09-08 setup
 
@@ -51,7 +52,7 @@ compare their SHA-256 hashes before accepting symbol payloads. The historical
 setup performed this check on `pt_compact_transport`, `pt_guides`,
 `pt_material_cache`, `pt_temporal` and `pt_denoise`. The current RR trace, guides
 and post payloads passed a separate fresh comparison on 2026-09-09; hashes and
-isolated-build provenance are in [the current capture report](GPU_PROFILE_20260909.md).
+isolated-build provenance are in [that capture report](archive/GPU_PROFILE_20260909.md).
 Choose the shaders actually active in the captured configuration and restore
 normal payloads before a production commit.
 These are source/line symbols, not NonSemantic function/call-site debug info.

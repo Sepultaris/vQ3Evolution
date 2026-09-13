@@ -1006,6 +1006,9 @@ R_AddDrawSurf
 */
 void R_AddDrawSurf( surfaceType_t *surface, shader_t *shader, int fogIndex, int dlightMap )
 {
+	// Detect the mod's 3D brightness overlay before the backend starts the
+	// HUD render pass, not while drawing the already-too-late overlay view.
+	if (shader->nvOverlay) R_NvOverlaySet();
 	// instead of checking for overflow, we just mask the index so it wraps around
 	int index = tr.refdef.numDrawSurfs & DRAWSURF_MASK;
 	// the sort data is packed into a single 32 bit value so it can be

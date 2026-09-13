@@ -17,13 +17,15 @@ git status --short
 ```
 
 It checks project Markdown links/anchors, ignore-policy examples, accidental
-tracked artifacts, candidate file sizes, common credential/key forms and the
-embedded bytecode/C-array pairs. It includes untracked addable files, but does
+tracked artifacts (including compiled/extracted QVMs), candidate file sizes,
+documented numeric defaults, common credential/key forms and the embedded
+bytecode/C-array pairs, including missing counterparts. It includes untracked addable files, but does
 not stage anything or scan Git history. Credential detection is deliberately
 limited and never prints matching values; review the diff yourself as well.
 External web links are not fetched or certified by this offline check.
 
-Build trees, SDK/model downloads, game/mod PK3s, local settings, screenshots,
+Build trees and scratch directories, SDK/model downloads, game/mod PK3s and
+compiled QVMs, local settings, screenshots,
 profiling captures and runtime binaries must remain ignored. Already tracked
 upstream libraries under `code/libs` are preserved. GLSL, embedded shader
 payloads, generated blue noise, regression fixtures, test scenarios and scripts
@@ -48,6 +50,11 @@ python tests/pt_rr_lean_check.py --cxx g++ --sdk $env:VULKAN_SDK
 python tests/pt_material_layers_check.py --cc gcc --cxx g++ --sdk $env:VULKAN_SDK
 python tests/vk_texture_memory_check.py --cc gcc --sdk $env:VULKAN_SDK
 tests/run-engine-options-check.ps1 -Compiler gcc
+tests/run-muzzle-flash-check.ps1 -Compiler gcc
+tests/run-pt-push-debug-check.ps1 -Compiler gcc
+python tests/nv_activation_check.py --cc gcc --sdk $env:VULKAN_SDK
+g++ -std=c++17 -O2 -I code/renderer_vulkan/shaders tests/nv_look_fixture.cpp -o build-widescreen/nv-look-check.exe
+./build-widescreen/nv-look-check.exe
 ```
 
 Pass full compiler paths if they are not on PATH. The transport checker accepts
@@ -60,6 +67,12 @@ Consult each check's `--help` for its dependencies and opt-in GPU modes.
 The performance runner and independent process guard accept explicit 1–120 second
 limits. Allow time for setup and the complete scenario; a guard timeout is a
 safety stop, not a successful lifecycle test.
+
+Software tracing and optional denoising have separate **offscreen GPU** checks
+in [the software guide](RTX.md#verification) and
+[denoising guide](SOFTWARE_DENOISING.md#verification). They use actual devices;
+do not describe them as CPU-only checks or run them unintentionally during a
+documentation-only pass.
 
 ## Embedded shaders
 
@@ -134,21 +147,44 @@ script followed by watchdog termination remains diagnostic-only. Neither
 increasing the timeout silently, discarding errors nor counting generated frames
 turns it into an accepted performance improvement. See [current status](STATUS.md).
 
-## Recorded cleanup verification — 2026-09-09
+`run-software-lighting.ps1` uses a default 45-second owned-process limit,
+configurable from 15–90 seconds. Its Urban Terror scenario
+(`-Game Q3UT3 -Scenario rt_urban_nv.cfg`) exercises the real mod's goggle item.
+It requires a normal exit by default. `-AllowShutdownTimeout` explicitly allows
+capture-only NV testing after the scenario completes, with a warning; it does
+not convert the known NVIDIA shutdown failure into a lifecycle pass. Existing
+game settings are hash-checked. FG/NR are off in these rendering checks; they
+are not performance benchmarks. See [NV evidence](archive/NIGHT_VISION_DEVELOPMENT.md).
 
-- Repository link/ignore/candidate checks and all 35 embedded binary/C-array
-  pairs passed. No common high-confidence credential patterns were found; this
-  is not a complete secret/history audit.
-- All 34 ray/raster shaders regenerated into an ignored audit directory and
-  matched byte-for-byte. The separate DLSS sharpening shader also matched when
-  compiled with its original Vulkan 1.0 target; all SPIR-V validation passed.
-  Shipping shader payloads were not changed by this documentation cleanup.
-- The representative offline commands above passed, including actual transport
-  math, RR failure cleanup, NR lazy initialization, terrain/layer composition,
-  large texture allocation and engine options/VM precedence.
-- The normal NVIDIA-enabled Windows release build completed successfully and
-  reported its executable, renderer and modules up to date. This was not a
-  fresh clean-room or newly repeated NVIDIA-disabled/platform build.
-- No game/GPU tests ran in this cleanup pass. The existing runtime limitations
-  remain open. The retired upstream Travis configuration/helper were removed;
-  history and licensing notices were preserved. No commit or push was created.
+## Recorded cleanup verification — 2026-09-13
+
+- Repository link/anchor, ignore-policy, candidate size/credential and all
+  **51** embedded binary/C-array pair checks passed. This is a limited
+  working-tree check, not a full secret or Git-history audit.
+- All 50 default ray/raster shaders were regenerated into an ignored audit
+  directory, SPIR-V validated and matched byte-for-byte. The separate DLSS
+  sharpening shader also matched with its original Vulkan 1.0 target.
+  No shipped shader payload was changed by this cleanup.
+- Windows x64 release builds passed with `USE_NVIDIA_DLSS=1` and `0`, including
+  native/QVM base-game and Team Arena modules. The SDK-free build exposed and
+  fixed a stale `vk_sl_configure` fallback signature (missing the scale argument).
+  These were local builds, not fresh-clone, Linux or macOS verification.
+- Engine options/VM precedence, weapon scale controls, push-log handle lifetime,
+  filesystem write-error reporting, material layers/portal tone mapping, NV
+  activation/appearance math, RR workgroup coverage and RR resource failure
+  handling passed offline. The outdated RR mock gained the current lighting-mode
+  and exposure fields plus assertions for guide selection and exposure forwarding.
+  All 22 tracked/addable PowerShell scripts parsed successfully.
+- Two compiled QVMs accidentally tracked under `.build-tmp/nvg-inspect/vm`
+  were removed from the working tree and backed up under ignored
+  `build-widescreen/repo-cleanup-8216e1be0c8a48398ae442d2c2606505`.
+  They already exist in commit `0559f4f`; ordinary deletion does **not** purge
+  published Git history. No history rewrite or force-push was performed.
+- Dated profiler/experiment reports moved to the archive. Software/NV test
+  narratives were separated from current guides; links and stale claims were
+  corrected. Required shader inputs, tests, upstream build support and licensing
+  notices were retained. Ignored game assets, rollback backups and local builds
+  were not deleted.
+- No game/GPU tests ran during cleanup. NVIDIA shutdown, vendor motion-format
+  warnings and RTX descriptor-lifetime errors remain documented in
+  [current status](STATUS.md). No commit or push was created.

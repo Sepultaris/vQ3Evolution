@@ -64,6 +64,7 @@ typedef struct particle_s
 
 	// Ridah
 	int			shaderAnim;
+	int         renderfx; // Explicit effect ownership for animated explosion polygons.
 	int			roll;
 
 	int			accumroll;
@@ -838,6 +839,8 @@ void CG_AddParticleToScene (cparticle_t *p, vec3_t org, float alpha)
 
 	if (p->type == P_WEATHER || p->type == P_WEATHER_TURBULENT || p->type == P_WEATHER_FLURRY)
 		trap_R_AddPolyToScene( p->pshader, 3, TRIverts );
+	else if (p->type == P_ANIM && p->renderfx)
+		trap_R_AddPolyTagged(p->pshader, 4, verts, p->renderfx);
 	else
 		trap_R_AddPolyToScene( p->pshader, 4, verts );
 
@@ -1256,7 +1259,7 @@ CG_ParticleExplosion
 ======================
 */
 
-void CG_ParticleExplosion (char *animStr, vec3_t origin, vec3_t vel, int duration, int sizeStart, int sizeEnd)
+void CG_ParticleExplosion (char *animStr, vec3_t origin, vec3_t vel, int duration, int sizeStart, int sizeEnd, int renderfx)
 {
 	cparticle_t	*p;
 	int anim;
@@ -1296,6 +1299,7 @@ void CG_ParticleExplosion (char *animStr, vec3_t origin, vec3_t vel, int duratio
 	}
 
 	p->shaderAnim = anim;
+	p->renderfx = renderfx;
 
 	p->width = sizeStart;
 	p->height = sizeStart*shaderAnimSTRatio[anim];	// for sprites that are stretch in either direction

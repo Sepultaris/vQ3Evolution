@@ -9,10 +9,11 @@ then [current status](STATUS.md) for supported paths and known limitations.
 | --- | --- |
 | [Universal options](UNIVERSAL_OPTIONS.md) | Engine-owned settings for base Quake III, Team Arena and mods; shared profiles and legacy UI scaling |
 | [Path tracing](PATH_TRACING.md) | Lighting, samples, bounces, exposure, ambient fill, penumbra, materials and fallback |
-| [Dynamic opaque experiment](DYNAMIC_OPAQUE.md) | Separate built candidate; measured no median FPS gain and remains disabled |
 | [Ray Reconstruction](RAY_RECONSTRUCTION.md) | NVIDIA RR with DLAA/DLSS, current defaults, input contract and limitations |
 | [NVIDIA integration](DLSS.md) | SDK/runtime setup, DLSS/DLAA, NR, Frame Generation and Reflex |
-| [Ray-traced shadows](RTX.md) | The separate hybrid shadow mode, not full path tracing |
+| [Night-vision goggles](NIGHT_VISION.md) | White/green phosphor appearance, soft panoramic optics, grain and console controls |
+| [Software path tracing](RTX.md) | Full compute-based lighting without hardware RT; mode 2 remains the hardware backend |
+| [Software denoising](SOFTWARE_DENOISING.md) | Local native history and optional NRD evaluation, controls, build and licensing boundary |
 | [Texture upscaling](TEXTURE_UPSCALING.md) | Optional offline asset processing, packaging and safeguards |
 | [True Combat patch](TRUECOMBAT_PATCH.md) | Optional version-checked fix for the mod's own widescreen UI bug |
 | [Testing and commit checks](TESTING.md) | Offline checks, shader payloads and bounded GPU-test policy |
@@ -25,9 +26,17 @@ then [current status](STATUS.md) for supported paths and known limitations.
   implementation details, material fixes, successful checks and rejected trials.
 - [RR development record](archive/RAY_RECONSTRUCTION_DEVELOPMENT.md): dated RR
   integration, sampling, jitter, performance and shutdown evidence.
-- [GPU performance analysis](GPU_PERFORMANCE_ANALYSIS.md): the measured
+- [Software-tracer development record](archive/SOFTWARE_RAY_TRACING_DEVELOPMENT.md):
+  traversal comparisons, internal work counters, device and mode-switch checks.
+- [Night-vision development record](archive/NIGHT_VISION_DEVELOPMENT.md): actual
+  mod toggles, raster/DLAA image repair and unresolved NVIDIA shutdown/validation.
+- [GPU performance analysis](archive/GPU_PERFORMANCE_ANALYSIS.md): the measured
   **pre-RR** register/latency bottleneck and its follow-up; not a profile of the
   current RR shader.
+- [RR capture from 2026-09-09](archive/GPU_PROFILE_20260909.md): profiler attachment
+  repair, source-line findings and follow-through for that build.
+- [Dynamic opaque experiment](archive/DYNAMIC_OPAQUE.md): no measured median FPS
+  gain; remains default-off. The old deployment statements are historical.
 - [Inherited Vulkan notes](archive/VULKAN_LEGACY.md): upstream provenance only.
 
 Archived statements about defaults, completion or next steps apply to their

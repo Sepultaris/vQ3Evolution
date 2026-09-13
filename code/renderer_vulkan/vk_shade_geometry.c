@@ -4,6 +4,7 @@
 #include "tr_cvar.h"
 #include "vk_image.h"
 #include "vk_pipelines.h"
+#include "vk_shaders.h"
 #include "matrix_multiplication.h"
 #include "tr_backend.h"
 #include "glConfig.h"
@@ -12,6 +13,8 @@
 #include "tr_shader.h"
 #include "vk_temporal.h"
 #include "vk_raytracing.h"
+#include "vk_pathtrace.h"
+#include "../renderercommon/muzzle_flash.h"
 
 #define VERTEX_CHUNK_SIZE   (768 * 1024)
 #define INDEX_BUFFER_SIZE   (2 * 1024 * 1024)
@@ -154,7 +157,7 @@ static void vk_setViewportScissor(VkBool32 is2D, enum Vk_Depth_Range dR,
         case DEPTH_RANGE_WEAPON:
         {
             vp->minDepth = 0.0f;
-		    vp->maxDepth = 0.3f;
+		    vp->maxDepth = 0.01f;
         }break;
     }
 }
@@ -895,6 +898,19 @@ static void ComputeColors( shaderStage_t *pStage )
 			break;
 		}
 	}
+    if ((backEnd.currentEntity->e.renderfx & RF_MUZZLE_FLASH) ||
+        ((backEnd.currentEntity->e.renderfx & RF_ROCKET) &&
+         (pStage->stateBits & GLS_DSTBLEND_BITS) == GLS_DSTBLEND_ONE &&
+         (pStage->stateBits & GLS_SRCBLEND_BITS) != GLS_SRCBLEND_ZERO)) {
+        float scale = R_MuzzleFlashScale((backEnd.currentEntity->e.renderfx & RF_MUZZLE_FLASH) ?
+            r_muzzleFlashBrightness->value : r_rocketBrightness->value);
+        // Rocket body reflectance/coverage stays intact; dim only its glow stages.
+        // Raster vertex colors are 8-bit; preserve alpha/coverage and hue.
+        if (scale != 1.0f)
+            for (uint32_t v = 0; v < tess.numVertexes; ++v)
+                for (uint32_t c = 0; c < 3; ++c)
+                    tess.svars.colors[v][c] = (byte)MIN(255.0f, tess.svars.colors[v][c] * scale);
+    }
 }
 
 static void ComputeTexCoords( shaderStage_t *pStage )
@@ -1166,20 +1182,21 @@ void RB_StageIteratorGeneric( void )
 	RB_DeformTessGeometry();
 	vk_rt_capture_geometry(tess.xyz, tess.numVertexes, tess.indexes,
 		tess.numIndexes, backEnd.or.origin, backEnd.or.axis,
-		((r_rayTracing->integer == 2 ? (tess.shader->sort != SS_PORTAL && tess.shader->sort != SS_FOG &&
-            tess.shader->sort != SS_STENCIL_SHADOW) : tess.shader->sort <= SS_OPAQUE) && !tess.shader->isSky &&
+		(((tess.shader->sort != SS_PORTAL || (backEnd.currentEntity == &tr.worldEntity &&
+            vk_pt_portal_shader(tess.shader))) && tess.shader->sort != SS_FOG &&
+            tess.shader->sort != SS_STENCIL_SHADOW) && !tess.shader->isSky &&
 		vk_temporal_scene_pass_active() &&
 		!backEnd.viewParms.isPortal && !backEnd.projection2D &&
 		!(backEnd.refdef.rd.rdflags & RDF_NOWORLDMODEL) &&
 		(backEnd.currentEntity != &tr.worldEntity ||
-		(r_rayTracing->integer == 2 && (tess.shader->numDeforms || tess.rayDynamicPolys))) &&
-		(r_rayTracing->integer == 2 || !(backEnd.currentEntity->e.renderfx &
+		(tess.shader->numDeforms || (r_rayTracing->integer != 0 && tess.rayDynamicPolys))) &&
+		(r_rayTracing->integer != 0 || !(backEnd.currentEntity->e.renderfx &
 			(RF_DEPTHHACK | RF_FIRST_PERSON))) &&
-		(r_rayTracing->integer == 2 || !(backEnd.currentEntity->e.renderfx & RF_NOSHADOW))) ? qtrue : qfalse,
+		(r_rayTracing->integer != 0 || !(backEnd.currentEntity->e.renderfx & RF_NOSHADOW))) ? qtrue : qfalse,
 		tess.normal, tess.texCoords, tess.shader);
 	/* The local player's body is available to secondary rays but is not a
 	 * first-person raster object. Tessellation above supplies the ray scene. */
-	if (r_rayTracing->integer == 2 && vk_temporal_scene_pass_active() &&
+	if (r_rayTracing->integer != 0 && vk_temporal_scene_pass_active() &&
 		!backEnd.viewParms.isPortal && backEnd.currentEntity != &tr.worldEntity &&
 		(backEnd.currentEntity->e.renderfx & RF_THIRD_PERSON))
 		return;

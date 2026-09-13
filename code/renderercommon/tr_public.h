@@ -24,7 +24,7 @@ Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
 
 #include "tr_types.h"
 
-#define	REF_API_VERSION		10
+#define	REF_API_VERSION		11
 
 //
 // these are the functions exported by the refresh module
@@ -101,6 +101,8 @@ typedef struct {
 	void (*TakeVideoFrame)( int h, int w, byte* captureBuffer, byte *encodeBuffer, qboolean motionJpeg );
     /* Optional motion-aware submission; refEntity_t and legacy mod ABI stay unchanged. */
     void (*AddRefEntityTracked)(const refEntity_t *re, int motionId, int generation);
+    // Optional: preserve polygon geometry/UVs while identifying its light source.
+    void (*AddPolyTagged)(qhandle_t hShader, int numVerts, const polyVert_t *verts, int renderfx);
 } refexport_t;
 
 //

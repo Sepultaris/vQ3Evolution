@@ -12,6 +12,7 @@
 
 #define RT_MAX_VERTICES (768u * 1024u)
 #define RT_MAX_INDICES  (512u * 1024u)
+#define RT_MAX_TRIANGLES (RT_MAX_INDICES / 3)
 
 typedef struct {
 	VkBuffer buffer;
@@ -29,6 +30,9 @@ typedef struct {
 	rt_buffer_t storage;
 	VkDeviceSize capacity;
 } rt_acceleration_structure_t;
+
+#include "rt_software_bvh.h"
+#include "rt_software_order.h"
 
 typedef struct {
 	qboolean device_supported;
@@ -65,6 +69,20 @@ typedef struct {
 	VkDescriptorSet descriptor_set;
 	VkPipelineLayout pipeline_layout;
 	VkPipeline pipeline;
+	/* Mode-1 software BVH: CPU-built binned-SAH trees over the captured
+	 * geometry, traversed by the software material-query backend. The node buffer
+	 * holds the static world tree at offset 0 and the per-frame dynamic tree
+	 * after it. */
+	qboolean compute_supported;
+	qboolean software;
+	rt_buffer_t nodes;
+	rt_buffer_t tli;
+	rt_buffer_t links; // uvec4 header followed by eight ordered escape words per node.
+	uint32_t static_node_count;
+	uint32_t dynamic_node_count;
+	qboolean static_nodes_dirty;
+	qboolean static_tli_dirty;
+	qboolean sw_logged;
 	PFN_vkGetBufferDeviceAddress get_buffer_address;
 	PFN_vkCreateAccelerationStructureKHR create_as;
 	PFN_vkDestroyAccelerationStructureKHR destroy_as;
@@ -80,6 +98,8 @@ static VkPhysicalDeviceRayQueryFeaturesKHR rt_query_features;
 static VkPhysicalDeviceDescriptorIndexingFeatures rt_texture_features;
 static VkPhysicalDeviceShaderClockFeaturesKHR rt_clock_features;
 static qboolean rt_shader_clock;
+static qboolean rt_software_clock;
+static VkPhysicalDeviceShaderClockFeaturesKHR rt_software_clock_features;
 static VkPhysicalDevicePipelineExecutablePropertiesFeaturesKHR rt_executable_features;
 static qboolean rt_pipeline_statistics;
 
@@ -111,15 +131,79 @@ qboolean vk_rt_configure_device(VkPhysicalDevice physical_device,
 	rt.device_supported = qfalse;
 	rt.path_supported = qfalse;
 	rt_shader_clock = qfalse;
+	rt_software_clock = qfalse;
 	rt_pipeline_statistics = qfalse;
+	/* Mode 1 uses compute and indexed material textures. Do not request hardware ray features
+	 * for this device, even when it happens to have RT units. Mode 2 keeps
+	 * its existing extension and feature negotiation below. */
+	qvkGetPhysicalDeviceProperties(physical_device, &properties);
+	rt.compute_supported = properties.limits.maxPerStageDescriptorStorageBuffers >= 4 &&
+		properties.limits.maxComputeWorkGroupInvocations >= 64 &&
+		properties.limits.maxComputeWorkGroupSize[0] >= 8 &&
+		properties.limits.maxComputeWorkGroupSize[1] >= 8;
+	{
+		uint32_t count = 0;
+		qvkGetPhysicalDeviceQueueFamilyProperties(physical_device, &count, NULL);
+		VkQueueFamilyProperties *families = malloc(count * sizeof(*families));
+		if (!families) rt.compute_supported = qfalse;
+		else {
+			qvkGetPhysicalDeviceQueueFamilyProperties(physical_device, &count, families);
+			if ((uint32_t)vk.queue_family_index >= count ||
+				!(families[vk.queue_family_index].queueFlags & VK_QUEUE_COMPUTE_BIT))
+				rt.compute_supported = qfalse;
+			free(families);
+		}
+	}
 	memset(&rt_executable_features, 0, sizeof(rt_executable_features));
 	if (device_features)
 		*device_features = NULL;
+	if (r_rayTracing->integer == 1) {
+		/* Shader clocks are optional diagnostics only. Normal software rendering
+		 * never requires clocks, hardware RT or buffer device addresses. */
+		memset(&rt_texture_features, 0, sizeof(rt_texture_features));
+		rt_texture_features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DESCRIPTOR_INDEXING_FEATURES;
+		memset(&features, 0, sizeof(features));
+		features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
+		features.pNext = &rt_texture_features;
+		memset(&rt_software_clock_features,0,sizeof(rt_software_clock_features));
+		if(ri.Cvar_Get("r_softwareRayTracingProfile","0",CVAR_TEMP)->integer==1 &&
+			has_extension(extensions,extension_count,VK_KHR_SHADER_CLOCK_EXTENSION_NAME)) {
+			rt_software_clock_features.sType=VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_CLOCK_FEATURES_KHR;
+			rt_texture_features.pNext=&rt_software_clock_features;
+		}
+		if (get_features2) get_features2(physical_device, &features);
+		rt.compute_supported = rt.compute_supported &&
+			properties.apiVersion >= VK_API_VERSION_1_2 &&
+			rt_texture_features.shaderSampledImageArrayNonUniformIndexing &&
+			properties.limits.maxPerStageDescriptorSamplers >= PT_MAX_TEXTURES + 2 &&
+			properties.limits.maxDescriptorSetSamplers >= PT_MAX_TEXTURES + 2 &&
+			properties.limits.maxPerStageDescriptorSampledImages >= PT_MAX_TEXTURES + 2 &&
+			properties.limits.maxDescriptorSetSampledImages >= PT_MAX_TEXTURES + 2 &&
+			properties.limits.maxPerStageDescriptorStorageBuffers >= 46 &&
+			properties.limits.maxDescriptorSetStorageBuffers >= 46 &&
+			properties.limits.maxPerStageDescriptorStorageImages >= 3 &&
+			properties.limits.maxDescriptorSetStorageImages >= 3 &&
+			properties.limits.maxPerStageResources >= PT_MAX_TEXTURES + 51;
+		rt_software_clock=rt.compute_supported && rt_software_clock_features.shaderSubgroupClock;
+		memset(&rt_software_clock_features,0,sizeof(rt_software_clock_features));
+		memset(&rt_texture_features, 0, sizeof(rt_texture_features));
+		rt_texture_features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DESCRIPTOR_INDEXING_FEATURES;
+		rt_texture_features.shaderSampledImageArrayNonUniformIndexing = rt.compute_supported;
+		if(rt_software_clock) {
+			rt_software_clock_features.sType=VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_CLOCK_FEATURES_KHR;
+			rt_software_clock_features.shaderSubgroupClock=VK_TRUE;
+			rt_texture_features.pNext=&rt_software_clock_features;
+		}
+		if (device_features && rt.compute_supported) *device_features = &rt_texture_features;
+		if (!rt.compute_supported)
+			ri.Printf(PRINT_WARNING, "Software path tracing requires Vulkan 1.2, nonuniform material textures and sufficient storage descriptors; no hardware RT required\n");
+		return qtrue;
+	}
 	if (!get_features2)
-		return qfalse;
+		return qtrue;
 	for (i = 0; i < sizeof(rt_extensions) / sizeof(rt_extensions[0]); ++i) {
 		if (!has_extension(extensions, extension_count, rt_extensions[i]))
-			return qfalse;
+			return qtrue;
 	}
 
 	memset(&features, 0, sizeof(features));
@@ -210,12 +294,14 @@ qboolean vk_rt_configure_device(VkPhysicalDevice physical_device,
 
 uint32_t vk_rt_device_extension_count(void)
 {
+	if(r_rayTracing->integer==1) return rt_software_clock ? 1:0;
 	return rt.device_supported ?
 		(uint32_t)(sizeof(rt_extensions) / sizeof(rt_extensions[0])) + (rt_shader_clock ? 1 : 0) + (rt_pipeline_statistics ? 1 : 0) : 0;
 }
 
 const char *vk_rt_device_extension(uint32_t index)
 {
+	if(r_rayTracing->integer==1) return rt_software_clock && index==0 ? VK_KHR_SHADER_CLOCK_EXTENSION_NAME:NULL;
 	if (index >= vk_rt_device_extension_count()) return NULL;
 	if (index < ARRAY_LEN(rt_extensions)) return rt_extensions[index];
 	index -= ARRAY_LEN(rt_extensions);
@@ -230,12 +316,12 @@ qboolean vk_rt_pipeline_statistics_supported(void)
 
 qboolean vk_rt_shader_clock_supported(void)
 {
-	return rt_shader_clock;
+	return rt_shader_clock || rt_software_clock;
 }
 
 qboolean vk_rt_supported(void)
 {
-	return rt.device_supported;
+	return rt.device_supported || rt.compute_supported;
 }
 
 static qboolean create_buffer(rt_buffer_t *target, VkDeviceSize size,
@@ -259,10 +345,11 @@ static qboolean create_buffer(rt_buffer_t *target, VkDeviceSize size,
 	qvkGetBufferMemoryRequirements(vk.device, target->buffer, &requirements);
 	memset(&flags, 0, sizeof(flags));
 	flags.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_FLAGS_INFO;
-	flags.flags = VK_MEMORY_ALLOCATE_DEVICE_ADDRESS_BIT;
+	flags.flags = (usage & VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT) ?
+		VK_MEMORY_ALLOCATE_DEVICE_ADDRESS_BIT : 0;
 	memset(&allocation, 0, sizeof(allocation));
 	allocation.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
-	allocation.pNext = &flags;
+	allocation.pNext = flags.flags ? &flags : NULL;
 	allocation.allocationSize = requirements.size;
 	allocation.memoryTypeIndex = find_memory_type(requirements.memoryTypeBits,
 		map ? VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT : memory_flags);
@@ -289,9 +376,13 @@ static qboolean create_buffer(rt_buffer_t *target, VkDeviceSize size,
 	memset(&address_info, 0, sizeof(address_info));
 	address_info.sType = VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO;
 	address_info.buffer = target->buffer;
-	target->address = rt.get_buffer_address(vk.device, &address_info);
+	if (usage & VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT) {
+		target->address = rt.get_buffer_address(vk.device, &address_info);
+		if (!target->address)
+			return qfalse;
+	}
 	target->size = size;
-	return target->address != 0;
+	return qtrue;
 }
 
 static void free_world_geometry(void)
@@ -307,6 +398,10 @@ static void free_world_geometry(void)
 	rt.world_built = qfalse;
 	rt.world_upload_pending = qtrue;
 	rt.world_ray_distance = 8192.0f;
+	rt.static_nodes_dirty = qfalse;
+	rt.static_tli_dirty = qfalse;
+	rt.static_node_count = 0;
+	rt.dynamic_node_count = 0;
 }
 
 #include "pt_world_mirror.h"
@@ -316,13 +411,12 @@ static qboolean world_surface_counts(const msurface_t *surface,
 {
 	if (!surface || !surface->data || !surface->shader ||
 		surface->shader->nvOverlay ||
-		(r_rayTracing->integer == 2 ? ((surface->shader->sort == SS_PORTAL && !world_surface_is_mirror(surface)) ||
-            surface->shader->sort == SS_FOG || surface->shader->sort == SS_STENCIL_SHADOW) :
-		(surface->shader->sort > SS_OPAQUE || surface->shader->isSky)))
+		(surface->shader->sort == SS_PORTAL && !world_surface_portal_kind(surface)) ||
+		surface->shader->sort == SS_FOG || surface->shader->sort == SS_STENCIL_SHADOW)
 		return qfalse;
 	/* Deformed world surfaces are tessellated every frame, including off-screen
 	 * ones, instead of inserting their undeformed mesh into the static scene. */
-	if (r_rayTracing->integer == 2 && surface->shader->numDeforms)
+	if (r_rayTracing->integer && surface->shader->numDeforms)
 		return qfalse;
 	switch (*surface->data) {
 	case SF_FACE: {
@@ -372,7 +466,7 @@ void vk_rt_load_world(void)
 			continue;
 		if (vertex_count + vertices > RT_MAX_VERTICES ||
 			index_count + indices > RT_MAX_INDICES) {
-			if (r_rayTracing->integer == 2)
+			if (r_rayTracing->integer)
 				ri.Error(ERR_DROP, "Path tracing: world geometry capacity exceeded");
 			ri.Printf(PRINT_WARNING,
 				"RTX full-world geometry exceeds acceleration-structure capacity\n");
@@ -383,7 +477,7 @@ void vk_rt_load_world(void)
 	}
 	if (!vertex_count || !index_count)
 		return;
-	qboolean material_test = r_rayTracing->integer == 2 && r_pathTracingTestScene->integer;
+	qboolean material_test = r_rayTracing->integer && r_pathTracingTestScene->integer;
 	if (material_test) {
 		if (vertex_count + PT_TEST_VERTICES > RT_MAX_VERTICES || index_count + PT_TEST_INDICES > RT_MAX_INDICES)
 			ri.Error(ERR_DROP, "Path tracing: no room for material test scene");
@@ -404,8 +498,8 @@ void vk_rt_load_world(void)
 		uint32_t base = vertex_cursor;
 		if (!world_surface_counts(surface, &vertices, &indices))
 			continue;
-		vk_pt_world_surface(index_cursor, indices, surface->shader);
-		if (surface->shader->sort == SS_PORTAL) ++mirror_surfaces;
+		vk_pt_world_surface(index_cursor, indices, surface);
+		if (world_surface_is_mirror(surface)) ++mirror_surfaces;
 		switch (*surface->data) {
 		case SF_FACE: {
 			const srfSurfaceFace_t *face = (const srfSurfaceFace_t *)surface->data;
@@ -484,8 +578,33 @@ void vk_rt_load_world(void)
 		 * bounds. A changing raster far plane must not clip shadow casters. */
 		rt.world_ray_distance = fmaxf(8192.0f, VectorLength(diagonal));
 	}
-	ri.Printf(PRINT_ALL, "NVIDIA RTX world geometry: %u triangles loaded\n",
+	ri.Printf(PRINT_ALL, rt.software ? "Software ray tracing world geometry: %u triangles loaded\n" :
+		"NVIDIA RTX world geometry: %u triangles loaded\n",
 		rt.world_index_count / 3);
+	if (rt.software && rt.nodes.buffer) {
+		rt_bvh_scene_t scene;
+		rt_bvh_output_t out;
+		memset(&scene, 0, sizeof(scene));
+		scene.vertices = rt.world_vertices;
+		scene.indices = rt.world_indices;
+		scene.global_first = 0;
+		out.nodes = (rt_bvh_node_t *)rt.nodes.mapped;
+		out.cursor = 0;
+		out.node_base = 0;
+		out.tli = (uint32_t *)rt.tli.mapped;
+		out.tli_cursor = 0;
+		if (!rt_bvh_build(&out, &scene, rt.world_index_count / 3)) {
+			ri.Error(ERR_DROP, "Software ray tracing: world BVH construction failed");
+			return;
+		}
+		rt.static_node_count = out.cursor;
+		rt.static_nodes_dirty = qtrue;
+		rt.static_tli_dirty = qtrue;
+		if (out.cursor)
+			ri.Printf(PRINT_ALL,
+				"Software BVH world tree: %u nodes on %u triangles\n",
+				out.cursor, rt.world_index_count / 3);
+	}
 }
 
 static void destroy_buffer(rt_buffer_t *target)
@@ -581,9 +700,9 @@ qboolean vk_rt_initialize(uint32_t width, uint32_t height,
 	VkImageView depth_view, VkFormat depth_format,
 	VkImageView output_view, VkImageView motion_view, VkImageView path_depth_view)
 {
-	VkDescriptorSetLayoutBinding bindings[4];
+	VkDescriptorSetLayoutBinding bindings[7];
 	VkDescriptorSetLayoutCreateInfo set_info;
-	VkDescriptorPoolSize pool_sizes[3];
+	VkDescriptorPoolSize pool_sizes[5];
 	VkDescriptorPoolCreateInfo pool_info;
 	VkDescriptorSetAllocateInfo set_allocation;
 	VkPushConstantRange push_range;
@@ -597,12 +716,19 @@ qboolean vk_rt_initialize(uint32_t width, uint32_t height,
 
 	(void)color_format;
 	(void)depth_format;
-	ri.Cvar_Set("r_rayTracingAvailable", rt.device_supported ? "1" : "0");
-	if (!rt.device_supported || !r_rayTracing->integer)
+	ri.Cvar_Set("r_rayTracingAvailable", (rt.device_supported || rt.compute_supported) ? "1" : "0");
+	if (!r_rayTracing->integer)
 		return qfalse;
-	if (r_rayTracing->integer == 2 && !rt.path_supported) {
-		ri.Printf(PRINT_WARNING, "Path tracing requires nonuniform sampled-image indexing and 514 texture descriptors\n");
+	if (r_rayTracing->integer == 2) {
+		if (!rt.device_supported || !rt.path_supported) {
+			ri.Printf(PRINT_WARNING, "Path tracing requires nonuniform sampled-image indexing and 514 texture descriptors\n");
+			return qfalse;
+		}
+		rt.software = qfalse;
+	} else if (!rt.compute_supported) {
 		return qfalse;
+	} else {
+		rt.software = qtrue;
 	}
 
 	rt.get_buffer_address = (PFN_vkGetBufferDeviceAddress)
@@ -620,26 +746,61 @@ qboolean vk_rt_initialize(uint32_t width, uint32_t height,
 		qvkGetDeviceProcAddr(vk.device, "vkCmdBuildAccelerationStructuresKHR");
 	rt.get_as_address = (PFN_vkGetAccelerationStructureDeviceAddressKHR)
 		qvkGetDeviceProcAddr(vk.device, "vkGetAccelerationStructureDeviceAddressKHR");
-	if (!rt.get_buffer_address || !rt.create_as || !rt.destroy_as ||
-		!rt.get_build_sizes || !rt.cmd_build_as || !rt.get_as_address)
+	if (!rt.software && (!rt.get_buffer_address || !rt.create_as || !rt.destroy_as ||
+		!rt.get_build_sizes || !rt.cmd_build_as || !rt.get_as_address))
 		goto fail;
 
-	if (!create_buffer(&rt.vertices, RT_MAX_VERTICES * sizeof(float) * 3,
-		VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR |
-		VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
-		VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
-		qtrue) ||
-		!create_buffer(&rt.indices, RT_MAX_INDICES * sizeof(uint32_t),
-		VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR |
-		VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
-		VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
-		qtrue) ||
-		!create_buffer(&rt.instances, 5 * sizeof(VkAccelerationStructureInstanceKHR),
-		VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR |
-		VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
-		VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
-		qtrue))
-		goto fail;
+	{
+		VkBufferUsageFlags vertex_usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
+		VkBufferUsageFlags index_usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
+		if (!rt.software) {
+			vertex_usage |= VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR |
+				VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT;
+			index_usage |= VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR |
+				VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT;
+		}
+		if (!create_buffer(&rt.vertices, RT_MAX_VERTICES * sizeof(float) * 3,
+			vertex_usage,
+			VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+			qtrue) ||
+			!create_buffer(&rt.indices, RT_MAX_INDICES * sizeof(uint32_t),
+			index_usage,
+			VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+			qtrue))
+			goto fail;
+	}
+	if (rt.software) {
+		if (!create_buffer(&rt.nodes, (VkDeviceSize)RT_MAX_TRIANGLES * 2 * sizeof(rt_bvh_node_t),
+			VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+			VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+			qtrue) ||
+		!create_buffer(&rt.links, (4u + RT_MAX_TRIANGLES * 2u * RT_SW_ORDER_COUNT) * sizeof(uint32_t),
+			VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+			VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+			qtrue) ||
+		!create_buffer(&rt.tli, RT_MAX_TRIANGLES * sizeof(uint32_t),
+			VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+			VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+			qtrue))
+			goto fail;
+	}
+
+	if (!rt.software) {
+		if (!create_buffer(&rt.instances, 5 * sizeof(VkAccelerationStructureInstanceKHR),
+			VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR |
+			VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
+			VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+			qtrue))
+			goto fail;
+	}
+
+	if (rt.software) {
+		if (!vk_pt_initialize(width, height, RT_MAX_VERTICES, RT_MAX_INDICES,
+			color_view, depth_view, output_view, motion_view, path_depth_view)) goto fail;
+		rt.width = width; rt.height = height; rt.initialized = qtrue;
+		ri.Printf(PRINT_ALL, "Software BVH path tracer initialized at %ux%u (no hardware RT)\n", width, height);
+		return qtrue;
+	}
 
 	memset(&sampler_info, 0, sizeof(sampler_info));
 	sampler_info.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
@@ -654,6 +815,7 @@ qboolean vk_rt_initialize(uint32_t width, uint32_t height,
 		goto fail;
 
 	memset(bindings, 0, sizeof(bindings));
+	memset(pool_sizes, 0, sizeof(pool_sizes));
 	for (uint32_t i = 0; i < 4; ++i) {
 		bindings[i].binding = i;
 		bindings[i].descriptorCount = 1;
@@ -670,8 +832,6 @@ qboolean vk_rt_initialize(uint32_t width, uint32_t height,
 	if (qvkCreateDescriptorSetLayout(vk.device, &set_info, NULL,
 		&rt.set_layout) != VK_SUCCESS)
 		goto fail;
-
-	memset(pool_sizes, 0, sizeof(pool_sizes));
 	pool_sizes[0].type = VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR;
 	pool_sizes[0].descriptorCount = 1;
 	pool_sizes[1].type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
@@ -711,7 +871,7 @@ qboolean vk_rt_initialize(uint32_t width, uint32_t height,
 	memset(&shader_info, 0, sizeof(shader_info));
 	shader_info.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
 	shader_info.codeSize = (size_t)rt_shadows_comp_spv_size;
-	shader_info.pCode = (const uint32_t *)rt_shadows_comp_spv;
+	shader_info.pCode   = (const uint32_t *)rt_shadows_comp_spv;
 	if (qvkCreateShaderModule(vk.device, &shader_info, NULL,
 		&shader_module) != VK_SUCCESS)
 		goto fail;
@@ -736,13 +896,14 @@ qboolean vk_rt_initialize(uint32_t width, uint32_t height,
         motion_view, path_depth_view))
 		goto fail;
 	rt.initialized = qtrue;
-	ri.Printf(PRINT_ALL, "Native ray-query %s initialized at %ux%u\n",
+	ri.Printf(PRINT_ALL, "%s %s initialized at %ux%u\n",
+		rt.software ? "Software BVH compute" : "Native ray-query",
 		r_rayTracing->integer == 2 ? "path tracing" : "shadows", width, height);
 	return qtrue;
 
 fail:
 	ri.Printf(PRINT_WARNING,
-		"NVIDIA RTX ray-query initialization failed; raster rendering remains active\n");
+		"Ray tracing initialization failed; raster rendering remains active\n");
 	vk_rt_shutdown();
 	return qfalse;
 }
@@ -765,6 +926,9 @@ void vk_rt_shutdown(void)
 	destroy_buffer(&rt.instances);
 	destroy_buffer(&rt.indices);
 	destroy_buffer(&rt.vertices);
+	destroy_buffer(&rt.nodes);
+	destroy_buffer(&rt.links);
+	destroy_buffer(&rt.tli);
 	if (rt.pipeline)
 		qvkDestroyPipeline(vk.device, rt.pipeline, NULL);
 	if (rt.pipeline_layout)
@@ -778,10 +942,12 @@ void vk_rt_shutdown(void)
 	{
 		qboolean supported = rt.device_supported;
 		qboolean path_supported = rt.path_supported;
+		qboolean compute_supported = rt.compute_supported;
 		free_world_geometry();
 		memset(&rt, 0, sizeof(rt));
 		rt.device_supported = supported;
 		rt.path_supported = path_supported;
+		rt.compute_supported = compute_supported;
 	}
 }
 
@@ -789,7 +955,7 @@ void vk_rt_begin_frame(void)
 {
 	if (!rt.initialized)
 		return;
-	if (r_rayTracing->integer == 2 && r_pathTracingReference->integer && rt.path_frozen)
+	if (r_rayTracing->integer && r_pathTracingReference->integer && rt.path_frozen)
 		return;
 	rt.path_frozen = qfalse;
 	rt.vertex_count = rt.world_vertex_count;
@@ -802,7 +968,7 @@ void vk_rt_begin_frame(void)
 			rt.world_index_count * sizeof(uint32_t));
 	rt.overflow_warned = qfalse;
 	vk_pt_begin_frame();
-	if (r_rayTracing->integer == 2 && r_pathTracingTestScene->integer == 2 &&
+	if (r_rayTracing->integer && r_pathTracingTestScene->integer == 2 &&
 		rt.vertex_count + 4 <= RT_MAX_VERTICES && rt.index_count + 6 <= RT_MAX_INDICES)
 		vk_pt_test_motion(rt.vertices.mapped, rt.indices.mapped, &rt.vertex_count, &rt.index_count);
 }
@@ -819,11 +985,13 @@ void vk_rt_capture_geometry(const float (*vertices)[4], uint32_t vertex_count,
 	if (!rt.initialized || !opaque || !vertices || !indices ||
 		index_count < 3 || vertex_count == 0)
 		return;
-	if (r_rayTracing->integer == 2 && r_pathTracingReference->integer && rt.path_frozen)
+	if (rt.software && !shader)
+		return;
+	if (r_rayTracing->integer && r_pathTracingReference->integer && rt.path_frozen)
 		return;
 	if (rt.vertex_count + vertex_count > RT_MAX_VERTICES ||
 		rt.index_count + index_count > RT_MAX_INDICES) {
-		if (r_rayTracing->integer == 2)
+		if (r_rayTracing->integer)
 			ri.Error(ERR_DROP, "Path tracing: dynamic geometry capacity exceeded");
 		if (!rt.overflow_warned) {
 			ri.Printf(PRINT_WARNING,
@@ -857,6 +1025,103 @@ void vk_rt_capture_geometry(const float (*vertices)[4], uint32_t vertex_count,
 VkDeviceSize vk_rt_scene_upload_bytes(void)
 {
 	return rt.scene_upload_bytes;
+}
+
+static void upload_shadow_scene(VkCommandBuffer cmd)
+{
+	qboolean upload_static_links = rt.static_nodes_dirty;
+	VkBufferCopy copy;
+	VkMemoryBarrier barrier;
+	VkDeviceSize v_off = rt.world_upload_pending ? 0 :
+		(VkDeviceSize)rt.world_vertex_count * 3 * sizeof(float);
+	VkDeviceSize i_off = rt.world_upload_pending ? 0 :
+		(VkDeviceSize)rt.world_index_count * sizeof(uint32_t);
+	VkDeviceSize v_size = (VkDeviceSize)rt.vertex_count * 3 * sizeof(float);
+	VkDeviceSize i_size = (VkDeviceSize)rt.index_count * sizeof(uint32_t);
+
+	if (v_off > v_size || v_size > rt.vertices.size ||
+		i_off > i_size || i_size > rt.indices.size) {
+		ri.Error(ERR_DROP, "RTX scene upload range exceeds captured geometry");
+		return;
+	}
+	memset(&barrier, 0, sizeof(barrier));
+	barrier.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+	barrier.srcAccessMask = VK_ACCESS_HOST_WRITE_BIT;
+	barrier.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+	qvkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_HOST_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+		0, 1, &barrier, 0, NULL, 0, NULL);
+	rt.scene_upload_bytes = 0;
+	if (v_size > v_off) {
+		copy = (VkBufferCopy) { v_off, v_off, v_size - v_off };
+		memcpy((byte *)rt.vertices.upload_mapped + v_off,
+			(byte *)rt.vertices.mapped + v_off, (size_t)copy.size);
+		qvkCmdCopyBuffer(cmd, rt.vertices.upload, rt.vertices.buffer, 1, &copy);
+		rt.scene_upload_bytes += copy.size;
+	}
+	if (i_size > i_off) {
+		copy = (VkBufferCopy) { i_off, i_off, i_size - i_off };
+		memcpy((byte *)rt.indices.upload_mapped + i_off,
+			(byte *)rt.indices.mapped + i_off, (size_t)copy.size);
+		qvkCmdCopyBuffer(cmd, rt.indices.upload, rt.indices.buffer, 1, &copy);
+		rt.scene_upload_bytes += copy.size;
+	}
+	if (rt.static_nodes_dirty && rt.static_node_count) {
+		VkDeviceSize size = (VkDeviceSize)rt.static_node_count * sizeof(rt_bvh_node_t);
+		copy = (VkBufferCopy) { 0, 0, size };
+		memcpy(rt.nodes.upload_mapped, rt.nodes.mapped, (size_t)size);
+		qvkCmdCopyBuffer(cmd, rt.nodes.upload, rt.nodes.buffer, 1, &copy);
+		rt.scene_upload_bytes += copy.size;
+		rt.static_nodes_dirty = qfalse;
+	}
+	if (rt.dynamic_node_count) {
+		VkDeviceSize dyn_off = (VkDeviceSize)rt.static_node_count * sizeof(rt_bvh_node_t);
+		VkDeviceSize size = (VkDeviceSize)rt.dynamic_node_count * sizeof(rt_bvh_node_t);
+		copy = (VkBufferCopy) { dyn_off, dyn_off, size };
+		memcpy((byte *)rt.nodes.upload_mapped + dyn_off,
+			(byte *)rt.nodes.mapped + dyn_off, (size_t)size);
+		qvkCmdCopyBuffer(cmd, rt.nodes.upload, rt.nodes.buffer, 1, &copy);
+		rt.scene_upload_bytes += copy.size;
+	}
+	if (rt.static_tli_dirty && rt.world_index_count) {
+		VkDeviceSize size = (VkDeviceSize)(rt.world_index_count / 3) * sizeof(uint32_t);
+		copy = (VkBufferCopy) { 0, 0, size };
+		memcpy(rt.tli.upload_mapped, rt.tli.mapped, (size_t)size);
+		qvkCmdCopyBuffer(cmd, rt.tli.upload, rt.tli.buffer, 1, &copy);
+		rt.scene_upload_bytes += copy.size;
+		rt.static_tli_dirty = qfalse;
+	}
+	if (rt.index_count > rt.world_index_count) {
+		VkDeviceSize dyn_off = (VkDeviceSize)(rt.world_index_count / 3) * sizeof(uint32_t);
+		VkDeviceSize size = (VkDeviceSize)((rt.index_count - rt.world_index_count) / 3) *
+			sizeof(uint32_t);
+		copy = (VkBufferCopy) { dyn_off, dyn_off, size };
+		memcpy((byte *)rt.tli.upload_mapped + dyn_off,
+			(byte *)rt.tli.mapped + dyn_off, (size_t)size);
+		qvkCmdCopyBuffer(cmd, rt.tli.upload, rt.tli.buffer, 1, &copy);
+		rt.scene_upload_bytes += copy.size;
+	}
+	if (rt.software) {
+		// The immutable world's orders do not need to be uploaded every frame.
+		VkDeviceSize prefix = upload_static_links ? rt.static_node_count * RT_SW_ORDER_COUNT : 0;
+		VkDeviceSize size = (4u + prefix) * sizeof(uint32_t);
+		copy = (VkBufferCopy) { 0, 0, size };
+		memcpy(rt.links.upload_mapped, rt.links.mapped, (size_t)size);
+		qvkCmdCopyBuffer(cmd, rt.links.upload, rt.links.buffer, 1, &copy);
+		rt.scene_upload_bytes += size;
+		if (rt.dynamic_node_count) {
+			VkDeviceSize offset = (4u + rt.static_node_count * RT_SW_ORDER_COUNT) * sizeof(uint32_t);
+			size = (VkDeviceSize)rt.dynamic_node_count * RT_SW_ORDER_COUNT * sizeof(uint32_t);
+			copy = (VkBufferCopy) { offset, offset, size };
+			memcpy((byte *)rt.links.upload_mapped + offset, (byte *)rt.links.mapped + offset, (size_t)size);
+			qvkCmdCopyBuffer(cmd, rt.links.upload, rt.links.buffer, 1, &copy);
+			rt.scene_upload_bytes += size;
+		}
+	}
+	rt.world_upload_pending = qfalse;
+	barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+	barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+	qvkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT,
+		VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, &barrier, 0, NULL, 0, NULL);
 }
 
 static void upload_scene(VkCommandBuffer cmd, uint32_t instance_count)
@@ -1056,11 +1321,66 @@ qboolean vk_rt_record(VkCommandBuffer command_buffer,
 	uint32_t primitive_count;
 
 	if (!rt.initialized || rt.index_count < 3 || !projection ||
-		!camera_origin || !camera_axis || !sun_direction)
+		!camera_origin || !camera_axis || !sun_direction) {
 		return qfalse;
+	}
 	if (r_rayTracing->integer == 2)
 		return record_path_scene(command_buffer, projection, camera_origin, camera_axis,
 			sun_direction, near_distance, far_distance, reset_history);
+	if (rt.software) {
+		uint32_t world_tri = rt.world_index_count / 3;
+		double cpu_start = vk_pt_software_clock();
+		vk_pt_profile(command_buffer,1);
+		uint32_t total_tri = rt.index_count / 3;
+		uint32_t dyn_tri = total_tri > world_tri ? total_tri - world_tri : 0;
+		uint32_t *links = rt.links.mapped;
+		rt_bvh_node_t *nodes = rt.nodes.mapped;
+		rt.dynamic_node_count = 0;
+		if (dyn_tri) {
+			rt_bvh_scene_t scene;
+			rt_bvh_output_t out;
+			memset(&scene, 0, sizeof(scene));
+			scene.vertices = rt.vertices.mapped;
+			scene.indices = rt.indices.mapped;
+			scene.global_first = world_tri;
+			out.nodes = (rt_bvh_node_t *)rt.nodes.mapped + rt.static_node_count;
+			out.cursor = 0;
+			out.node_base = rt.static_node_count;
+			out.tli = (uint32_t *)rt.tli.mapped + world_tri;
+			out.tli_cursor = 0;
+			if (!rt_bvh_build(&out, &scene, dyn_tri)) {
+				ri.Error(ERR_DROP, "Software ray tracing: dynamic BVH construction failed");
+				return qfalse;
+			}
+			rt.dynamic_node_count = out.cursor;
+		}
+		links[0] = rt.static_node_count;
+		links[1] = rt.static_node_count + rt.dynamic_node_count;
+		// Static BSP surfaces have the same world visibility mask as mode 2's
+		// world instance; first-person models and attached decals are dynamic.
+		links[2] = world_tri; links[3] = 7;
+		/* Static escape remains the dynamic root, even as dynamic size changes.
+		 * Direction signs select near-side-first threads without a query stack. */
+		if (rt.static_nodes_dirty)
+			rt_sw_order_tree(nodes, 0, rt.static_node_count, links + 4);
+		rt_sw_order_tree(nodes, rt.static_node_count, links[1], links + 4);
+		upload_shadow_scene(command_buffer);
+		vk_pt_software_scene_time(cpu_start);
+		vk_pt_profile(command_buffer,2);
+		vk_pt_software_scene(rt.nodes.buffer, rt.nodes.size, rt.links.buffer,
+			rt.links.size, rt.tli.buffer, rt.tli.size);
+		if (!rt.sw_logged) {
+			ri.Printf(PRINT_ALL, "Software BVH full lighting active: %u static + %u dynamic triangles; baked lightmaps excluded\n",
+				world_tri, dyn_tri);
+			rt.sw_logged = qtrue;
+		}
+		qboolean result = vk_pt_record(command_buffer, VK_NULL_HANDLE, rt.vertices.buffer, rt.indices.buffer,
+			rt.vertices.mapped, rt.indices.mapped, rt.vertex_count, rt.index_count,
+			projection, camera_origin, camera_axis, sun_direction, near_distance,
+			far_distance, rt.world_ray_distance, reset_history);
+		rt.path_frozen = r_pathTracingReference->integer && result;
+		return result;
+	}
 	primitive_count = rt.index_count / 3;
 	vk_pt_profile(command_buffer, 1);
 	memset(&barrier, 0, sizeof(barrier));

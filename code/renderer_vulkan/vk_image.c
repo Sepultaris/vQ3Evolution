@@ -604,7 +604,7 @@ image_t* R_CreateImage( const char *name, unsigned char* pic, const uint32_t wid
 
         /* Path tracing decodes source color into linear albedo/radiance. The
          * legacy gamma/intensity bake belongs to raster lighting, not albedo. */
-        if (r_rayTracing->integer != 2)
+        if (r_rayTracing->integer == 0)
             R_LightScaleTexture(pUploadBuffer, pUploadBuffer, buffer_size);
 
         // Use the normal mip-mapping to go down from [scaled_width, scaled_height] to [1,1] dimensions.

@@ -476,6 +476,7 @@ typedef struct drawSurf_s {
 // as soon as it is called
 typedef struct srfPoly_s {
 	surfaceType_t	surfaceType;
+	int             renderfx;
 	qhandle_t		hShader;
 	int				fogIndex;
 	int				numVerts;
@@ -805,6 +806,7 @@ typedef struct shaderCommands_s
 	color4ub_t	vertexColors[SHADER_MAX_VERTEXES];
 	int			vertexDlightBits[SHADER_MAX_VERTEXES];
 	uint32_t    rayPolyIds[SHADER_MAX_VERTEXES];
+	uint32_t    rayPolyFlags[SHADER_MAX_VERTEXES]; // CPU-only per-polygon effect tags.
 	qboolean    rayDynamicPolys; // Submitted scene polygons, not cached BSP surfaces.
 
 	stageVars_t	svars;

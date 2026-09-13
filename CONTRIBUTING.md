@@ -23,7 +23,8 @@ features source-native and maintainable.
   in the source tree.
 
 Do not commit build directories, Quake III PK3 data, local configuration files,
-downloaded SDKs, NVIDIA runtime DLLs, test homes, crash dumps, or generated logs.
+downloaded SDKs, NVIDIA runtime DLLs, compiled/extracted QVMs, scratch inspection
+directories such as `.build-tmp`, test homes, crash dumps, or generated logs.
 The root `.gitignore` covers the standard locations.
 
 Embedded GLSL bytecode/C arrays under `code/renderer_vulkan/shaders/Compiled`

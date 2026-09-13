@@ -21,12 +21,17 @@ qboolean vk_pt_rr_evaluate(const vk_sl_frame_resources_t *resources, VkImage *ou
 void vk_pt_shutdown(void);
 void vk_pt_info_f(void);
 void vk_pt_profile(VkCommandBuffer cmd, uint32_t point);
+double vk_pt_software_clock(void);
+void vk_pt_software_scene_time(double start);
 uint32_t vk_pt_partition_world(uint32_t *indices, uint32_t count);
 void vk_pt_partition_dynamic(uint32_t *indices, uint32_t count, uint32_t starts[5]);
 void vk_pt_begin_world(uint32_t vertices, uint32_t indices);
 void vk_pt_world_vertex(uint32_t vertex, const float *normal, const float *uv, byte alpha);
-void vk_pt_world_surface(uint32_t first_index, uint32_t index_count, shader_t *shader);
+void vk_pt_world_surface(uint32_t first_index, uint32_t index_count, const msurface_t *surface);
 void vk_pt_begin_frame(void);
+qboolean vk_pt_portal_shader(const shader_t *shader);
+void vk_pt_software_scene(VkBuffer nodes, VkDeviceSize node_size,
+    VkBuffer links, VkDeviceSize link_size, VkBuffer triangles, VkDeviceSize triangle_size);
 void vk_pt_capture(uint32_t first_vertex, uint32_t first_index,
     uint32_t vertex_count, uint32_t index_count,
     const float (*normals)[4], const float (*uv)[2][2],
