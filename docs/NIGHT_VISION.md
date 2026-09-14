@@ -68,17 +68,3 @@ functions, checking early detection, next-frame reset, dropped commands and
 disabled/unavailable fallback. `-Game Q3UT3 -Scenario rt_urban_nv.cfg` loads the
 installed mod QVMs, equips goggles in an isolated config and exercises their
 normal on/off command with `r_nvOverride 0`.
-
-## Validation snapshot — 2026-09-13
-
-Actual Urban Terror 3.7 goggles were visually checked with raster/DLAA and
-RTX/RR. The raster black-world failure is repaired. Raster validation reported
-no errors but retains a stock NVIDIA motion-image format warning; RTX/RR still
-reported descriptor-lifetime errors. NVIDIA telemetry shutdown still stalled
-after an approved service restart. These are functional captures, not clean
-lifecycle passes or performance benchmarks. Saved settings were unchanged.
-
-The launcher requires a normal exit by default. `-AllowShutdownTimeout` is an
-explicit capture-only exception, never a lifecycle pass. Native half-resolution
-NV and FG input routing have compiled coverage, not completed gameplay comparisons.
-See the [dated evidence and repair details](archive/NIGHT_VISION_DEVELOPMENT.md#rasterdlaa-repair-and-remaining-lifecycle-fault-2026-09-13).
