@@ -23,6 +23,10 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 
 #include "ref_import.h"
 #include "image_loader.h"
+// Large optional lens textures must not exhaust Quake III's fixed zone.
+// World PNG allocations retain their existing ownership and behavior.
+static void *PNG_Alloc(size_t size,qboolean postfx) { return postfx ? malloc(size) : ri.Malloc(size); }
+static void PNG_Free(void *data,qboolean postfx) { if (postfx) free(data); else ri.Free(data); }
 // we could limit the png size to a lower value here
 #ifndef INT_MAX
 #define INT_MAX 0x1fffffff
@@ -206,13 +210,14 @@ struct BufferedFile
 	int   Length;
 	byte *Ptr;
 	int   BytesLeft;
+	qboolean PostFX;
 };
 
 /*
  *  Read a file into a buffer.
  */
 
-static struct BufferedFile *ReadBufferedFile(const char *name)
+static struct BufferedFile *ReadBufferedFile(const char *name,qboolean postfx)
 {
 	struct BufferedFile *BF;
 	
@@ -250,7 +255,8 @@ static struct BufferedFile *ReadBufferedFile(const char *name)
 	 *  Read the file.
 	 */
 
-	BF->Length = ri.FS_ReadFile(name, (void**)&buffer);
+	BF->PostFX = postfx;
+	BF->Length = postfx ? ri.PostFX_Read(name,(void**)&buffer) : ri.FS_ReadFile(name,(void**)&buffer);
 	BF->Buffer = (unsigned char*)buffer;
 
 	/*
@@ -284,7 +290,8 @@ static void CloseBufferedFile(struct BufferedFile *BF)
 	{
 		if(BF->Buffer)
 		{
-			ri.FS_FreeFile(BF->Buffer);
+			if (BF->PostFX) ri.PostFX_Free(BF->Buffer);
+			else ri.FS_FreeFile(BF->Buffer);
 		}
 
 		ri.Free(BF);
@@ -621,7 +628,8 @@ static uint32_t DecompressIDATs(struct BufferedFile *BF, uint8_t **Buffer)
 
 	BufferedFileRewind(BF, BytesToRewind);
 
-	CompressedData = ri.Malloc(CompressedDataLength);
+	if (CompressedDataLength <= PNG_ZlibHeader_Size + PNG_ZlibCheckValue_Size) return(-1);
+	CompressedData = PNG_Alloc(CompressedDataLength,BF->PostFX);
 	if(!CompressedData)
 	{
 		return(-1);
@@ -642,7 +650,7 @@ static uint32_t DecompressIDATs(struct BufferedFile *BF, uint8_t **Buffer)
 		CH = BufferedFileRead(BF, PNG_ChunkHeader_Size);
 		if(!CH)
 		{
-			ri.Free(CompressedData); 
+			PNG_Free(CompressedData,BF->PostFX);
 
 			return(-1);
 		}
@@ -676,14 +684,14 @@ static uint32_t DecompressIDATs(struct BufferedFile *BF, uint8_t **Buffer)
 			OrigCompressedData = BufferedFileRead(BF, Length);
 			if(!OrigCompressedData)
 			{
-				ri.Free(CompressedData); 
+				PNG_Free(CompressedData,BF->PostFX);
 
 				return(-1);
 			}
 
 			if(!BufferedFileSkip(BF, PNG_ChunkCRC_Size))
 			{
-				ri.Free(CompressedData); 
+				PNG_Free(CompressedData,BF->PostFX);
 
 				return(-1);
 			}
@@ -712,9 +720,10 @@ static uint32_t DecompressIDATs(struct BufferedFile *BF, uint8_t **Buffer)
 	 */
 
 	puffResult = puff(puffDest, &puffDestLen, puffSrc, &puffSrcLen);
-	if(!((puffResult == 0) && (puffDestLen > 0)))
+	if(!((puffResult == 0) && (puffDestLen > 0)) ||
+		(BF->PostFX && puffDestLen > 128u*1024*1024+65536))
 	{
-		ri.Free(CompressedData);
+		PNG_Free(CompressedData,BF->PostFX);
 
 		return(-1);
 	}
@@ -723,10 +732,10 @@ static uint32_t DecompressIDATs(struct BufferedFile *BF, uint8_t **Buffer)
 	 *  Allocate the buffer for the uncompressed data.
 	 */
 
-	DecompressedData = ri.Malloc(puffDestLen);
+	DecompressedData = PNG_Alloc(puffDestLen,BF->PostFX);
 	if(!DecompressedData)
 	{
-		ri.Free(CompressedData);
+		PNG_Free(CompressedData,BF->PostFX);
 
 		return(-1);
 	}
@@ -749,7 +758,7 @@ static uint32_t DecompressIDATs(struct BufferedFile *BF, uint8_t **Buffer)
 	 *  The compressed data is not needed anymore.
 	 */
 
-	ri.Free(CompressedData);
+	PNG_Free(CompressedData,BF->PostFX);
 
 	/*
 	 *  Check if the last puff() was successfull.
@@ -757,7 +766,7 @@ static uint32_t DecompressIDATs(struct BufferedFile *BF, uint8_t **Buffer)
 
 	if(!((puffResult == 0) && (puffDestLen > 0)))
 	{
-		ri.Free(DecompressedData);
+		PNG_Free(DecompressedData,BF->PostFX);
 
 		return(-1);
 	}
@@ -1898,7 +1907,7 @@ static qboolean DecodeImageInterlaced(struct PNG_Chunk_IHDR *IHDR,
  *  The PNG loader
  */
 
-void R_LoadPNG(const char *name, byte **pic, int *width, int *height)
+static void LoadPNG(const char *name, byte **pic, int *width, int *height,qboolean postfx)
 {
 	struct BufferedFile *ThePNG;
 	byte *OutBuffer;
@@ -1957,7 +1966,7 @@ void R_LoadPNG(const char *name, byte **pic, int *width, int *height)
 	 *  Read the file.
 	 */
 
-	ThePNG = ReadBufferedFile(name);
+	ThePNG = ReadBufferedFile(name,postfx);
 	if(!ThePNG)
 	{
 		return;
@@ -2056,7 +2065,8 @@ void R_LoadPNG(const char *name, byte **pic, int *width, int *height)
 	 */
 
 	if(!((IHDR_Width > 0) && (IHDR_Height > 0))
-	|| IHDR_Width > INT_MAX / Q3IMAGE_BYTESPERPIXEL / IHDR_Height)
+	|| IHDR_Width > INT_MAX / Q3IMAGE_BYTESPERPIXEL / IHDR_Height
+	|| (postfx && (IHDR_Width>4096 || IHDR_Height>4096)))
 	{
 		CloseBufferedFile(ThePNG);
 
@@ -2396,10 +2406,10 @@ void R_LoadPNG(const char *name, byte **pic, int *width, int *height)
 	 *  Allocate output buffer.
 	 */
 
-	OutBuffer = ri.Malloc(IHDR_Width * IHDR_Height * Q3IMAGE_BYTESPERPIXEL); 
+	OutBuffer = PNG_Alloc(IHDR_Width * IHDR_Height * Q3IMAGE_BYTESPERPIXEL,postfx);
 	if(!OutBuffer)
 	{
-		ri.Free(DecompressedData); 
+		PNG_Free(DecompressedData,postfx);
 		CloseBufferedFile(ThePNG);
 
 		return;  
@@ -2415,8 +2425,8 @@ void R_LoadPNG(const char *name, byte **pic, int *width, int *height)
 		{
 			if(!DecodeImageNonInterlaced(IHDR, OutBuffer, DecompressedData, DecompressedDataLength, HasTransparentColour, TransparentColour, OutPal))
 			{
-				ri.Free(OutBuffer); 
-				ri.Free(DecompressedData); 
+				PNG_Free(OutBuffer,postfx);
+				PNG_Free(DecompressedData,postfx);
 				CloseBufferedFile(ThePNG);
 
 				return;
@@ -2429,8 +2439,8 @@ void R_LoadPNG(const char *name, byte **pic, int *width, int *height)
 		{
 			if(!DecodeImageInterlaced(IHDR, OutBuffer, DecompressedData, DecompressedDataLength, HasTransparentColour, TransparentColour, OutPal))
 			{
-				ri.Free(OutBuffer); 
-				ri.Free(DecompressedData); 
+				PNG_Free(OutBuffer,postfx);
+				PNG_Free(DecompressedData,postfx);
 				CloseBufferedFile(ThePNG);
 
 				return;
@@ -2441,8 +2451,8 @@ void R_LoadPNG(const char *name, byte **pic, int *width, int *height)
 
 		default :
 		{
-			ri.Free(OutBuffer); 
-			ri.Free(DecompressedData); 
+			PNG_Free(OutBuffer,postfx);
+			PNG_Free(DecompressedData,postfx);
 			CloseBufferedFile(ThePNG);
 
 			return;
@@ -2473,11 +2483,18 @@ void R_LoadPNG(const char *name, byte **pic, int *width, int *height)
 	 *  DecompressedData is not needed anymore.
 	 */
 
-	ri.Free(DecompressedData); 
+	PNG_Free(DecompressedData,postfx);
 
 	/*
 	 *  We have all data, so close the file.
 	 */
 
 	CloseBufferedFile(ThePNG);
+}
+
+void R_LoadPNG(const char *name,byte **pic,int *width,int *height) {
+    LoadPNG(name,pic,width,height,qfalse);
+}
+void R_LoadPostFXPNG(const char *name,byte **pic,int *width,int *height) {
+    LoadPNG(name,pic,width,height,qtrue);
 }

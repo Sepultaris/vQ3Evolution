@@ -1,0 +1,4 @@
+version 1
+name "Vignette"
+pass graphics "fullscreen.vert.spv" "vignette.frag.spv"
+param strength "Strength" 0.3 0 1 0.025

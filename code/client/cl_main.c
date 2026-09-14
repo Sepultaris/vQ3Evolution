@@ -22,6 +22,7 @@ Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
 // cl_main.c  -- client main loop
 
 #include "client.h"
+#include "cl_postfx.h"
 #include <limits.h>
 
 #include "../sys/sys_local.h"
@@ -3266,6 +3267,9 @@ void CL_InitRef( void ) {
 	ri.Cmd_Argv = Cmd_Argv;
 	ri.Cmd_ExecuteText = Cbuf_ExecuteText;
 	ri.RequestVideoRestart = CL_RequestVideoRestart;
+    ri.PostFX_List = CL_PostFXList;
+    ri.PostFX_Read = CL_PostFXRead;
+    ri.PostFX_Free = CL_PostFXFree;
 	ri.Printf = CL_RefPrintf;
 	ri.Error = Com_Error;
 	ri.Milliseconds = CL_ScaledMilliseconds;

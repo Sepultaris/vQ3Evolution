@@ -257,7 +257,6 @@ GRAPHICS OPTIONS MENU
 #define ID_RAYTRACING	122
 #define ID_RTSHADOWSTRENGTH 123
 #define ID_PTEXPOSURE    124
-#define ID_PTEXPOSURERESET 125
 #define ID_DLSSRR 126
 
 typedef struct {
@@ -287,8 +286,7 @@ typedef struct {
 	menulist_s		raytracing;
 	int             raytracingMode; // Preserve console-only software mode on unrelated Apply.
 	menuslider_s	rtshadowstrength;
-	menuslider_s	ptexposure;
-	menutext_s	ptexposurereset;
+	menutext_s	ptexposure;
 	menuslider_s	hudscale;
 	menuslider_s	uiscale;
 	menulist_s		dlss;
@@ -587,27 +585,6 @@ static void GraphicsOptions_CheckConfig( void )
 GraphicsOptions_UpdateMenuItems
 =================
 */
-/* Quarter-stop spacing gives useful fine control near normal exposure, while
- * still reaching 16x. Keep this compatible with the QVM's small math library. */
-static float GraphicsOptions_ExposureForStep( float step ) {
-	static const float quarterStops[] = { 1.0f, 1.189207115f, 1.414213562f, 1.681792831f };
-	int index = (int)Com_Clamp( 0, 32, step + 0.5f );
-	return 0.0625f * (1 << (index / 4)) * quarterStops[index % 4];
-}
-
-static float GraphicsOptions_ExposureStep( float exposure ) {
-	int i, closest = 0;
-	float distance = 1e30f;
-	for ( i = 0; i <= 32; ++i ) {
-		float difference = fabs( GraphicsOptions_ExposureForStep( i ) - exposure );
-		if ( difference < distance ) {
-			distance = difference;
-			closest = i;
-		}
-	}
-	return closest;
-}
-
 static void GraphicsOptions_UpdateExposureItems( void ) {
 	int hidden = QMF_HIDDEN | QMF_INACTIVE;
 	qboolean pathTracing = s_graphicsoptions.raytracingMode != 0;
@@ -615,18 +592,14 @@ static void GraphicsOptions_UpdateExposureItems( void ) {
 	if ( pathTracing ) {
 		s_graphicsoptions.rtshadowstrength.generic.flags |= hidden;
 		s_graphicsoptions.ptexposure.generic.flags &= ~hidden;
-		s_graphicsoptions.ptexposurereset.generic.flags &= ~hidden;
 	} else {
 		s_graphicsoptions.rtshadowstrength.generic.flags &= ~hidden;
 		s_graphicsoptions.ptexposure.generic.flags |= hidden;
-		s_graphicsoptions.ptexposurereset.generic.flags |= hidden;
 	}
 	if ( s_graphicsoptions.raytracing.generic.flags & QMF_GRAYED ) {
 		s_graphicsoptions.ptexposure.generic.flags |= QMF_GRAYED;
-		s_graphicsoptions.ptexposurereset.generic.flags |= QMF_GRAYED;
 	} else {
 		s_graphicsoptions.ptexposure.generic.flags &= ~QMF_GRAYED;
-		s_graphicsoptions.ptexposurereset.generic.flags &= ~QMF_GRAYED;
 	}
 }
 
@@ -1024,21 +997,13 @@ static void GraphicsOptions_RTShadowStrengthEvent( void *ptr, int event ) {
 }
 
 static void GraphicsOptions_ExposureEvent( void *ptr, int event ) {
-	float value;
 	if ( event != QM_ACTIVATED ) return;
-	if ( ((menucommon_s *)ptr)->id == ID_PTEXPOSURERESET ) {
-		value = 1.0f;
-	} else {
-		value = GraphicsOptions_ExposureForStep( s_graphicsoptions.ptexposure.curvalue );
-	}
-	s_graphicsoptions.ptexposure.curvalue = GraphicsOptions_ExposureStep( value );
-	/* Archived, non-latched renderer cvar: applies to the next in-game frame.
-	 * Do not set it on menu entry or Apply; preserve custom console values. */
-	trap_Cvar_SetValue( "r_pathTracingExposure", value );
+	/* Keep all PT exposure controls in the engine-owned, mod-independent tab. */
+	trap_Cmd_ExecuteText( EXEC_APPEND, "vq3e_options exposure\n" );
 }
 
 static void GraphicsOptions_ExposureStatus( void *ptr ) {
-	UI_DrawString( 320, 456, "Live scene exposure. 1.00x = normal; 2.00x = +1 stop.",
+	UI_DrawString( 320, 456, "Open all PT exposure controls (also Shift+F10).",
 		UI_CENTER|UI_SMALLFONT, text_color_normal );
 }
 
@@ -1063,12 +1028,7 @@ void GraphicsOptions_MenuDraw (void)
 	UI_DrawString( 520, s_graphicsoptions.dlsssharpness.generic.y,
 		va( "%i%%", (int)s_graphicsoptions.dlsssharpness.curvalue * 10 ),
 		UI_LEFT|UI_SMALLFONT, text_color_normal );
-	if ( !(s_graphicsoptions.ptexposure.generic.flags & QMF_HIDDEN) ) {
-		UI_DrawString( 520, s_graphicsoptions.ptexposure.generic.y,
-			va( "%.2fx", trap_Cvar_VariableValue( "r_pathTracingExposure" ) ),
-			UI_LEFT|UI_SMALLFONT, (s_graphicsoptions.ptexposure.generic.flags & QMF_GRAYED) ?
-			text_color_disabled : text_color_normal );
-	} else {
+	if ( !(s_graphicsoptions.rtshadowstrength.generic.flags & QMF_HIDDEN) ) {
 		UI_DrawString( 520, s_graphicsoptions.rtshadowstrength.generic.y,
 			va( "%i%%", (int)s_graphicsoptions.rtshadowstrength.curvalue * 10 ),
 			UI_LEFT|UI_SMALLFONT, text_color_normal );
@@ -1228,8 +1188,6 @@ static void GraphicsOptions_SetMenuItems( void )
 	s_graphicsoptions.raytracing.curvalue = s_graphicsoptions.raytracingMode == 2 ? 1 : 0;
 	s_graphicsoptions.rtshadowstrength.curvalue =
 		Com_Clamp( 0, 10, trap_Cvar_VariableValue( "r_rayTracingShadowStrength" ) * 10.0f );
-	s_graphicsoptions.ptexposure.curvalue =
-		GraphicsOptions_ExposureStep( trap_Cvar_VariableValue( "r_pathTracingExposure" ) );
 }
 
 /*
@@ -1534,27 +1492,16 @@ void GraphicsOptions_MenuInit( void )
 	s_graphicsoptions.rtshadowstrength.minvalue         = 0;
 	s_graphicsoptions.rtshadowstrength.maxvalue         = 10;
 
-	s_graphicsoptions.ptexposure.generic.type     = MTYPE_SLIDER;
-	s_graphicsoptions.ptexposure.generic.name     = "RTX Exposure:";
-	s_graphicsoptions.ptexposure.generic.flags    = QMF_PULSEIFFOCUS|QMF_SMALLFONT;
+	s_graphicsoptions.ptexposure.generic.type     = MTYPE_PTEXT;
+	s_graphicsoptions.ptexposure.generic.flags    = QMF_PULSEIFFOCUS|QMF_CENTER_JUSTIFY;
 	s_graphicsoptions.ptexposure.generic.x        = 400;
 	s_graphicsoptions.ptexposure.generic.y        = y;
 	s_graphicsoptions.ptexposure.generic.id       = ID_PTEXPOSURE;
 	s_graphicsoptions.ptexposure.generic.callback = GraphicsOptions_ExposureEvent;
 	s_graphicsoptions.ptexposure.generic.statusbar = GraphicsOptions_ExposureStatus;
-	s_graphicsoptions.ptexposure.minvalue         = 0;
-	s_graphicsoptions.ptexposure.maxvalue         = 32;
-
-	s_graphicsoptions.ptexposurereset.generic.type = MTYPE_PTEXT;
-	s_graphicsoptions.ptexposurereset.generic.flags = QMF_PULSEIFFOCUS;
-	s_graphicsoptions.ptexposurereset.generic.x = 584;
-	s_graphicsoptions.ptexposurereset.generic.y = y;
-	s_graphicsoptions.ptexposurereset.generic.id = ID_PTEXPOSURERESET;
-	s_graphicsoptions.ptexposurereset.generic.callback = GraphicsOptions_ExposureEvent;
-	s_graphicsoptions.ptexposurereset.generic.statusbar = GraphicsOptions_ExposureStatus;
-	s_graphicsoptions.ptexposurereset.string = "Reset";
-	s_graphicsoptions.ptexposurereset.style = UI_LEFT|UI_SMALLFONT;
-	s_graphicsoptions.ptexposurereset.color = color_red;
+	s_graphicsoptions.ptexposure.string = "PT Exposure Controls...";
+	s_graphicsoptions.ptexposure.style = UI_CENTER|UI_SMALLFONT;
+	s_graphicsoptions.ptexposure.color = color_red;
 	y += BIGCHAR_HEIGHT+2;
 
 	s_graphicsoptions.hudscale.generic.type     = MTYPE_SLIDER;
@@ -1690,7 +1637,6 @@ void GraphicsOptions_MenuInit( void )
 	Menu_AddItem( &s_graphicsoptions.menu, ( void * ) &s_graphicsoptions.raytracing );
 	Menu_AddItem( &s_graphicsoptions.menu, ( void * ) &s_graphicsoptions.rtshadowstrength );
 	Menu_AddItem( &s_graphicsoptions.menu, ( void * ) &s_graphicsoptions.ptexposure );
-	Menu_AddItem( &s_graphicsoptions.menu, ( void * ) &s_graphicsoptions.ptexposurereset );
 	Menu_AddItem( &s_graphicsoptions.menu, ( void * ) &s_graphicsoptions.hudscale );
 	Menu_AddItem( &s_graphicsoptions.menu, ( void * ) &s_graphicsoptions.uiscale );
 	Menu_AddItem( &s_graphicsoptions.menu, ( void * ) &s_graphicsoptions.dlss );

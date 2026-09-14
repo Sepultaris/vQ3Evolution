@@ -1,0 +1,6 @@
+version 1
+name "Color grade"
+pass compute "colorgrade.comp.spv"
+param exposure "Exposure (stops)" 0 -2 2 0.05
+param saturation "Saturation" 1 0 2 0.05
+param contrast "Contrast" 1 0.5 1.5 0.025

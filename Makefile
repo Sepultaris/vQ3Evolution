@@ -104,7 +104,7 @@ endif
 export CROSS_COMPILING
 
 ifndef VERSION
-VERSION=1.36
+VERSION=1.0
 endif
 
 ifndef CLIENTBIN
@@ -1729,6 +1729,7 @@ $(B)/$(AUTOUPDATER_BIN): $(Q3AUTOUPDATEROBJ)
 
 Q3OBJ = \
   $(B)/client/cl_options.o \
+  $(B)/client/cl_postfx.o \
   $(B)/client/cl_cgame.o \
   $(B)/client/cl_cin.o \
   $(B)/client/cl_console.o \
@@ -1890,8 +1891,8 @@ Q3VKOBJ = \
 	$(B)/renderer_vulkan/vk_raytracing.o \
 	$(B)/renderer_vulkan/vk_pathtrace.o \
   $(B)/renderer_vulkan/vk_sharpen.o \
-  $(B)/renderer_vulkan/vk_bloom.o \
   $(B)/renderer_vulkan/vk_nv.o \
+  $(B)/renderer_vulkan/vk_postfx.o \
   $(B)/renderer_vulkan/vk_swapchain.o \
   $(B)/renderer_vulkan/vk_screenshot.o \
   $(B)/renderer_vulkan/vk_shade_geometry.o \
@@ -1899,9 +1900,6 @@ Q3VKOBJ = \
   \
   $(B)/renderer_vulkan/vk_shaders.o \
   $(B)/renderer_vulkan/dlss_sharpen_comp.o \
-	$(B)/renderer_vulkan/post_bloom_down_comp.o \
-	$(B)/renderer_vulkan/post_bloom_blur_comp.o \
-	$(B)/renderer_vulkan/post_bloom_composite_comp.o \
 	$(B)/renderer_vulkan/post_NV_comp.o \
 	$(B)/renderer_vulkan/rt_shadows_comp.o \
 	$(B)/renderer_vulkan/pt_software_comp.o \

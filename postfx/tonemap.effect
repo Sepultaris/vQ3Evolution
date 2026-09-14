@@ -1,0 +1,11 @@
+version 1
+name "Tone map"
+pass graphics "fullscreen.vert.spv" "tonemap.frag.spv"
+param exposure "Exposure (stops)" 0 -3 3 0.1
+param contrast "Midtone contrast" 1 0.5 2 0.025
+param shadows "Shadow lift" 0 -0.5 0.5 0.025
+param highlights "Highlight level" 0 -0.5 0.5 0.025
+param gamma "Gamma" 1 0.5 2 0.025
+param saturation "Saturation" 1 0 2 0.05
+param blackpoint "Black point" 0 0 0.2 0.005
+param shoulder "Highlight compression" 0 0 1 0.025

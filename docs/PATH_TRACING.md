@@ -24,7 +24,8 @@ Open **Shift+F10 → Lighting**, or use the console:
 /pt_info
 ```
 
-This example selects DLAA and Ray Reconstruction at native resolution. NVIDIA
+This example selects DLAA and Ray Reconstruction. Add `r_pathTracingScale 1`
+for native tracing resolution; the 1.0 preset traces at half width/height. NVIDIA
 features require the [optional runtimes](DLSS.md) and compatible hardware.
 Path tracing itself uses Vulkan KHR ray queries, not an NVIDIA-specific tracing
 API or NGX application ID. The renderer checks ray-query/acceleration-structure,
@@ -38,38 +39,50 @@ different features; NR is bypassed while RR runs.
 
 ## Lighting and quality controls
 
-Defaults below are source defaults, not a command to overwrite saved settings.
+Q3DM0's starting-room corner pillars use stock `textures/base_wall/chrome_metal`.
+The native material conversion now replaces both legacy reflection pictures
+with a smooth, fully metallic scene-traced surface (roughness 0.08). Its additive
+detail artwork is not an emitter. Explicit PBR/emissive replacements, deformed
+effects and unrelated materials are preserved; no PK3 override is needed.
+
+Defaults below are the built-in [1.0 release preset](RELEASE_DEFAULTS.md), not
+a command to overwrite saved settings.
 The [universal panel](UNIVERSAL_OPTIONS.md) exposes the main controls in loaded
 games, Team Arena and mods; console changes also persist through the shared
 presentation profile. RTX/DLSS/RR mode changes need `vid_restart`. The following
 quality and lighting controls update live and reset relevant history.
+All six exposure controls are grouped in **Shift+F10 → Exposure**, also opened
+with `/vq3e_options exposure`. They apply without a renderer restart; the
+base-game graphics menu links to this same tab.
 
 | Console variable | Default | Range and meaning |
 | --- | ---: | --- |
-| `r_pathTracingSamples` | 2 | 1–64 samples per pixel per rendered frame; fixed unless adaptive sampling is explicitly enabled |
-| `r_pathTracingAdaptive` | 0 | 0: fixed count; 1: eligible RR pixels may use half the requested count, including 2 → 1 |
+| `r_pathTracingSamples` | 3 | 1–64 samples per pixel per rendered frame; fixed when adaptive sampling is disabled |
+| `r_pathTracingAdaptive` | 1 | 0: fixed count; 1: eligible RR pixels may use half the requested count, including 2 → 1 |
 | `r_pathTracingBounces` | 4 | 1–12 maximum surface interactions; 1 is direct-only |
 | `r_pathTracingLightReuse` | 1 | Enable RR primary-surface map-light sample reuse |
-| `r_pathTracingExposure` | 1 | 0.01–16 linear exposure before tone mapping; 2 doubles brightness; does not brighten HUD/menu |
+| `r_pathTracingExposure` | 16 | 0.01–16 linear exposure before tone mapping; 2 doubles brightness; does not brighten HUD/menu |
 | `r_pathTracingAmbient` | 0 | 0–2 diffuse ambient fill, also contributing to fog; 0 disables it |
-| `r_muzzleFlashBrightness` | 1 | 0–8 visible muzzle-flash emission; 0 off, 1 original, 2 doubles it |
-| `r_muzzleFlashLightScale` | 1 | 0–8 muzzle illumination, including its dynamic light and traced emissive light; independent of visible brightness |
+| `r_muzzleFlashBrightness` | 0.01 | 0–8 visible muzzle-flash emission; 0 off, 1 original, 2 doubles it |
+| `r_muzzleFlashLightScale` | 0.005 | 0–8 muzzle illumination, including its dynamic light and traced emissive light; independent of visible brightness |
 | `r_rocketBrightness` | 1 | 0–8 visible flying-rocket exhaust/glow; opaque body reflectance is unchanged |
-| `r_rocketLightScale` | 1 | 0–8 flying-rocket illumination: its moving dynamic light and traced exhaust emission; separate from muzzle flashes and explosions |
-| `r_rocketExplosionLightScale` | 1 | 0–8 rocket-impact illumination, including the dynamic light and traced explosion/animated-particle emission; visible effects unchanged |
-| `r_lightningGunLightScale` | 1 | 0–8 lightning beam, impact and muzzle illumination; also multiplies the existing muzzle-light setting at the muzzle only; visible effects unchanged |
-| `r_pathTracingSunAngle` | 0 | 0–20 degrees, full angular diameter of the map's authored sun |
+| `r_rocketLightScale` | 0.02 | 0–8 flying-rocket illumination: its moving dynamic light and traced exhaust emission; separate from muzzle flashes and explosions |
+| `r_rocketExplosionLightScale` | 0.03 | 0–8 rocket-impact illumination, including the dynamic light and traced explosion/animated-particle emission; visible effects unchanged |
+| `r_lightningGunLightScale` | 0.5 | 0–8 lightning beam, impact and muzzle illumination; also multiplies the existing muzzle-light setting at the muzzle only; visible effects unchanged |
+| `r_pathTracingSunAngle` | 1 | 0–20 degrees, full angular diameter of the map's authored sun |
 | `r_pathTracingSunScale` | 1 | 0–16 linear multiplier for the map's authored sun brightness; 2 doubles direct/indirect sunlight |
-| `r_pathTracingLightRadius` | 0 | 0–64 world units, source radius for map point/spot and dynamic lights |
-| `r_pathTracingAutoExposure` | 0 | 1: automatic exposure from the traced HDR average; manual exposure is bypassed, then reseeded when enabled |
+| `r_pathTracingLightRadius` | 3 | 0–64 world units, source radius for map point/spot and dynamic lights |
+| `r_pathTracingAutoExposure` | 1 | 1: adapt exposure from traced HDR brightness changes around the manual base multiplier; reference mode keeps fixed manual exposure |
 | `r_pathTracingAdaptiveSpeed` | 0.25 | 0.01–10 smoothing time constant (seconds) for the auto-exposure adaptation |
-| `r_pathTracingAdaptiveTarget` | 0.18 | 0.0001–20 ACES input level the frame average is mapped to; 0.18 is middle gray, 1.0 is near-white, 2+ overexposes/saturates |
-| `r_pathTracingAdaptiveMin` | 0.05 | 0–64 minimum auto exposure (never below this when auto is enabled) |
-| `r_pathTracingAdaptiveMax` | 16 | 0–4096 maximum auto exposure (never above this when auto is enabled) |
-| `r_pathTracingScale` | 1 | 0.25–1 internal render scale for path tracing; applied on `vid_restart` |
+| `r_pathTracingAdaptiveTarget` | 0.1766 | 0.0001–20 automatic-exposure bias: target / 0.18 multiplies the adapted base exposure; 0.18 is neutral |
+| `r_pathTracingAdaptiveMin` | 0.01 | 0–64 minimum auto exposure (never below this when auto is enabled) |
+| `r_pathTracingAdaptiveMax` | 65.5 | 0–4096 maximum auto exposure (never above this when auto is enabled) |
+| `r_pathTracingScale` | 0.5 | 0.25–1 internal render scale for path tracing; applied on `vid_restart` |
 
 For a flat two-sample budget, use `r_pathTracingSamples 2` and
 `r_pathTracingAdaptive 0`. RR does not silently change samples or bounces.
+Auto exposure clamps to the minimum/maximum limits (reversed limits are sorted
+by the renderer). Its adaptation settings are distinct from adaptive sampling.
 
 ### Rocket controls
 
@@ -94,7 +107,8 @@ with `RF_ROCKET`; precompiled mods must integrate the tag and dynamic-light
 control to participate. Both software and hardware tracing support the controls.
 Vulkan raster dims only additive rocket stages; its 8-bit colors clip boosts.
 OpenGL does not implement the separate visible-emission multiplier. Defaults
-remain 1; the example above is a starting preference, not a required setting.
+are visible brightness 1 and light scale 0.02 in the 1.0 preset; the example
+above is optional.
 
 Verification (2026-09-13): engine, renderer and both native/bytecode game modules
 built; all 29 affected shaders passed SPIR-V validation. Normal/release fixtures
@@ -119,7 +133,8 @@ Rocket impacts and the lightning gun have their own live, console-only light con
 /r_lightningGunLightScale 0.25
 ```
 
-Range 0–8, default 1: 0 disables that effect's illumination and 1 restores its
+Range 0–8; release defaults are 0.03 for rocket explosions and 0.5 for lightning.
+0 disables that effect's illumination and 1 restores its
 original strength. Values are archived in the shared rendering profile. These
 controls scale light, not visible glow, alpha coverage, light radius or lifetime.
 Rocket impact sprites and animated explosion polygons are explicitly tagged;
@@ -131,8 +146,9 @@ Both tracers use the same scales for emitter selection, direct and bounced
 illumination; visible camera/ideal specular emission remains unchanged. Live
 changes invalidate traced lighting history, including during an existing blast.
 
-The engine/renderer interface is now version 11 for optional tagged polygon
-submission (`CG_R_ADDPOLYTAGGED`, 201). This preserves the explosion particle's
+Optional tagged polygon submission (`CG_R_ADDPOLYTAGGED`, 201) was added with
+engine/renderer interface version 11; the current interface is version 15 for
+texture/reduced-pass/depth/motion-aware local post effects. Tagged submission preserves the explosion particle's
 original vertices, UVs, animation and colors without shader-name heuristics or
 new GPU vertex/ray storage. Install the matching engine and all renderer DLLs
 together. OpenGL uses ordinary polygon submission and supports the scaled
@@ -208,7 +224,7 @@ RR and raster were not runtime-tested for these controls. No performance claim.
 
 ### Render scale
 
-`r_pathTracingScale` (default 1, range 0.25–1) runs the entire path-tracing
+`r_pathTracingScale` (release default 0.5, range 0.25–1) runs the entire path-tracing
 pipeline at a fraction of the internal render resolution, then presents the
 result at full resolution through reconstruction or the final upscale. Trace
 time scales with the rendered pixel count, so 0.5 gives roughly a 4× trace
@@ -251,6 +267,14 @@ lighting as path-traced albedo. Implemented cases include:
 - BSP camera portals, including Q3DM0's wave-deformed aperture and layered fog.
 - Convex BSP fog volumes, segment transmittance and sampled in-scattering.
 - Team Arena terrain blending using interpolated authored vertex alpha.
+- Solid BSP doors/lifts occlude traced lights even though their game entities
+  suppress legacy stencil shadows. Cutout/glass material transmission remains
+  material-controlled; non-brush no-shadow effects keep their previous behavior.
+- Tracked rigid BSP models use their previous object transform for motion, not
+  vertex order in sorted draw batches. This prevents false motion on closed doors
+  during camera pans and supplies the corrected guide to both RR and FG.
+  Deformed surfaces keep per-vertex tracking; precompiled mods without tracked
+  submissions still have camera-only motion for moving entities.
 
 These are supported cases with targeted checks, not a promise that every mod
 shader, portal or mixed optical path is correct. See [RR limitations](RAY_RECONSTRUCTION.md#limitations)
@@ -317,6 +341,7 @@ history and scene statistics; `nvidia_info` reports NVIDIA feature state.
 | --- | ---: | --- |
 | `r_pathTracingReference` | 0 | Freeze submitted geometry/lights/material time for fixed-camera convergence; not game simulation |
 | `r_pathTracingDebug` | 0 | 1 diffuse, 2 reflection/transmission, 3 emission, 4 normals, 5 roughness/metalness, 6 dielectric classification |
+| `r_pathTracingRRDebug` | 0 | Live [RR-only display](RAY_RECONSTRUCTION.md#rr-only-debug-view): required exposure/tone conversion, no later effects or HUD; console/menu recovery; non-archived |
 | `r_pathTracingTemporalDebug` | 0 | Native history/lighting-change views; bypasses normal RR routing |
 | `r_pathTracingAdaptiveDebug` | 0 | RR budget overlay: half versus full sampling |
 | `r_pathTracingProfile` | 0 | Coarse GPU timestamp logging |

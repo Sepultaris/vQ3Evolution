@@ -1,0 +1,5 @@
+version 1
+name "Chromatic aberration"
+pass graphics "fullscreen.vert.spv" "chromatic.frag.spv"
+param strength "Separation (pixels)" 2 0 20 0.25
+param falloff "Edge falloff" 2 0.5 4 0.1

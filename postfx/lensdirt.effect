@@ -1,0 +1,16 @@
+version 3
+name "Lens dirt"
+texture "lensdirt.png"
+downsample 4
+pass graphics "fullscreen.vert.spv" "lensdirt_prefilter.frag.spv"
+pass graphics "fullscreen.vert.spv" "lensdirt_blur_h.frag.spv"
+pass graphics "fullscreen.vert.spv" "lensdirt_blur_v.frag.spv"
+pass graphics "fullscreen.vert.spv" "lensdirt.frag.spv"
+param strength "Dirt intensity" 0.7 0 4 0.025
+param threshold "Highlight threshold" 0.65 0 0.95 0.025
+param spread "Light spread" 0.12 0 0.3 0.005
+param size "Texture zoom" 1 1 3 0.1
+param contrast "Dirt contrast" 1 0.25 3 0.05
+param saturation "Dirt color" 1 0 2 0.05
+param glare "Soft glare" 0.15 0 2 0.025
+param gain "Scatter gain" 1 0 16 0.25

@@ -14,8 +14,9 @@ features source-native and maintainable.
 ## Submitting changes
 
 - Keep each commit focused and describe the behavior it changes.
-- Run the [repository and offline checks](docs/TESTING.md) before staging;
-  review untracked files as well as the tracked diff.
+- Run the [repository and offline checks](docs/TESTING.md) from your local
+  checkout before staging; the private `tests/` harness is intentionally
+  ignored and is not part of commits or release archives.
 - Build the affected renderer and native/QVM modules.
 - Test both the main menu and a loaded map for graphics or UI changes.
 - Document user-visible settings, requirements, and fallback behavior.
@@ -23,9 +24,13 @@ features source-native and maintainable.
   in the source tree.
 
 Do not commit build directories, Quake III PK3 data, local configuration files,
-downloaded SDKs, NVIDIA runtime DLLs, compiled/extracted QVMs, scratch inspection
-directories such as `.build-tmp`, test homes, crash dumps, or generated logs.
+downloaded SDKs, NVIDIA runtime DLLs, compiled/extracted QVMs, the local
+`tests/` harness, scratch inspection directories such as `.build-tmp`, test
+homes, crash dumps, or generated logs.
 The root `.gitignore` covers the standard locations.
+Release staging and source archives go in ignored `dist/`; see the
+[release checklist](docs/RELEASING.md). Preserve the current working tree in
+the matching source snapshot; an old HEAD archive is not corresponding source.
 
 Embedded GLSL bytecode/C arrays under `code/renderer_vulkan/shaders/Compiled`
 and the generated blue-noise header are intentional source-build inputs.

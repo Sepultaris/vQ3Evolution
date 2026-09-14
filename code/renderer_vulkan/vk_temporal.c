@@ -5,35 +5,29 @@
 #include "vk_temporal.h"
 #include "vk_streamline.h"
 #include "vk_sharpen.h"
-#include "vk_bloom.h"
 #include "vk_nv.h"
+#include "vk_postfx.h"
 #include "vk_raytracing.h"
 #include "vk_pathtrace.h"
 #include "tr_cvar.h"
 #include "tr_globals.h"
+#include "../renderercommon/postfx_motion.h"
 
 #include <math.h>
 #include <string.h>
 
-#if defined(USE_NVIDIA_STREAMLINE) || defined(USE_VULKAN_RAY_TRACING)
+/* Local post effects also need scene targets on SDK-free raster builds. */
 #define USE_TEMPORAL_RENDER_TARGETS
-#endif
 
-typedef struct {
-	VkImage image;
-	VkDeviceMemory memory;
-	VkImageView view;
-	VkFormat format;
-	VkImageUsageFlags usage;
-	VkImageAspectFlags aspect;
-	VkImageLayout layout;
-} temporal_image_t;
+typedef postfxImage_t temporal_image_t;
 
 typedef struct {
 	qboolean active;
 	qboolean scene_pass;
 	qboolean scene_drawn;
 	qboolean ui_pass;
+	qboolean rr_debug;
+	int rr_debug_status;
 	qboolean have_view;
 	qboolean reset;
 	uint32_t render_width;
@@ -52,21 +46,19 @@ typedef struct {
 	float camera_far;
 	float camera_fov_y;
 	float camera_aspect;
+    float postfx_previous_projection[16],postfx_previous_view[16];
+    float postfx_previous_origin[3],postfx_previous_forward[3],postfx_previous_time;
+    qboolean postfx_previous_valid,postfx_previous_traced;
 	temporal_image_t scene_color;
 	temporal_image_t scene_depth;
 	temporal_image_t raytraced_color;
 	temporal_image_t neural_color;
 	temporal_image_t output_color;
 	temporal_image_t sharpened_color;
-	temporal_image_t bloom_half;
-	temporal_image_t bloom_q_a;
-	temporal_image_t bloom_q_b;
-	temporal_image_t bloomed_color;
 	temporal_image_t nv_color;
 	temporal_image_t motion_vectors;
     temporal_image_t path_depth;
 	qboolean sharpen_ready;
-	qboolean bloom_ready;
 	qboolean nv_ready;
 	VkRenderPass scene_render_pass;
 	VkRenderPass ui_render_pass;
@@ -74,6 +66,8 @@ typedef struct {
 } temporal_state_t;
 
 static temporal_state_t temporal;
+
+qboolean vk_temporal_rr_debug_active(void) { return temporal.rr_debug; }
 
 #ifdef USE_TEMPORAL_RENDER_TARGETS
 
@@ -267,10 +261,9 @@ static void initialize_layouts(void)
 		VK_IMAGE_LAYOUT_GENERAL);
 	temporal.motion_vectors.layout = VK_IMAGE_LAYOUT_GENERAL;
 	{
-		/* Bloom/NV are shared by raster, software tracing and RTX. Every
+		/* NV is shared by raster, software tracing and RTX. Every
 		 * storage target must really enter GENERAL before its first use. */
-		temporal_image_t *outputs[] = { &temporal.bloom_half, &temporal.bloom_q_a,
-			&temporal.bloom_q_b, &temporal.bloomed_color, &temporal.nv_color };
+		temporal_image_t *outputs[] = { &temporal.nv_color };
 		for (unsigned i = 0; i < ARRAY_LEN(outputs); ++i) {
 			if (!outputs[i]->image) continue;
 			record_image_layout_transition(command_buffer, outputs[i]->image,
@@ -323,7 +316,8 @@ void vk_temporal_initialize(uint32_t render_width, uint32_t render_height,
 {
 	memset(&temporal, 0, sizeof(temporal));
 #ifdef USE_TEMPORAL_RENDER_TARGETS
-	temporal.active = ((r_dlss->integer && vk_sl_dlss_supported()) ||
+    vk_postfx_initialize(output_width,output_height);
+	temporal.active = (vk_postfx_enabled() || (r_dlss->integer && vk_sl_dlss_supported()) ||
 		(r_dlssNeuralRendering->integer && vk_sl_neural_rendering_supported()) ||
 		(r_dlssFrameGeneration->integer && vk_sl_frame_generation_supported()) ||
 		(r_rayTracing->integer && vk_rt_supported())) ? qtrue : qfalse;
@@ -371,7 +365,7 @@ void vk_temporal_initialize(uint32_t render_width, uint32_t render_height,
 	create_image(&temporal.output_color, output_width, output_height,
 		vk.surface_format.format, color_usage, VK_IMAGE_ASPECT_COLOR_BIT);
 	if (r_dlss->integer && vk_sl_dlss_supported()) {
-		/* The sharpened image also feeds the sampled bloom/NV inputs. */
+		/* The sharpened image also feeds sampled NV/post-effect inputs. */
 		const VkImageUsageFlags sharpen_usage = VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT |
 			VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
 		create_image(&temporal.sharpened_color, output_width, output_height,
@@ -381,31 +375,10 @@ void vk_temporal_initialize(uint32_t render_width, uint32_t render_height,
 			temporal.output_color.view, temporal.sharpened_color.view);
 	}
 	{
-		const VkImageUsageFlags bloom_glow_usage = VK_IMAGE_USAGE_STORAGE_BIT |
-			VK_IMAGE_USAGE_SAMPLED_BIT;
-		const VkImageUsageFlags bloom_out_usage = VK_IMAGE_USAGE_STORAGE_BIT |
+		const VkImageUsageFlags nv_usage = VK_IMAGE_USAGE_STORAGE_BIT |
 			VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
-		const uint32_t bloom_half_w = (output_width + 1) / 2;
-		const uint32_t bloom_half_h = (output_height + 1) / 2;
-		const uint32_t bloom_quarter_w = (bloom_half_w + 1) / 2;
-		const uint32_t bloom_quarter_h = (bloom_half_h + 1) / 2;
-		create_image(&temporal.bloom_half, bloom_half_w, bloom_half_h,
-			VK_FORMAT_R16G16B16A16_SFLOAT, bloom_glow_usage,
-			VK_IMAGE_ASPECT_COLOR_BIT);
-		create_image(&temporal.bloom_q_a, bloom_quarter_w, bloom_quarter_h,
-			VK_FORMAT_R16G16B16A16_SFLOAT, bloom_glow_usage,
-			VK_IMAGE_ASPECT_COLOR_BIT);
-		create_image(&temporal.bloom_q_b, bloom_quarter_w, bloom_quarter_h,
-			VK_FORMAT_R16G16B16A16_SFLOAT, bloom_glow_usage,
-			VK_IMAGE_ASPECT_COLOR_BIT);
-		create_image(&temporal.bloomed_color, output_width, output_height,
-			VK_FORMAT_R8G8B8A8_UNORM, bloom_out_usage,
-			VK_IMAGE_ASPECT_COLOR_BIT);
-		temporal.bloom_ready = vk_bloom_initialize(temporal.bloom_half.view,
-			temporal.bloom_q_a.view, temporal.bloom_q_b.view,
-			temporal.bloomed_color.view, output_width, output_height);
 		create_image(&temporal.nv_color, output_width, output_height,
-			VK_FORMAT_R8G8B8A8_UNORM, bloom_out_usage,
+			VK_FORMAT_R8G8B8A8_UNORM, nv_usage,
 			VK_IMAGE_ASPECT_COLOR_BIT);
 		temporal.nv_ready = vk_nv_initialize(temporal.nv_color.view,
 			output_width, output_height);
@@ -450,26 +423,24 @@ void vk_temporal_initialize(uint32_t render_width, uint32_t render_height,
 
 void vk_temporal_shutdown(void)
 {
+	if (r_pathTracingRRDebugActive && r_pathTracingRRDebugActive->integer)
+		ri.Cvar_Set("r_pathTracingRRDebugActive", "0");
 	// Clear external references and release NGX features while tagged images
 	// still exist. RE_Shutdown drains GPU work before reaching this function;
 	// initialization-failure cleanup has not submitted a frame yet.
 	vk_sl_release_frame_resources();
+    vk_postfx_shutdown();
 #ifdef USE_TEMPORAL_RENDER_TARGETS
 	if (temporal.scene_framebuffer) qvkDestroyFramebuffer(vk.device, temporal.scene_framebuffer, NULL);
 	if (temporal.scene_render_pass) qvkDestroyRenderPass(vk.device, temporal.scene_render_pass, NULL);
 	if (temporal.ui_render_pass) qvkDestroyRenderPass(vk.device, temporal.ui_render_pass, NULL);
 	vk_rt_shutdown();
 	vk_sharpen_shutdown();
-	vk_bloom_shutdown();
 	vk_nv_shutdown();
 	destroy_image(&temporal.motion_vectors);
     destroy_image(&temporal.path_depth);
 	destroy_image(&temporal.sharpened_color);
-	destroy_image(&temporal.bloomed_color);
 	destroy_image(&temporal.nv_color);
-	destroy_image(&temporal.bloom_q_b);
-	destroy_image(&temporal.bloom_q_a);
-	destroy_image(&temporal.bloom_half);
 	destroy_image(&temporal.output_color);
 	destroy_image(&temporal.neural_color);
 	destroy_image(&temporal.raytraced_color);
@@ -494,6 +465,7 @@ uint32_t vk_temporal_render_height(void) { return temporal.render_height; }
 
 void vk_temporal_begin_frame(void)
 {
+	temporal.rr_debug = qfalse;
 #ifdef USE_TEMPORAL_RENDER_TARGETS
 	if (!temporal.active) return;
 	temporal.frame_index++;
@@ -576,13 +548,17 @@ void vk_temporal_begin_ui(void)
 	temporal.scene_color.layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
 	temporal.scene_depth.layout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
 	const qboolean frame_generation_valid = temporal.scene_drawn && temporal.have_view;
+	const qboolean debug_ui = r_pathTracingRRDebug->integer &&
+		ri.Cvar_VariableIntegerValue("r_debugUIActive") != 0;
+	const qboolean rr_debug_requested = r_pathTracingRRDebug->integer && !debug_ui &&
+		r_rayTracing->integer == 2 && vk_sl_ray_reconstruction_enabled() && frame_generation_valid;
 
 	/*
 	 * DLSS-G must know whether this viewport is active before receiving the
 	 * frame's constants and tags.  Enabling it afterwards leaves the first
 	 * gameplay present configured as an ordinary application frame.
 	 */
-	vk_sl_set_frame_generation_active(frame_generation_valid);
+	vk_sl_set_frame_generation_active(frame_generation_valid && !rr_debug_requested);
 	vk_sl_tag_backbuffer_extent(vk.command_buffer,
 		temporal.output_width, temporal.output_height);
 
@@ -762,7 +738,7 @@ void vk_temporal_begin_ui(void)
             resources.reset = resources.reset || vk_pt_history_reset();
         }
         if (raytraced && r_rayTracing->integer == 2) {
-            rr_evaluated = vk_pt_rr_evaluate(&resources, &rr_color.image, &rr_color.view);
+            rr_evaluated = vk_pt_rr_evaluate(&resources, &rr_color.image, &rr_color.view, rr_debug_requested);
             if (rr_evaluated) {
                 rr_color.format = VK_FORMAT_R8G8B8A8_UNORM;
                 rr_color.layout = VK_IMAGE_LAYOUT_GENERAL;
@@ -771,6 +747,21 @@ void vk_temporal_begin_ui(void)
             }
         }
 		evaluated = rr_evaluated || vk_sl_evaluate_dlss(&resources);
+	}
+
+	// Never label an SR/native fallback (or a stale prior frame) as RR output.
+	temporal.rr_debug = rr_debug_requested && rr_evaluated;
+	if (r_pathTracingRRDebugActive->integer != temporal.rr_debug)
+		ri.Cvar_Set("r_pathTracingRRDebugActive", temporal.rr_debug ? "1" : "0");
+	const int debug_status = !r_pathTracingRRDebug->integer ? 0 :
+		(debug_ui ? 2 : (temporal.rr_debug ? 1 : 3));
+	if (debug_status != temporal.rr_debug_status) {
+		const char *messages[] = { "off; normal presentation restored",
+			"active; current RR output + exposure/tone conversion only (no HUD, post effects or FG)",
+			"suspended while console/menu owns input",
+			"unavailable this frame; requires PT mode 2 and successful RR; normal presentation retained" };
+		ri.Printf(PRINT_ALL,"PT RR debug: %s\n",messages[debug_status]);
+		temporal.rr_debug_status = debug_status;
 	}
 
 	if (evaluated && !rr_evaluated && temporal.sharpen_ready && r_dlssSharpness->value > 0.0f) {
@@ -794,51 +785,19 @@ void vk_temporal_begin_ui(void)
 		(VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_TRANSFER_WRITE_BIT) :
 		VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT);
 
-	/* Post-processing bloom on the final tone-mapped frame. All upscale paths
-	 * converge here, so the composite runs once regardless of how the frame
-	 * was produced and still lets the blit (and DLSS-G tagging) use the same
-	 * source image untouched. */
-	qboolean bloomed = qfalse;
+	/* Local bloom now runs inside the ordinary post-effect chain below. */
 	temporal_image_t *blit_source = source;
 	VkAccessFlags blit_source_access = source_access;
-	const qboolean source_at_output = (evaluated || rr_evaluated ||
-		neural_evaluated ||
-		(temporal.output_width == temporal.render_width &&
-		 temporal.output_height == temporal.render_height));
-	if (temporal.bloom_ready && r_postBloom->integer &&
-		r_postBloomStrength->value > 0.0f && source_at_output) {
-		VkImageLayout prev_source_layout = source->layout;
-		record_image_layout_transition(vk.command_buffer, source->image,
-			VK_IMAGE_ASPECT_COLOR_BIT, source_access, source->layout,
-			VK_ACCESS_SHADER_READ_BIT, VK_IMAGE_LAYOUT_GENERAL);
-		source->layout = VK_IMAGE_LAYOUT_GENERAL;
-		temporal.bloomed_color.layout = VK_IMAGE_LAYOUT_GENERAL;
-		bloomed = vk_bloom_record(vk.command_buffer, source->view,
-			temporal.output_width, temporal.output_height,
-			r_postBloomStrength->value, r_postBloomThreshold->value,
-			r_postBloomDebug->integer);
-		record_image_layout_transition(vk.command_buffer, source->image,
-			VK_IMAGE_ASPECT_COLOR_BIT, VK_ACCESS_SHADER_READ_BIT,
-			VK_IMAGE_LAYOUT_GENERAL, source_access, prev_source_layout);
-		source->layout = prev_source_layout;
-		if (bloomed) {
-			blit_source = &temporal.bloomed_color;
-			blit_source_access =
-				VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_SHADER_READ_BIT;
-		}
-	}
 
-	/* Night-vision post-pass. Reads the converged frame (bloomed when bloom
-	 * ran, otherwise the source) and becomes the blit source while active.
+	/* Night-vision post-pass. Reads the converged frame before local effects
+	 * and becomes the blit source while active.
 	 * The legacy overlays are detected during front-end submission and set
 	 * the R_NvOverlayActive() flag; r_nvOverride forces the effect on. */
-	if (temporal.nv_ready &&
+	if (!temporal.rr_debug && temporal.nv_ready &&
 		(r_nvOverride->integer ||
 		 (r_nvNightVision->integer && R_NvOverlayActive()))) {
-		temporal_image_t *nv_input = bloomed ? &temporal.bloomed_color : source;
-		const VkAccessFlags nv_input_access = bloomed ?
-			(VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_SHADER_READ_BIT) :
-			source_access;
+		temporal_image_t *nv_input = source;
+		const VkAccessFlags nv_input_access = source_access;
 		VkImageLayout prev_nv_layout = nv_input->layout;
 		record_image_layout_transition(vk.command_buffer, nv_input->image,
 			VK_IMAGE_ASPECT_COLOR_BIT, nv_input_access, nv_input->layout,
@@ -865,6 +824,47 @@ void vk_temporal_begin_ui(void)
 		}
 	}
 
+    /* Effects see the reconstructed HUD-less scene and, if requested, the
+     * matching tracer/raster depth. Never substitute raster depth for PT hits. */
+    temporal_image_t *effect_source = blit_source;
+    postfxDepth_t effect_depth = {0};
+    effect_depth.image = raytraced ? &temporal.path_depth : &temporal.scene_depth;
+    effect_depth.access = raytraced ? (VK_ACCESS_SHADER_WRITE_BIT|VK_ACCESS_SHADER_READ_BIT) :
+        (VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT|VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT|VK_ACCESS_SHADER_READ_BIT);
+    effect_depth.projectionJitter[0] = temporal.projection[10];
+    effect_depth.projectionJitter[1] = temporal.projection[14];
+    effect_depth.projectionJitter[2] = evaluated ? -temporal.jitter_x/(float)temporal.render_width:0.0f;
+    effect_depth.projectionJitter[3] = evaluated ? -temporal.jitter_y/(float)temporal.render_height:0.0f;
+    effect_depth.motion = &temporal.motion_vectors;
+    effect_depth.motionAccess = VK_ACCESS_SHADER_READ_BIT|VK_ACCESS_SHADER_WRITE_BIT;
+    effect_depth.motionInfo[0] = raytraced ? 1.0f:0.0f;
+    effect_depth.motionInfo[3] = evaluated ? 1.0f:0.0f;
+    effect_depth.motionJitter[0] = -temporal.jitter_x/(float)temporal.render_width;
+    effect_depth.motionJitter[1] = -temporal.jitter_y/(float)temporal.render_height;
+    effect_depth.motionInfo[2] = tr.refdef.floatTime-temporal.postfx_previous_time;
+    if (frame_generation_valid && temporal.postfx_previous_valid && !temporal.reset &&
+        temporal.postfx_previous_traced==raytraced && (!raytraced || !vk_pt_history_reset())) {
+        vec3_t difference;
+        VectorSubtract(temporal.camera_origin,temporal.postfx_previous_origin,difference);
+        if (PFX_MotionContinuous(effect_depth.motionInfo[2],DotProduct(difference,difference),
+            DotProduct(temporal.camera_axis,temporal.postfx_previous_forward)))
+            effect_depth.motionInfo[1] = (float)PFX_PreviousClipRows(temporal.projection,temporal.view,
+                temporal.postfx_previous_projection,temporal.postfx_previous_view,effect_depth.previousClipRows);
+    }
+    if (frame_generation_valid && !temporal.rr_debug)
+        blit_source = vk_postfx_record(vk.command_buffer,blit_source,blit_source_access,
+            tr.refdef.floatTime,temporal.frame_index,&effect_depth);
+    const qboolean effects_applied = blit_source != effect_source;
+    temporal.postfx_previous_valid = frame_generation_valid;
+    temporal.postfx_previous_traced = raytraced;
+    temporal.postfx_previous_time = tr.refdef.floatTime;
+    if (frame_generation_valid) {
+        memcpy(temporal.postfx_previous_projection,temporal.projection,sizeof(temporal.projection));
+        memcpy(temporal.postfx_previous_view,temporal.view,sizeof(temporal.view));
+        memcpy(temporal.postfx_previous_origin,temporal.camera_origin,sizeof(temporal.camera_origin));
+        memcpy(temporal.postfx_previous_forward,temporal.camera_axis,sizeof(temporal.postfx_previous_forward));
+    }
+    if (effects_applied) blit_source_access = VK_ACCESS_SHADER_READ_BIT;
 	record_image_layout_transition(vk.command_buffer, blit_source->image, VK_IMAGE_ASPECT_COLOR_BIT,
 		blit_source_access,
 		blit_source->layout, VK_ACCESS_TRANSFER_READ_BIT, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
@@ -877,8 +877,8 @@ void vk_temporal_begin_ui(void)
 	memset(&blit, 0, sizeof(blit));
 	blit.srcSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
 	blit.srcSubresource.layerCount = 1;
-	const qboolean blit_at_output = evaluated || rr_evaluated ||
-		blit_source == &temporal.nv_color || blit_source == &temporal.bloomed_color;
+	const qboolean blit_at_output = effects_applied || evaluated || rr_evaluated ||
+		blit_source == &temporal.nv_color;
 	blit.srcOffsets[1].x = blit_at_output ? (int32_t)temporal.output_width : (int32_t)temporal.render_width;
 	blit.srcOffsets[1].y = blit_at_output ? (int32_t)temporal.output_height : (int32_t)temporal.render_height;
 	blit.srcOffsets[1].z = 1;
@@ -900,9 +900,9 @@ void vk_temporal_begin_ui(void)
 		VK_ACCESS_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
 		VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
 
-	if (frame_generation_valid) {
-		/* Generated frames must see the same goggles image as real frames. */
-		const qboolean nv_output = blit_source == &temporal.nv_color;
+	if (frame_generation_valid && !rr_debug_requested) {
+		/* Generated frames must see the same goggles/effects as real frames. */
+		const qboolean nv_output = effects_applied || blit_source == &temporal.nv_color;
 		temporal_image_t *fg_source = nv_output ? blit_source : source;
 		vk_sl_tag_hudless(vk.command_buffer, fg_source->image, fg_source->view, fg_source->format,
 			fg_source->layout, (nv_output || evaluated) ? temporal.output_width : temporal.render_width,

@@ -32,6 +32,12 @@ does not change UI coordinates, scaling preferences or mouse hit boxes.
 `pt_ui_position_check.py` checks captured placement and compiles 48 real
 draw-path cases, with the previous implementation as a failing negative control.
 
+Optional [local post-effect packages](POST_PROCESSING.md) run after the existing
+scene post-processing and before HUD composition, without changing RR inputs.
+Their final output is supplied to FG as the processed HUD-less scene when the
+chain runs. DLAA/RR image checks completed, but FG-on effect combinations have
+not been tested and the existing NVIDIA lifecycle limitations remain.
+
 When Frame Generation is off at renderer startup, the engine unloads only the
 DLSS-G presentation hooks after querying device support and before creating
 the swapchain, as specified by Streamline 2.12's DLSS-G guide (section 18).
@@ -132,12 +138,12 @@ these hidden settings. Console controls:
 | --- | --- |
 | `r_dlss` | `0` Off, `1` Quality, `2` Balanced, `3` Performance, `4` Ultra Performance, `5` DLAA |
 | `r_dlssRayReconstruction` | `0` Native reconstruction, `1` NVIDIA RR (default); requires path tracing and a DLSS/DLAA mode; restart to apply |
-| `r_dlssSharpness` | Contrast-adaptive post-upscale sharpness, `0.0` to `1.0` (default `0.0`) |
+| `r_dlssSharpness` | Contrast-adaptive post-upscale sharpness, `0.0` to `1.0` (release default `0.8`) |
 | `r_dlssNeuralRendering` | WIP, console-only: `0` Off, `1` Model 1, `2` Model 2, `3` Model 3 |
-| `r_dlssNRIntensity` | Overall Neural Rendering strength, `0.0` to `2.0` (default `1.0`) |
-| `r_dlssNRLocalToneStrength` | Local tone strength, `0.0` to `2.0` (default `1.0`) |
-| `r_dlssNRLocalStructureStrength` | Local structure strength, `0.0` to `2.0` (default `1.0`) |
-| `r_dlssNRSkinStructureStrength` | Skin structure strength, `0.0` to `2.0` (default `1.0`) |
+| `r_dlssNRIntensity` | Overall Neural Rendering strength, `0.0` to `2.0` (release default `1.9`) |
+| `r_dlssNRLocalToneStrength` | Local tone strength, `0.0` to `2.0` (release default `1.5`) |
+| `r_dlssNRLocalStructureStrength` | Local structure strength, `0.0` to `2.0` (release default `1.7`) |
+| `r_dlssNRSkinStructureStrength` | Skin structure strength, `0.0` to `2.0` (release default `1.5`) |
 | `r_dlssFrameGeneration` | `0` Off, `1` On |
 | `r_dlssFrameGenerationMultiplier` | Integer `2`-`6`, default `2`; total target frames per rendered frame; restart required |
 | `r_dlssFrameGenerationMaxMultiplier` | Read-only GPU/runtime limit; `0` means unavailable/unverified |
@@ -145,6 +151,10 @@ these hidden settings. Console controls:
 
 The controls are disabled automatically unless the Vulkan renderer and the
 corresponding GPU/driver feature are available.
+
+The [1.0 release preset](RELEASE_DEFAULTS.md) requests DLSS Quality, RR,
+2× Frame Generation and Reflex On + Boost. NR stays off. Saved preferences
+remain authoritative; these requests do not bypass hardware capability checks.
 
 Frame Generation keeps its Off/On switch and has a separate 2x-6x slider.
 2x requests one generated frame per rendered frame; 6x requests five. The slider

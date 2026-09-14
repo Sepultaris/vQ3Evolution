@@ -17,7 +17,7 @@ qboolean vk_pt_initialize(uint32_t width, uint32_t height,
     VkImageView motion, VkImageView path_depth);
 qboolean vk_pt_history_reset(void);
 qboolean vk_pt_rr_initialize(uint32_t output_width, uint32_t output_height);
-qboolean vk_pt_rr_evaluate(const vk_sl_frame_resources_t *resources, VkImage *output, VkImageView *view);
+qboolean vk_pt_rr_evaluate(const vk_sl_frame_resources_t *resources, VkImage *output, VkImageView *view, qboolean clean_output);
 void vk_pt_shutdown(void);
 void vk_pt_info_f(void);
 void vk_pt_profile(VkCommandBuffer cmd, uint32_t point);

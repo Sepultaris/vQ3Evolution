@@ -5,15 +5,21 @@ engine-owned panel in the main menu or a loaded game, including Team Arena and
 mods with their own UI and cgame modules. No replacement PK3, patched mod menu,
 or new VM interface is required.
 
-The four categories cover:
+The six categories cover:
 
-- **Display:** renderer, fullscreen, custom/desktop resolution, VSync, texture
+- **Display:** renderer, fullscreen, custom/desktop resolution, VSync, horizontal FOV, texture
   filtering and anisotropy through 16x.
 - **Lighting:** Raster or Path tracing, samples, bounces, adaptive
-  sampling, exposure, ambient light and sun/local penumbra.
+  sampling, ambient light and sun/local penumbra.
 - **NVIDIA:** DLSS/DLAA, ray reconstruction, frame generation with a 2x-6x
   multiplier slider (limited by GPU/runtime support), Reflex and sharpening.
 - **Interface:** menu and HUD scale plus legacy-module compatibility controls.
+- **Effects:** optional local post-effect packages, enable/order controls and
+  package-defined sliders; see [installation and shader contract](POST_PROCESSING.md).
+- **Exposure:** all six PT exposure controls: base multiplier, automatic exposure,
+  adaptation time, target and minimum/maximum limits. The former Lighting slider
+  lives here; the base-game graphics menu now links to this tab instead of
+  keeping a separate exposure slider/reset.
 
 Software tracing (`r_rayTracing 1`) and Neural Rendering
 (`r_dlssNeuralRendering 0`-`3`, plus its four strength controls) are WIP and
@@ -25,6 +31,26 @@ The engine panel is an additional entry point that does not depend on those
 menus being installed. NVIDIA features still require compatible hardware and
 runtimes. Dimmed controls cannot enable unsupported features; an existing
 unsupported setting can still be switched off.
+
+### VSync and horizontal FOV
+
+Both controls are under **System Setup → Display** in the native base-game menu
+and **Shift+F10 → Display** in every game/mod. VSync uses `r_swapInterval` (Off/On).
+The native menu stages this toggle until **Apply VSync**; leaving without applying
+discards the toggle. The engine panel uses its usual Apply/Cancel behavior.
+Applying VSync restarts the renderer. Vulkan Frame Generation currently requires
+unsynchronized presentation and overrides VSync while active; the preference is
+retained for when Frame Generation is off. Driver/compositor settings can also
+affect presentation.
+
+Horizontal FOV uses the existing `cg_fov`, from 1–160 degrees in half-degree menu
+steps (default 90). These are **4:3 base horizontal degrees**: the source-built
+Quake 3/Team Arena cgame expands the horizontal view on wider screens. For example,
+90 becomes about 106.3 degrees at 16:9. This does not change the projection, zoom,
+or server fixed-FOV behavior. The native slider applies immediately; Shift+F10
+stages it until Apply, without restarting. Both entry points and the console
+share the same persisted value. Mods using `cg_fov` receive it but may interpret
+or restrict it differently; mods with a different FOV variable are not overridden.
 
 Frame Generation has separate Off/On and multiplier controls. The multiplier
 uses integer steps from 2x to 6x, capped to the reported device/runtime limit;
@@ -42,6 +68,21 @@ staged changes; Escape/Cancel discards them. Display and feature changes that
 need a renderer restart use the existing deferred restart/recovery path.
 Other changes apply immediately when Apply is pressed.
 
+Each shader in Effects has a collapsible settings group. Click its name or
+`[+]`/`[-]`, or select its header and press Space, to show/hide its order and
+parameter sliders. Its On/Off control stays visible and is independent of the
+fold state. Folding never disables an effect or discards pending edits. Groups
+start collapsed when the panel opens and retain their state while switching tabs.
+
+Exposure sliders use logarithmic spacing to keep small values practical across
+their full renderer-supported ranges; arrows make fine fixed-step adjustments.
+**Reset Exposure** stages all six source defaults; Apply commits them and Cancel
+discards them. Base exposure still affects the automatic-exposure baseline;
+smaller adaptation time means a faster response. The renderer's exposure
+algorithm/defaults are unchanged. These controls affect the path-traced scene,
+not HUD/menus. Post-effect grading exposure is a separate later operation and
+remains with its individual shader in Effects.
+
 The panel consumes keyboard, mouse and generated player movement while open;
 it does not replace a mod's input catcher or change its key bindings. It does
 **not pause gameplay**, including online games. Close it before resuming play.
@@ -54,6 +95,8 @@ Console entry points:
 /vq3e_options lighting
 /vq3e_options nvidia
 /vq3e_options interface
+/vq3e_options effects
+/vq3e_options exposure
 /vq3e_options apply
 /vq3e_options close
 ```
@@ -158,7 +201,39 @@ then base Quake III. Loose source-built modules take priority only **within**
 their own game tier, so a base-game DLL/QVM cannot displace TrueCombat's own
 packed modules. Remote pure-server loading retains its approved-QVM rules.
 
-## Verification (2026-09-08)
+## Display control verification (2026-09-13)
+
+Native-menu and engine-panel fixtures passed normal and release/fast-math builds:
+opening/cancel does not change settings, FOV applies without a restart, VSync
+requests an explicit/deferred restart, and both preferences persist in the shared
+profile. NVIDIA-enabled and SDK-free release builds passed.
+
+The isolated `-OptionsLayout` scenario captured both menus and a 90→110→90 FOV
+sequence in raster and half-resolution DLAA/RR. Captures show the wider field of
+view and readable controls. Saved user profiles were hash-checked unchanged.
+
+| Run under `build-widescreen/postfx-audit/` | Result |
+| --- | --- |
+| `run-70ce9106fc2b4af3a92ba7863270245f` | SDK-free raster, VSync on: selected FIFO, validation log contained only instance begin/end, normal exit in 3.6 s. |
+| `run-488564c296cf4d41b16bb7eb3822b665` | PT/DLAA/RR, VSync off: selected immediate presentation, normal exit in 6.3 s. Validation off. |
+
+FG was off in both checks. These are functional/menu checks, not frame-pacing or
+performance benchmarks. Mod-specific FOV restrictions remain mod-owned.
+
+## Exposure and folding verification (2026-09-13)
+
+The engine options fixtures passed at normal and release fast-math optimization,
+including six exposure controls, logarithmic ranges/fine adjustment, staged
+reset, independent shader enable/fold state, scroll hit mapping, hidden edits,
+Apply/Cancel and shared-profile restore. Native base-game UI and QVM builds
+also succeeded. A windowed DLAA/RR PT layout check exited normally in 5.1 seconds
+(`postfx-audit/run-8275540bbf784008a13c5f7f02872048`). Exposure, Lighting,
+collapsed Effects and the classic graphics shortcut captures were inspected.
+The run used isolated settings and FG off; source configs were unchanged.
+Vulkan validation was disabled; this is not a renderer-validation or performance
+claim. See `tests/run-postfx-check.ps1 -OptionsLayout` for the reusable scenario.
+
+## Earlier compatibility verification (2026-09-08)
 
 - Release build succeeded, including engine, native modules and renderers.
 - Native fixtures execute the actual panel/profile/scaling implementation and

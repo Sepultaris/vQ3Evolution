@@ -31,6 +31,7 @@ Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
 #include "vk_screenshot.h"
 #include "vk_pathtrace.h"
 #include "vk_streamline.h"
+#include "vk_postfx.h"
 #include "vk_frame.h"
 #include "vk_shade_geometry.h"
 #include "vk_pipelines.h"
@@ -106,6 +107,8 @@ void R_Init( void )
 	ri.Cmd_AddCommand( "screenshotJPEG", R_ScreenShotJPEG_f );
 	ri.Cmd_AddCommand( "pt_info", vk_pt_info_f );
 	ri.Cmd_AddCommand( "nvidia_info", vk_sl_info_f );
+    ri.Cmd_AddCommand("postfx_info",vk_postfx_info_f);
+    ri.Cmd_AddCommand("postfx_reload",vk_postfx_reload_f);
 	ri.Cmd_AddCommand( "vk_testRecovery", vk_test_recovery_f );
 	ri.Cmd_AddCommand( "screenshot", R_ScreenShot_f );
 	ri.Cmd_AddCommand( "shaderlist", R_ShaderList_f );
@@ -161,6 +164,8 @@ void RE_Shutdown( qboolean destroyWindow )
 	ri.Cmd_RemoveCommand("screenshotJPEG");
 	ri.Cmd_RemoveCommand("pt_info");
 	ri.Cmd_RemoveCommand("nvidia_info");
+    ri.Cmd_RemoveCommand("postfx_info");
+    ri.Cmd_RemoveCommand("postfx_reload");
 	ri.Cmd_RemoveCommand("vk_testRecovery");
 	ri.Cmd_RemoveCommand("screenshot");
 	ri.Cmd_RemoveCommand("shaderlist");

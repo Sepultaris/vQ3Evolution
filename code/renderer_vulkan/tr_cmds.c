@@ -394,6 +394,7 @@ void RB_StretchPic( const stretchPicCommand_t * const cmd )
 	 * scene target starts anew each frame. Always select the full-resolution
 	 * UI target before batching 2D geometry; begin_ui is idempotent. */
 	vk_temporal_begin_ui();
+	if (vk_temporal_rr_debug_active()) return;
 	if ( qfalse == backEnd.projection2D )
     {
 		backEnd.projection2D = qtrue;
@@ -580,6 +581,13 @@ void R_IssueRenderCommands( qboolean runPerformanceCounters )
                 if (cmd->refdef.rd.rdflags & RDF_NOWORLDMODEL)
                     vk_temporal_begin_ui();
 
+                // Drop both 2D HUD quads and its 3D model views, but only after
+                // a successful current-frame RR result selected the clean view.
+                if (vk_temporal_rr_debug_active()) {
+                    data += sizeof(drawSurfsCommand_t);
+                    break;
+                }
+
                 backEnd.refdef = cmd->refdef;
                 backEnd.viewParms = cmd->viewParms;
 				vk_temporal_prepare_view(backEnd.viewParms.projectionMatrix,
@@ -618,7 +626,7 @@ void R_IssueRenderCommands( qboolean runPerformanceCounters )
                 RB_EndSurface();
 
                 // texture swapping test
-                if ( r_showImages->integer ) {
+                if ( r_showImages->integer && !vk_temporal_rr_debug_active() ) {
                     RB_ShowImages(tr.images, tr.numImages);
                 }
 

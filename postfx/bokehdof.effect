@@ -1,0 +1,12 @@
+version 4
+name "Bokeh depth of field"
+depth scene
+pass graphics "fullscreen.vert.spv" "bokehdof.frag.spv"
+param focus "Focus distance (units)" 256 8 8192 8
+param aperture "Defocus strength" 1 0 4 0.05
+param radius "Max blur (pixels)" 12 0 32 0.5
+param autofocus "Center autofocus" 0 0 1 1
+param threshold "Highlight threshold" 0.7 0 0.99 0.025
+param gain "Bokeh highlight gain" 1 0 8 0.1
+param blades "Blades (0 = round)" 0 0 8 1
+param samples "Quality (samples)" 64 16 128 16

@@ -7,16 +7,21 @@ then [current status](STATUS.md) for supported paths and known limitations.
 
 | Document | Purpose |
 | --- | --- |
+| [1.0 release notes](RELEASE_1.0.md) | Features, installation scope and known release limitations |
+| [Release defaults](RELEASE_DEFAULTS.md) | Built-in lighting, weapon, shader and presentation preset; saved-setting precedence |
+| [Release packaging](RELEASING.md) | Clean Windows build, dependency audit, source snapshot and publication checklist |
+| [Third-party notices](THIRD_PARTY.md) | Runtime/source attribution and release asset provenance |
 | [Universal options](UNIVERSAL_OPTIONS.md) | Engine-owned settings for base Quake III, Team Arena and mods; shared profiles and legacy UI scaling |
 | [Path tracing](PATH_TRACING.md) | Lighting, samples, bounces, exposure, ambient fill, penumbra, materials and fallback |
 | [Ray Reconstruction](RAY_RECONSTRUCTION.md) | NVIDIA RR with DLAA/DLSS, current defaults, input contract and limitations |
 | [NVIDIA integration](DLSS.md) | SDK/runtime setup, DLSS/DLAA, console-only WIP NR, Frame Generation multipliers and Reflex |
 | [Night-vision goggles](NIGHT_VISION.md) | White/green phosphor appearance, soft panoramic optics, grain and console controls |
+| [Post-effect packages](POST_PROCESSING.md) | Local compute/vertex/fragment effects, Shift+F10 controls, package format and limits |
 | [Software path tracing](RTX.md) | Console-only WIP compute-based lighting without hardware RT; mode 2 remains the hardware backend |
 | [Software denoising](SOFTWARE_DENOISING.md) | Local native history and optional NRD evaluation, controls, build and licensing boundary |
 | [Texture upscaling](TEXTURE_UPSCALING.md) | Optional offline asset processing, packaging and safeguards |
 | [True Combat patch](TRUECOMBAT_PATCH.md) | Optional version-checked fix for the mod's own widescreen UI bug |
-| [Testing and commit checks](TESTING.md) | Offline checks, shader payloads, bounded GPU tests and foreground Frame Generation verification |
+| [Testing and commit checks](TESTING.md) | Repository review and release-validation guidance; the local test harness is intentionally excluded from Git |
 | [GPU profiling](GPU_PROFILING.md) | Nsight capture and evidence acceptance |
 | [Vulkan backend overview](../code/renderer_vulkan/README.md) | Source layout and rendering ownership |
 

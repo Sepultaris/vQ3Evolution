@@ -3,16 +3,46 @@
 # -----------------------------------------------------------------------------
 /build/
 /build-*/
+/dist/
+/tests/
 /.build-tmp/
 /Makefile.local
 /compile_commands.json
 /.cache/
+
+# Standalone generated audit/test output and older release/backup trees.
+# The validation harness is intentionally local-only; keep the entire tests/
+# directory out of source and binary release commits.
+/audit/
+/audits/
+/audit-*/
+/*-audit/
+/test-output/
+/test-results/
+/test-results-*/
+/captures/
+/backups/
+/backup-*/
+/old-build*/
+/release/
+/release-*/
+TestResults/
+test-results/
+test-output/
+coverage/
+.coverage
+.coverage.*
+htmlcov/
+# Loose post-effect SPIR-V is compiled into build/dist, not checked in.
+# Existing *.cspv/*.vspv/*.fspv renderer inputs deliberately remain eligible.
+*.spv
 
 # Accidental out-of-tree compiler output / downloaded binary dependencies.
 # Existing tracked libraries under code/libs remain tracked; new vendored
 # binaries require explicit review instead of an accidental bulk add.
 *.o
 *.obj
+*.d
 *.pdb
 *.ilk
 *.exp
@@ -49,6 +79,7 @@ games.log
 crashlog.txt
 stdout.log
 stderr.log
+imgui.ini
 *.log
 q3history
 q3history.*

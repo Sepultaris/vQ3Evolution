@@ -2,8 +2,8 @@
 
 These controls affect **`r_rayTracing 1` only**. They do not select denoisers or
 change reconstruction settings for mode 2's hardware tracing or NVIDIA RR.
-Neither change increases the number of traced samples. The existing default
-remains two samples per pixel.
+Neither change increases the number of traced samples. The 1.0 release default
+is three samples per pixel.
 
 ## Native local history (default)
 
@@ -27,7 +27,8 @@ live. The native filter is still available without any NVIDIA SDK or runtime.
 NRD is a conventional compute denoiser, **not DLSS Ray Reconstruction or a
 neural network**. Its RELAX diffuse/specular path runs without hardware ray
 tracing or tensor-core extensions. The local Windows adapter is optional and
-defaults off:
+is requested by the 1.0 preset, but its experimental adapter is not distributed.
+An absent adapter retains native reconstruction:
 
 ```text
 /set r_rayTracing 1

@@ -18,15 +18,15 @@ Ray Reconstruction, then Apply. Console equivalents:
 /pt_info
 ```
 
-For 1080p DLAA, activation should report `1920x1080 -> 1920x1080`, not Quality's
+With `r_pathTracingScale 1`, 1080p DLAA activation should report `1920x1080 -> 1920x1080`, not Quality's
 lower input resolution. RR also supports the available DLSS upscaling modes.
 `pt_info` must report successful RR evaluation, not merely a requested cvar.
 
 RR defaults **on**, but requires selected/supported Vulkan path tracing and a
-DLSS/DLAA mode. It does not automatically enable those prerequisites. An existing
-saved `r_dlssRayReconstruction 0` remains an opt-out. Fixed sampling defaults to
-two samples with adaptive sampling off. Bounce count is independent (source
-default four); all explicit saved choices remain in force.
+DLSS/DLAA mode. The [1.0 preset](RELEASE_DEFAULTS.md) selects PT, DLSS Quality,
+half-scale tracing, three requested samples, adaptive sampling on and four
+bounces. An existing saved `r_dlssRayReconstruction 0` remains an opt-out;
+all explicit saved choices remain in force.
 
 ## Rendering contract
 
@@ -52,13 +52,47 @@ internal allocations. Native fallback buffers are retained. RR sample-reuse
 history aliases compatible native scratch/history storage rather than adding
 another full set of images. This is not a claim that total VRAM use is 95 MiB.
 
+## RR-only debug view
+
+With Vulkan path tracing and RR active, use:
+
+```text
+/r_pathTracingRRDebug 1
+```
+
+Use `/r_pathTracingRRDebug 0` to restore normal presentation, or
+`/toggle r_pathTracingRRDebug` to switch back and forth. This is a live,
+non-archived console control; no restart or cheat mode is required.
+
+The view displays the **current successful RR result**, with only the existing
+exposure, tone mapping and gamma conversion needed to show HDR on the SDR
+swapchain. It is not a raw/unclipped HDR export. Sharpening and the adaptive
+budget overlay are disabled for the display conversion; bloom, night vision,
+all local post-effect passes and HUD/UI-model drawing are bypassed. The traced
+world, including the traced weapon when enabled, is unchanged. No extra RR
+evaluation, image allocation or full-frame copy is introduced. It does not
+change the sample budget, render scale, integrator or saved effect settings.
+
+Frame Generation is suspended for the diagnostic view through the runtime
+activation switch, without changing its saved toggle/multiplier. Console, chat
+and menus temporarily suspend the clean view so their controls remain visible;
+closing them resumes it. The engine's read-only `r_debugUIActive` signal handles
+this independently of mod VMs. The diagnostic cvar does not belong to the
+shared rendering profile.
+
+If no world is being drawn, mode 2 is not selected, or RR is unavailable/fails,
+normal presentation is retained—native/SR fallback is never labeled RR output.
+Console messages report active/suspended/unavailable transitions. The read-only
+`r_pathTracingRRDebugActive` reports actual clean-view presentation for the
+current frame; it is naturally zero while the console is open.
+
 ## Sampling and scheduling
 
 | Control | Default | Meaning |
 | --- | ---: | --- |
 | `r_dlssRayReconstruction` | 1 | Request RR; restart to change |
-| `r_pathTracingSamples` | 2 | Fixed samples per pixel unless adaptive is enabled |
-| `r_pathTracingAdaptive` | 0 | Optional half-budget sampling on eligible history, including 2 → 1 |
+| `r_pathTracingSamples` | 3 | Fixed samples per pixel unless adaptive is enabled |
+| `r_pathTracingAdaptive` | 1 | Optional half-budget sampling on eligible history, including 2 → 1 |
 | `r_pathTracingLightReuse` | 1 | Temporal/spatial sample reuse for primary-surface map lights |
 | `r_pathTracingAdaptiveDebug` | 0 | Budget overlay; not a quality mode |
 | `r_pathTracingRRRows` | 0 | Cheat-protected, non-archived test override; restart to apply |
@@ -88,6 +122,19 @@ the default. Different group shapes have not been implemented or measured.
   remain open. See [current status](STATUS.md).
 
 ## Evidence and tests
+
+The RR-only debug view passed the 2026-09-13 routing/recovery scenario on the
+final builds: `run-9a1e74eda6594deba3addb5f80c39cfd` (DLAA/RR PT, normal exit in
+6,438 ms, validation off) and `run-26b9d00cccdb4441b3d383b5646fbd06` (SDK-free
+raster, normal exit in 3,531 ms, validation log contained only instance begin/end
+markers). Inspected captures and `pt_rr_debug_check.py` confirmed the chart/HUD
+were bypassed only in the RR view, forced later effects did not replace it,
+normal presentation returned on toggle-off, and console/options/disconnect
+remained usable. Both used isolated settings with unchanged saved-settings
+hashes and FG off. This is not a performance measurement, PT validation pass,
+injected RR-failure test or FG-on transition verification. An earlier raster
+capture caught the tail of the console closing animation; the final fixture
+uses an immediate console slide to keep the routing check deterministic.
 
 The [RR development record](archive/RAY_RECONSTRUCTION_DEVELOPMENT.md) preserves
 input-contract checks, jitter regression, sampling math, GPU fixtures and dated

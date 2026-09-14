@@ -31,6 +31,8 @@ typedef struct { float normal[4], uv[4], previous[4], meta[4], color[4], local[4
 typedef struct {
     uint32_t key[7], topology, first, count, ordinal;
     int next;
+    qboolean rigidBrush;
+    vec3_t origin, axis[3];
 } pt_motion_surface_t;
 typedef struct { float a[4], b[4], wave[4]; } pt_texmod_t;
 typedef struct {
@@ -624,6 +626,31 @@ static qboolean layer_initialize(pt_layer_t *out, const shaderStage_t *stage,
     return animated;
 }
 
+static void material_legacy_chrome(pt_material_t *m, const shader_t *shader,
+    const textureBundle_t *base_bundle)
+{
+    // Stock chrome_metal (including Q3DM0's starting-room pillars) is two
+    // painted reflection pictures, not a light-emitting detail coat. Replace
+    // those pictures with the existing uniform-pigment metal program. Both
+    // radiance and RR guides then use the same physical, scene-traced BRDF.
+    // Do not reinterpret emissive/PBR overrides, deformed effects or overlays.
+    if (Q_stricmp(shader->name, "textures/base_wall/chrome_metal") ||
+        shader->rtMaterialDefined || shader->rtBaseColorImage || shader->rtORMImage ||
+        shader->rtNormalImage || shader->rtDielectricDefined || shader->numDeforms ||
+        shader->rtSurfaceLight > 0 || shader->rtLightImage ||
+        !base_bundle || base_bundle->tcGen != TCGEN_ENVIRONMENT_MAPPED ||
+        m->params[0] != 0 || m->surface[3] != 0 || m->composition[1] != 0 ||
+        m->composition[3] != 0 || m->composition[0] > 2) return;
+    m->layers[0].vectors[0][3] = 3;
+    m->surface[1] = 0.08f;
+    m->surface[2] = 1;
+    m->composition[0] = 1;
+    m->composition[2] = 0;
+    m->params[2] = 0;
+    m->params[3] = 0;
+    m->emission[1] = 0;
+}
+
 static uint32_t material_id(shader_t *shader)
 {
     uint32_t id;
@@ -813,6 +840,7 @@ static uint32_t material_id(shader_t *shader)
                 m->params[3] = 1;
         }
     }
+    material_legacy_chrome(m, shader, base_bundle);
     // Pure environment-only additive geometry is a transparent reflective
     // envelope, not a lamp displaying a painted reflection image. Negative
     // optical thickness is the native zero-thickness sheet mode; no volume is
@@ -1342,6 +1370,22 @@ void vk_pt_begin_frame(void)
         (pt.world_indices / 3) * sizeof(uint32_t));
 }
 
+static uint32_t entity_ray_flags(const trRefEntity_t *entity)
+{
+    const int renderfx = entity->e.renderfx;
+    const qboolean brush = entity->e.reType == RT_MODEL &&
+        R_GetModelByHandle(entity->e.hModel)->type == MOD_BRUSH;
+    uint32_t flags = pt_weapon_flags(renderfx);
+    if (renderfx & RF_THIRD_PERSON) flags |= 0x80000000u;
+    // CG_Mover sets RF_NOSHADOW on BSP doors/lifts to suppress legacy stencil
+    // shadows. It must not make the moving level geometry transparent to light.
+    // Keep the flag for non-brush effects/models; material alpha/transmission
+    // still decides which parts of a brush surface actually block a ray.
+    if ((renderfx & RF_NOSHADOW) && !brush) flags |= 0x40000000u;
+    if (renderfx & (RF_FIRST_PERSON | RF_DEPTHHACK)) flags |= 0x20000000u;
+    return flags;
+}
+
 void vk_pt_capture(uint32_t first_vertex, uint32_t first_index,
     uint32_t vertex_count, uint32_t index_count, const float (*normals)[4],
     const float (*uv)[2][2], const float (*axis)[3], shader_t *shader,
@@ -1354,6 +1398,8 @@ void vk_pt_capture(uint32_t first_vertex, uint32_t first_index,
     const trRefEntity_t *entity = backEnd.currentEntity;
     uint32_t motion_id = entity->motionId ? entity->motionId : 65535u;
     if (!pt.active) return;
+    const qboolean rigidBrush = entity->e.reType == RT_MODEL &&
+        R_GetModelByHandle(entity->e.hModel)->type == MOD_BRUSH && !shader->numDeforms;
     id = material_id(shader);
     const pt_material_t *material = (const pt_material_t *)pt.materials.mapped + id;
     if (tess.rayDynamicPolys && shader->polygonOffset && material->params[2] == 0 &&
@@ -1377,8 +1423,10 @@ void vk_pt_capture(uint32_t first_vertex, uint32_t first_index,
         for (entry = pt.motion_buckets[old][bucket]; entry >= 0;
              entry = pt.motion_surfaces[old][entry].next) {
             const pt_motion_surface_t *candidate = &pt.motion_surfaces[old][entry];
-            if (!memcmp(candidate->key, key, sizeof(key)) && candidate->ordinal == ordinal &&
-                candidate->topology == topology && candidate->count == vertex_count) {
+            if (!memcmp(candidate->key, key, sizeof(key)) &&
+                ((rigidBrush && candidate->rigidBrush) ||
+                 (!rigidBrush && !candidate->rigidBrush && candidate->ordinal == ordinal &&
+                  candidate->topology == topology && candidate->count == vertex_count))) {
                 previous = candidate;
                 break;
             }
@@ -1386,7 +1434,15 @@ void vk_pt_capture(uint32_t first_vertex, uint32_t first_index,
         if (previous) {
             for (i = 0; i < vertex_count; ++i) {
                 vec3_t delta;
-                VectorSubtract(world_positions + i * 3, pt.motion_positions[old][previous->first + i], delta);
+                vec3_t oldPosition;
+                if (rigidBrush) {
+                    // Brush batching/sort order is not vertex identity. A rigid
+                    // BSP model's local point plus its prior pose is identity.
+                    for (k = 0; k < 3; ++k)
+                        oldPosition[k] = previous->origin[k] + tess.xyz[i][0]*previous->axis[0][k] +
+                            tess.xyz[i][1]*previous->axis[1][k] + tess.xyz[i][2]*previous->axis[2][k];
+                } else VectorCopy(pt.motion_positions[old][previous->first + i], oldPosition);
+                VectorSubtract(world_positions + i * 3, oldPosition, delta);
                 if (DotProduct(delta, delta) > 256.0f * 256.0f) { previous = NULL; break; }
             }
         }
@@ -1397,6 +1453,11 @@ void vk_pt_capture(uint32_t first_vertex, uint32_t first_index,
         current->ordinal = ordinal;
         current->count = vertex_count;
         current->first = pt.motion_vertices;
+        current->rigidBrush = rigidBrush;
+        if (rigidBrush) {
+            VectorCopy(entity->e.origin, current->origin);
+            memcpy(current->axis, axis, sizeof(current->axis));
+        }
         current->next = pt.motion_buckets[frame][bucket];
         pt.motion_buckets[frame][bucket] = entry;
         memcpy(pt.motion_positions[frame] + pt.motion_vertices, world_positions, vertex_count * sizeof(vec3_t));
@@ -1405,10 +1466,7 @@ void vk_pt_capture(uint32_t first_vertex, uint32_t first_index,
     if (previous) ++pt.motion_matched; else ++pt.motion_rejected;
     vertices = (pt_vertex_t *)pt.attributes.mapped + first_vertex;
 	/* Low 16 bits are the material; high bits are per-object ray visibility. */
-    if (backEnd.currentEntity->e.renderfx & RF_THIRD_PERSON) id |= 0x80000000u;
-    if (backEnd.currentEntity->e.renderfx & RF_NOSHADOW) id |= 0x40000000u;
-    if (backEnd.currentEntity->e.renderfx & (RF_FIRST_PERSON | RF_DEPTHHACK)) id |= 0x20000000u;
-    id |= pt_weapon_flags(entity->e.renderfx);
+    id |= entity_ray_flags(entity);
     triangles = (uint32_t *)pt.triangle_materials.mapped + first_index / 3;
     for (i = 0; i < vertex_count; ++i) {
         memset(&vertices[i], 0, sizeof(vertices[i]));
@@ -1429,7 +1487,11 @@ void vk_pt_capture(uint32_t first_vertex, uint32_t first_index,
         memcpy(vertices[i].local, tess.xyz[i], sizeof(vec3_t));
         vertices[i].local[3] = tess.rayDynamicPolys ? (float)tess.rayPolyIds[i] : 0;
         if (previous) {
-            memcpy(vertices[i].previous, pt.motion_positions[pt.motion_frame ^ 1][previous->first + i], sizeof(vec3_t));
+            if (rigidBrush) {
+                for (k = 0; k < 3; ++k)
+                    vertices[i].previous[k] = previous->origin[k] + tess.xyz[i][0]*previous->axis[0][k] +
+                        tess.xyz[i][1]*previous->axis[1][k] + tess.xyz[i][2]*previous->axis[2][k];
+            } else memcpy(vertices[i].previous, pt.motion_positions[pt.motion_frame ^ 1][previous->first + i], sizeof(vec3_t));
             vertices[i].previous[3] = 1;
         }
     }

@@ -20,6 +20,7 @@ Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
 ===========================================================================
 */
 #include "render_export.h"
+#include "vk_postfx.h"
 
 refexport_t* R_Export(void)
 {
@@ -40,6 +41,7 @@ refexport_t* R_Export(void)
 	re.AddRefEntityToScene = RE_AddRefEntityToScene;
     re.AddRefEntityTracked = RE_AddRefEntityTracked;
     re.AddPolyTagged = RE_AddPolyTagged;
+    re.GetPostFXEffect = vk_postfx_get_effect;
 	re.AddPolyToScene = RE_AddPolyToScene;
 	re.LightForPoint = RE_LightForPoint;
 	re.AddLightToScene = RE_AddLightToScene;

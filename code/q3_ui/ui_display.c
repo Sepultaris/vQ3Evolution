@@ -43,6 +43,9 @@ DISPLAY OPTIONS MENU
 #define ID_BRIGHTNESS		14
 #define ID_SCREENSIZE		15
 #define ID_BACK				16
+#define ID_VSYNC             17
+#define ID_FOV               18
+#define ID_APPLY             19
 
 
 typedef struct {
@@ -59,6 +62,10 @@ typedef struct {
 
 	menuslider_s	brightness;
 	menuslider_s	screensize;
+	menulist_s      vsync;
+	menuslider_s    fov;
+	menutext_s      apply;
+	int             initialVsync;
 
 	menubitmap_s	back;
 } displayOptionsInfo_t;
@@ -103,12 +110,55 @@ static void UI_DisplayOptionsMenu_Event( void* ptr, int event ) {
 		trap_Cvar_SetValue( "cg_viewsize", displayOptionsInfo.screensize.curvalue * 10 );
 		break;
 
+	case ID_FOV:
+		// Half-degree steps, retaining cg_fov's existing 4:3 / Hor+ convention.
+		displayOptionsInfo.fov.curvalue = Com_Clamp( 2, 320,
+			(int)(displayOptionsInfo.fov.curvalue + 0.5f) );
+		trap_Cvar_SetValue( "cg_fov", displayOptionsInfo.fov.curvalue * 0.5f );
+		break;
+
+	case ID_VSYNC:
+		// Stage the toggle; restart only after the explicit Apply action.
+		break;
+
+	case ID_APPLY:
+		if ( displayOptionsInfo.vsync.curvalue != displayOptionsInfo.initialVsync ) {
+			trap_Cvar_SetValue( "r_swapInterval", displayOptionsInfo.vsync.curvalue );
+			displayOptionsInfo.initialVsync = displayOptionsInfo.vsync.curvalue;
+			trap_Cmd_ExecuteText( EXEC_APPEND, "vid_restart\n" );
+		}
+		break;
+
 	case ID_BACK:
 		UI_PopMenu();
 		break;
 	}
 }
 
+static void UI_DisplayOptionsMenu_Status( void *ptr ) {
+	if ( ((menucommon_s *)ptr)->id == ID_FOV ) {
+		UI_DrawString( 320, 442, "4:3 base degrees; widescreen expands the view.",
+			UI_CENTER|UI_SMALLFONT, text_color_normal );
+		UI_DrawString( 320, 458, "FOV changes immediately; mods/servers may limit it.",
+			UI_CENTER|UI_SMALLFONT, text_color_normal );
+	} else {
+		UI_DrawString( 320, 442, "Apply VSync restarts the renderer. Back cancels.",
+			UI_CENTER|UI_SMALLFONT, text_color_normal );
+		UI_DrawString( 320, 458, "Vulkan Frame Generation overrides VSync while active.",
+			UI_CENTER|UI_SMALLFONT, text_color_normal );
+	}
+}
+
+static void UI_DisplayOptionsMenu_Draw( void ) {
+	if ( displayOptionsInfo.vsync.curvalue == displayOptionsInfo.initialVsync )
+		displayOptionsInfo.apply.generic.flags |= QMF_GRAYED;
+	else
+		displayOptionsInfo.apply.generic.flags &= ~QMF_GRAYED;
+	Menu_Draw( &displayOptionsInfo.menu );
+	UI_DrawString( 520, displayOptionsInfo.fov.generic.y,
+		va( "%.1f deg", displayOptionsInfo.fov.curvalue * 0.5f ),
+		UI_LEFT|UI_SMALLFONT, text_color_normal );
+}
 
 /*
 ===============
@@ -117,12 +167,14 @@ UI_DisplayOptionsMenu_Init
 */
 static void UI_DisplayOptionsMenu_Init( void ) {
 	int		y;
+	static const char *enabled_names[] = { "Off", "On", NULL };
 
 	memset( &displayOptionsInfo, 0, sizeof(displayOptionsInfo) );
 
 	UI_DisplayOptionsMenu_Cache();
 	displayOptionsInfo.menu.wrapAround = qtrue;
 	displayOptionsInfo.menu.fullscreen = qtrue;
+	displayOptionsInfo.menu.draw = UI_DisplayOptionsMenu_Draw;
 
 	displayOptionsInfo.banner.generic.type		= MTYPE_BTEXT;
 	displayOptionsInfo.banner.generic.flags		= QMF_CENTER_JUSTIFY;
@@ -188,7 +240,7 @@ static void UI_DisplayOptionsMenu_Init( void ) {
 	displayOptionsInfo.network.style				= UI_RIGHT;
 	displayOptionsInfo.network.color				= color_red;
 
-	y = 240 - 1 * (BIGCHAR_HEIGHT+2);
+	y = 240 - 3 * (BIGCHAR_HEIGHT+2);
 	displayOptionsInfo.brightness.generic.type		= MTYPE_SLIDER;
 	displayOptionsInfo.brightness.generic.name		= "Brightness:";
 	displayOptionsInfo.brightness.generic.flags		= QMF_PULSEIFFOCUS|QMF_SMALLFONT;
@@ -213,6 +265,41 @@ static void UI_DisplayOptionsMenu_Init( void ) {
 	displayOptionsInfo.screensize.minvalue			= 3;
     displayOptionsInfo.screensize.maxvalue			= 10;
 
+	y += BIGCHAR_HEIGHT+2;
+	displayOptionsInfo.vsync.generic.type = MTYPE_SPINCONTROL;
+	displayOptionsInfo.vsync.generic.name = "VSync:";
+	displayOptionsInfo.vsync.generic.flags = QMF_PULSEIFFOCUS|QMF_SMALLFONT;
+	displayOptionsInfo.vsync.generic.callback = UI_DisplayOptionsMenu_Event;
+	displayOptionsInfo.vsync.generic.statusbar = UI_DisplayOptionsMenu_Status;
+	displayOptionsInfo.vsync.generic.id = ID_VSYNC;
+	displayOptionsInfo.vsync.generic.x = 400;
+	displayOptionsInfo.vsync.generic.y = y;
+	displayOptionsInfo.vsync.itemnames = enabled_names;
+
+	y += BIGCHAR_HEIGHT+2;
+	displayOptionsInfo.fov.generic.type = MTYPE_SLIDER;
+	displayOptionsInfo.fov.generic.name = "Horizontal FOV:";
+	displayOptionsInfo.fov.generic.flags = QMF_PULSEIFFOCUS|QMF_SMALLFONT;
+	displayOptionsInfo.fov.generic.callback = UI_DisplayOptionsMenu_Event;
+	displayOptionsInfo.fov.generic.statusbar = UI_DisplayOptionsMenu_Status;
+	displayOptionsInfo.fov.generic.id = ID_FOV;
+	displayOptionsInfo.fov.generic.x = 400;
+	displayOptionsInfo.fov.generic.y = y;
+	displayOptionsInfo.fov.minvalue = 2;
+	displayOptionsInfo.fov.maxvalue = 320;
+
+	y += 2 * (BIGCHAR_HEIGHT+2);
+	displayOptionsInfo.apply.generic.type = MTYPE_PTEXT;
+	displayOptionsInfo.apply.generic.flags = QMF_CENTER_JUSTIFY|QMF_PULSEIFFOCUS|QMF_GRAYED;
+	displayOptionsInfo.apply.generic.callback = UI_DisplayOptionsMenu_Event;
+	displayOptionsInfo.apply.generic.statusbar = UI_DisplayOptionsMenu_Status;
+	displayOptionsInfo.apply.generic.id = ID_APPLY;
+	displayOptionsInfo.apply.generic.x = 440;
+	displayOptionsInfo.apply.generic.y = y;
+	displayOptionsInfo.apply.string = "APPLY VSYNC";
+	displayOptionsInfo.apply.style = UI_CENTER|UI_SMALLFONT;
+	displayOptionsInfo.apply.color = color_red;
+
 	displayOptionsInfo.back.generic.type		= MTYPE_BITMAP;
 	displayOptionsInfo.back.generic.name		= ART_BACK0;
 	displayOptionsInfo.back.generic.flags		= QMF_LEFT_JUSTIFY|QMF_PULSEIFFOCUS;
@@ -233,10 +320,16 @@ static void UI_DisplayOptionsMenu_Init( void ) {
 	Menu_AddItem( &displayOptionsInfo.menu, ( void * ) &displayOptionsInfo.network );
 	Menu_AddItem( &displayOptionsInfo.menu, ( void * ) &displayOptionsInfo.brightness );
 	Menu_AddItem( &displayOptionsInfo.menu, ( void * ) &displayOptionsInfo.screensize );
+	Menu_AddItem( &displayOptionsInfo.menu, ( void * ) &displayOptionsInfo.vsync );
+	Menu_AddItem( &displayOptionsInfo.menu, ( void * ) &displayOptionsInfo.fov );
+	Menu_AddItem( &displayOptionsInfo.menu, ( void * ) &displayOptionsInfo.apply );
 	Menu_AddItem( &displayOptionsInfo.menu, ( void * ) &displayOptionsInfo.back );
 
 	displayOptionsInfo.brightness.curvalue  = trap_Cvar_VariableValue("r_gamma") * 10;
 	displayOptionsInfo.screensize.curvalue  = trap_Cvar_VariableValue( "cg_viewsize")/10;
+	displayOptionsInfo.initialVsync = trap_Cvar_VariableValue("r_swapInterval") != 0;
+	displayOptionsInfo.vsync.curvalue = displayOptionsInfo.initialVsync;
+	displayOptionsInfo.fov.curvalue = Com_Clamp( 1, 160, trap_Cvar_VariableValue("cg_fov") ) * 2;
 }
 
 

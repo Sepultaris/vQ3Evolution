@@ -1,0 +1,12 @@
+version 5
+name "Motion blur"
+depth scene
+motion scene
+pass graphics "fullscreen.vert.spv" "motionblur.frag.spv"
+param strength "Strength" 1 0 2 0.05
+param shutter "Shutter angle" 180 0 360 5
+param radius "Max streak (pixels)" 32 0 128 1
+param samples "Quality (samples)" 24 8 64 4
+param depth "Depth tolerance" 0.05 0.005 0.5 0.005
+param threshold "Min motion (pixels)" 0.5 0 2 0.1
+param fps "Shutter reference FPS (0=live)" 0 0 240 10

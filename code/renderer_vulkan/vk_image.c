@@ -717,24 +717,25 @@ image_t* R_FindImageFile(const char *name, VkBool32 mipmap, VkBool32 allowPicmip
 
 	int hash = generateHashValue(name);
 
-	// see if the image is already loaded
+	// The sampler is owned by image_t, so repeat and clamp uses of the same
+	// file need separate cache entries. In particular, q3map_lightimage can
+	// load a repeating image before a visible clampmap stage requests it.
 
 	for (image=hashTable[hash]; image; image=image->next)
 	{
 		if ( !strcmp( name, image->imgName ) )
 		{
-			// the white image can be used with any set of parms,
-			// but other mismatches are errors
+			// The constant white image can be used with any set of parms.
 			if ( strcmp( name, "*white" ) )
 			{
+				if ( image->wrapClampMode != glWrapClampMode ) {
+					continue;
+				}
 				if ( image->mipmap != mipmap ) {
 					ri.Printf( PRINT_WARNING, "WARNING: reused image %s with mixed mipmap parm\n", name );
 				}
 				if ( image->allowPicmip != allowPicmip ) {
 					ri.Printf( PRINT_WARNING, "WARNING: reused image %s with mixed allowPicmip parm\n", name );
-				}
-				if ( image->wrapClampMode != glWrapClampMode ) {
-					ri.Printf( PRINT_WARNING, "WARNING: reused image %s with mixed glWrapClampMode parm\n", name );
 				}
 			}
 			return image;

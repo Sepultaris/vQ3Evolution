@@ -230,7 +230,7 @@ static void rr_pack(VkCommandBuffer cmd, const float *push, qboolean direct_outp
     }
 }
 
-qboolean vk_pt_rr_evaluate(const vk_sl_frame_resources_t *resources, VkImage *output, VkImageView *view)
+qboolean vk_pt_rr_evaluate(const vk_sl_frame_resources_t *resources, VkImage *output, VkImageView *view, qboolean clean_output)
 {
     if (!pt_rr.frame_ready) return qfalse;
     vk_sl_frame_resources_t r = *resources;
@@ -256,8 +256,10 @@ qboolean vk_pt_rr_evaluate(const vk_sl_frame_resources_t *resources, VkImage *ou
     }
     rr_barrier(r.command_buffer);
     float push[32]; memcpy(push, pt_rr.push, sizeof(push));
-    push[20] = r_dlssSharpness->value;
-    push[21] = r_pathTracingAdaptiveDebug->integer && (pt_rr.sampling_flags & 2u) ? 1 : 0;
+    // The diagnostic uses this same HDR output and display conversion, without
+    // sharpening or the adaptive-sampling overlay. No extra RR evaluation/copy.
+    push[20] = clean_output ? 0.0f : r_dlssSharpness->value;
+    push[21] = !clean_output && r_pathTracingAdaptiveDebug->integer && (pt_rr.sampling_flags & 2u) ? 1 : 0;
     rr_bind(r.command_buffer, pt_rr.post, push);
     qvkCmdDispatch(r.command_buffer, (pt_rr.width + 7) / 8, (pt_rr.height + 7) / 8, 1);
     *output = pt_rr.images[6].image; *view = pt_rr.images[6].view;

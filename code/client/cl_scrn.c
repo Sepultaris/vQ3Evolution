@@ -30,6 +30,7 @@ cvar_t		*cl_debuggraph;
 cvar_t		*cl_graphheight;
 cvar_t		*cl_graphscale;
 cvar_t		*cl_graphshift;
+static cvar_t *scr_debugUIActive;
 
 /*
 ================
@@ -453,6 +454,9 @@ SCR_Init
 ==================
 */
 void SCR_Init( void ) {
+	// Renderer diagnostics may hide the HUD, but must not trap the console or menus.
+	scr_debugUIActive = Cvar_Get("r_debugUIActive", "0", CVAR_ROM);
+	Cvar_Set("r_debugUIActive", "0");
 	cl_timegraph = Cvar_Get ("timegraph", "0", CVAR_CHEAT);
 	cl_debuggraph = Cvar_Get ("debuggraph", "0", CVAR_CHEAT);
 	cl_graphheight = Cvar_Get ("graphheight", "32", CVAR_CHEAT);
@@ -474,6 +478,9 @@ This will be called twice if rendering in stereo mode
 */
 void SCR_DrawScreenField( stereoFrame_t stereoFrame ) {
 	qboolean uiFullscreen;
+	const int debugUIActive = (Key_GetCatcher() || CL_OptionsActive()) ? 1 : 0;
+	if (scr_debugUIActive->integer != debugUIActive)
+		Cvar_Set("r_debugUIActive", debugUIActive ? "1" : "0");
 
 	re.BeginFrame( stereoFrame );
 

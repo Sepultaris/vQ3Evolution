@@ -1020,8 +1020,8 @@ qboolean UI_ConsoleCommand( int realTime ) {
 			return qtrue;
 		}
 		Q_strncpyz( menu, UI_Argv( 1 ), sizeof(menu) );
-		if ( Q_stricmp(menu, "setup") && Q_stricmp(menu, "graphics") && Q_stricmp(menu, "close") ) {
-			trap_Print( "ui_testMenu: setup, graphics, or close\n" );
+		if ( Q_stricmp(menu, "setup") && Q_stricmp(menu, "graphics") && Q_stricmp(menu, "display") && Q_stricmp(menu, "close") ) {
+			trap_Print( "ui_testMenu: setup, graphics, display, or close\n" );
 			return qtrue;
 		}
 		UI_ForceMenuOff();
@@ -1029,6 +1029,7 @@ qboolean UI_ConsoleCommand( int realTime ) {
 		uis.cursory = 134;
 		if ( !Q_stricmp(menu, "setup") ) UI_SetupMenu();
 		if ( !Q_stricmp(menu, "graphics") ) UI_GraphicsOptionsMenu();
+		if ( !Q_stricmp(menu, "display") ) UI_DisplayOptionsMenu();
 		trap_Print( va("UI_TEST_MENU %s\n", menu) );
 		return qtrue;
 	}

@@ -1,0 +1,11 @@
+version 3
+name "Bloom"
+downsample 4
+pass graphics "fullscreen.vert.spv" "bloom_prefilter.frag.spv"
+pass graphics "fullscreen.vert.spv" "bloom_blur_h.frag.spv"
+pass graphics "fullscreen.vert.spv" "bloom_blur_v.frag.spv"
+pass graphics "fullscreen.vert.spv" "bloom.frag.spv"
+param strength "Intensity" 0.6 0 4 0.025
+param threshold "Highlight threshold" 0.5 0 1 0.025
+param radius "Radius (output pixels)" 4.5 0 32 0.5
+param debug "Glow only (0/1)" 0 0 1 1

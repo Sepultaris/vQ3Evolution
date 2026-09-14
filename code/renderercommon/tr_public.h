@@ -23,8 +23,9 @@ Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
 #define __TR_PUBLIC_H
 
 #include "tr_types.h"
+#include "postfx.h"
 
-#define	REF_API_VERSION		11
+#define	REF_API_VERSION		15
 
 //
 // these are the functions exported by the refresh module
@@ -103,6 +104,8 @@ typedef struct {
     void (*AddRefEntityTracked)(const refEntity_t *re, int motionId, int generation);
     // Optional: preserve polygon geometry/UVs while identifying its light source.
     void (*AddPolyTagged)(qhandle_t hShader, int numVerts, const polyVert_t *verts, int renderfx);
+    // Optional engine-owned effects UI; copy-out avoids retaining DLL pointers.
+    qboolean (*GetPostFXEffect)(int index, postfxEffect_t *effect);
 } refexport_t;
 
 //
@@ -187,6 +190,10 @@ typedef struct {
 	// Main-thread request only. The engine restarts after renderer/VM calls
 	// have returned; a nonzero delay debounces native window resize events.
 	void (*RequestVideoRestart)( int delayMsec );
+    int (*PostFX_List)(char names[PFX_MAX_EFFECTS][PFX_ID]);
+    // Local files only, heap-backed independently of the fixed engine zone.
+    long (*PostFX_Read)(const char *file, void **data);
+    void (*PostFX_Free)(void *data);
 } refimport_t;
 
 

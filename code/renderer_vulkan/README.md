@@ -17,7 +17,9 @@ feature status and known failures are in [current status](../../docs/STATUS.md).
 | Path tracing and native reconstruction | `vk_pathtrace.c`, `pt_*.h`, `shaders/pt_integrator.glsl`, `shaders/pt_*.glsl` |
 | Ray Reconstruction | `pt_ray_reconstruction.h`, `pt_rr_workgroup.h`, `shaders/pt_rr_*.comp` |
 | NVIDIA integration and scene/output targets | `vk_streamline.cpp`, `vk_dlssnr.cpp`, `vk_ngx_bridge.cpp`, `vk_temporal.c` |
-| Bloom, sharpening and night vision | `vk_bloom.c`, `vk_sharpen.c`, `vk_nv.c`, `nv_overlay.h`, `shaders/post_nv_look.glsl` |
+| Sharpening and night vision | `vk_sharpen.c`, `vk_nv.c`, `nv_overlay.h`, `shaders/post_nv_look.glsl` |
+| Bloom package (shared post-effect passes) | `../../postfx/bloom.effect`, `../../postfx/bloom*.frag`, `../../postfx/bloom_blur.glsl` |
+| Local post-effect chain | `vk_postfx.c`, `../renderercommon/postfx*.h`; engine catalog/file access in `../client/cl_postfx.c` |
 | BSP camera portals and weapon-effect tagging | `pt_portal.h`, `pt_portal_transform.h`, `pt_weapon_flags.h`, `shaders/pt_muzzle_flash.glsl` |
 | Console controls | `tr_cvar.c`, `tr_cvar.h` |
 
@@ -39,6 +41,13 @@ arrays and SPIR-V payloads are intentional checked-in build/test inputs.
 Changing GLSL requires regeneration with `shaders/compile-raytracing.ps1`,
 validation and a renderer rebuild; the Makefile does not automatically compile
 GLSL. See [embedded shader checks](../../docs/TESTING.md#embedded-shaders).
+
+Optional [local post-effect packages](../../docs/POST_PROCESSING.md) use a
+separate external SPIR-V/manifest loader. They do not replace the embedded
+scene/reconstruction shaders. `tools/compile-postfx.ps1` compiles and validates
+their GLSL without rebuilding the renderer. The current engine/renderer API is
+version 15 for texture, reduced-pass, depth/motion metadata plus paired local-file callbacks; deploy matching
+executable/renderer builds. Legacy mod VM interfaces are unchanged.
 
 Do not commit `bintoc.exe`, renderer DLLs, SDK downloads, captures or local test
 homes. Keep historical diagnostic variants while they remain referenced by

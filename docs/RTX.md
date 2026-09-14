@@ -36,12 +36,12 @@ for rasterization or mode 2 for hardware path tracing, followed by a restart.
 
 | Control | Meaning |
 | --- | --- |
-| `r_pathTracingSamples` | Fixed samples per pixel (existing default: 2) |
+| `r_pathTracingSamples` | Fixed samples per pixel (release default: 3) |
 | `r_pathTracingBounces` | Maximum transport interactions |
 | `r_pathTracingScale` | Internal scene resolution fraction; restart required |
 | `r_pathTracingDenoise`, `r_pathTracingTemporal` | GPU-independent reconstruction |
 | `r_softwareRayTracingHistory` | Default 1: local object history cap, rather than limiting every static wall when an object moves |
-| `r_softwareRayTracingDenoiser` | Default 0: native; 1: optional locally built NRD RELAX adapter, restart required |
+| `r_softwareRayTracingDenoiser` | Release request 1: optional locally built NRD RELAX adapter; absent adapter falls back to native; restart required |
 | `r_pathTracingExposure`, `r_pathTracingAutoExposure` | Manual/automatic exposure |
 | `r_pathTracingAmbient` | Optional ambient fill |
 | `r_pathTracingSunAngle`, `r_pathTracingLightRadius` | Sun/local-light penumbra |

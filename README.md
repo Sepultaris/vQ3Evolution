@@ -1,5 +1,8 @@
 # VQ3 Evolution
 
+**Version 1.0 — Windows x64.** See the [release notes](docs/RELEASE_1.0.md)
+and [release packaging guide](docs/RELEASING.md). Game data is not included.
+
 VQ3 Evolution is a modernized Quake III Arena source port centered on a native
 Vulkan renderer, correct widescreen presentation, scalable interface rendering,
 and optional NVIDIA rendering/reconstruction features. Engine and interface changes are
@@ -20,7 +23,7 @@ network protocols.
 - Experimental DLSS Frame Generation with a GPU/runtime-limited 2x-6x multiplier and NVIDIA Reflex
 - WIP, console-only DLSS Neural Rendering with live strength controls
 - WIP, console-only software path-traced lighting using Vulkan compute without hardware RT
-- Experimental native path-traced world lighting (unfinished; see [current status](docs/STATUS.md))
+- Native hardware path-traced world lighting (see [current limitations](docs/STATUS.md))
 - DLSS Ray Reconstruction, including native-resolution DLAA; requested by default
   when supported path tracing and DLSS/DLAA are selected
 - Separate diffuse/reflection reconstruction, texture-driven PBR materials, and native refractive glass/water
@@ -31,12 +34,15 @@ network protocols.
 - Separate console controls for weapon-effect brightness and emitted light
 - Native Urban Terror night vision with white/green phosphor and panoramic optics
 - Native Vulkan post-DLSS contrast-adaptive sharpening
+- Optional [local post-effect packages](docs/POST_PROCESSING.md) with compute/vertex/fragment passes, lens dirt, depth-aware bokeh and Shift+F10 controls
 - Bilinear, trilinear, and 2x/4x/8x/16x anisotropic texture filtering
 - Native source-built game, cgame, and UI modules
 - OpenAL audio, Ogg Vorbis/Opus, VoIP, Mumble integration, and SDL 2 input
 
-The path tracer defaults to **two fixed samples**, adaptive sampling off, and
-four bounces; saved values are preserved. Ray Reconstruction and experimental
+The 1.0 [release preset](docs/RELEASE_DEFAULTS.md) uses **three samples**, four
+bounces, adaptive sampling on, half-resolution tracing, RR and 2× Frame
+Generation. It includes the maintainer's lighting and post-effect preferences;
+saved values are preserved. Ray Reconstruction and experimental
 Neural Rendering are different features: NR is bypassed while RR runs.
 
 NVIDIA shutdown, Frame Generation/restart reliability, some Vulkan validation
@@ -129,7 +135,7 @@ and driver information.
 
 Press **Shift+F10** or enter `/vq3e_options` for the engine-owned options panel.
 It works in loaded games, Team Arena and mods without replacing their menus.
-Display, Lighting, NVIDIA and Interface settings are staged until **Apply**,
+Display, Lighting, NVIDIA, Interface, Exposure and Effects settings are staged until **Apply**,
 and are shared across game folders. Existing menus and console commands remain
 available. See [Universal options](docs/UNIVERSAL_OPTIONS.md) for persistence,
 legacy scaling, controls and compatibility limits.
@@ -146,7 +152,7 @@ The original base-game Graphics Options menu also exposes these controls:
 | UI Scale | `ui_scale` | 0.5-1.5 |
 | Texture Filtering | `r_textureMode`, `r_ext_max_anisotropy` | Bilinear through anisotropic 16x |
 | Lighting Mode | `r_rayTracing` | Raster (`0`) / Path tracing (`2`) |
-| RTX Exposure (software or hardware tracing) | `r_pathTracingExposure` | 0.0625x-16x, quarter-stop slider; Reset = 1x |
+| PT Exposure Controls | `vq3e_options exposure` | Opens the shared Exposure tab |
 | DLSS Mode | `r_dlss` | Off, Quality, Balanced, Performance, Ultra Performance, DLAA |
 | DLSS Ray Reconstruction | `r_dlssRayReconstruction` | Off/On; path tracing plus supported DLSS/DLAA required |
 | DLSS Sharpness | `r_dlssSharpness` | 0.0-1.0 |
@@ -154,7 +160,8 @@ The original base-game Graphics Options menu also exposes these controls:
 | Frame Gen Multiplier | `r_dlssFrameGenerationMultiplier` | Integer 2x-6x, limited by GPU/runtime support |
 | NVIDIA Reflex | `r_reflex` | Off, On, On + Boost |
 
-HUD, UI, sharpening and RTX exposure controls update live. Lighting mode and
+HUD, UI, sharpening and PT exposure controls update live after Apply (or directly
+through their console commands). Lighting mode and
 Frame Generation multiplier changes apply after a renderer restart. Software
 tracing (`r_rayTracing 1`) and Neural Rendering (`r_dlssNeuralRendering 0`-`3`,
 plus live strength commands) are WIP and console-only; both menus preserve their
@@ -166,8 +173,9 @@ Mode 1 also has local native history and an optional NRD denoiser controlled
 through the console. See [software denoising](docs/SOFTWARE_DENOISING.md) for
 commands, local build requirements and the SDK licensing boundary.
 
-In either tracing mode, **RTX Exposure** occupies the old shadow-strength row. Raise it
-to brighten the scene (2x is one stop brighter, 4x is two); **Reset** restores 1x.
+In either tracing mode, **PT Exposure Controls** opens the shared Exposure tab.
+Raise the exposure multiplier to brighten the scene (2x is one stop brighter,
+4x is two); the multiplier's source default is 1x.
 It affects scene tone mapping, not the HUD or menu brightness, and is saved
 automatically. You can also enter `/r_pathTracingExposure 2` in the console for
 an immediate adjustment, with no renderer restart.
@@ -196,6 +204,8 @@ committed. The deliberate exceptions are the embedded shader payloads under
 header: they are build inputs kept in sync with their generators/sources.
 `Makefile.local` is reserved for developer-specific build settings. Follow the
 [commit checks](docs/TESTING.md#repository-checks) before staging changes.
+Release folders and matching source snapshots belong in ignored `dist/`.
+Use the allowlisted packager; never publish the entire development build tree.
 
 ## Upstream lineage and licensing
 

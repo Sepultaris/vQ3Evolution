@@ -23,6 +23,7 @@ Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
 
 #include "q_shared.h"
 #include "qcommon.h"
+#include "release_defaults.h"
 
 cvar_t		*cvar_vars = NULL;
 cvar_t		*cvar_cheats;
@@ -316,6 +317,8 @@ cvar_t *Cvar_Get( const char *var_name, const char *var_value, int flags ) {
 	cvar_t	*var;
 	long	hash;
 	int	index;
+	const char *releaseValue = NULL;
+	qboolean releaseDefault;
 
 	if ( !var_name || ! var_value ) {
 		Com_Error( ERR_FATAL, "Cvar_Get: NULL parameter" );
@@ -325,6 +328,14 @@ cvar_t *Cvar_Get( const char *var_name, const char *var_value, int flags ) {
 		Com_Printf("invalid cvar name string: %s\n", var_name );
 		var_name = "BADNAME";
 	}
+
+	// Only archived preference registration receives the release preset.
+	// Explicit sets (including pre-registration +set/config values), server
+	// state and read-only capabilities must never be replaced by defaults.
+	if ((flags & CVAR_ARCHIVE) && !(flags & (CVAR_USER_CREATED | CVAR_SERVER_CREATED | CVAR_ROM | CVAR_TEMP)))
+		releaseValue = VQ3E_DefaultValue(var_name, NULL);
+	releaseDefault = releaseValue != NULL;
+	if (releaseDefault) var_value = releaseValue;
 
 #if 0		// FIXME: values with backslash happen
 	if ( !Cvar_ValidateString( var_value ) ) {
@@ -386,7 +397,7 @@ cvar_t *Cvar_Get( const char *var_name, const char *var_value, int flags ) {
 		var->flags |= flags;
 
 		// only allow one non-empty reset string without a warning
-		if ( !var->resetString[0] ) {
+		if ( !var->resetString[0] || (releaseDefault && strcmp(var->resetString,var_value)) ) {
 			// we don't have a reset string yet
 			Z_Free( var->resetString );
 			var->resetString = CopyString( var_value );
