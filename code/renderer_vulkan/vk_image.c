@@ -128,8 +128,8 @@ static void vk_createStagingBuffer(VkDeviceSize size)
         VK_CHECK(qvkBindBufferMemory(vk.device, StagBuf.buff, StagBuf.mappableMem, 0));
         StagBuf.capacity = size;
 
-        ri.Printf(PRINT_ALL, " Stagging buffer alignment: %ld, memoryTypeBits: 0x%x, Type Index: %d. \n",
-            memory_requirements.alignment, memory_requirements.memoryTypeBits, alloc_info.memoryTypeIndex);
+        ri.Printf(PRINT_ALL, " Stagging buffer alignment: %llu, memoryTypeBits: 0x%x, Type Index: %d. \n",
+            (unsigned long long)memory_requirements.alignment, memory_requirements.memoryTypeBits, alloc_info.memoryTypeIndex);
     }
 }
 
@@ -358,8 +358,8 @@ static void vk_createImageAndBindWithMemory(image_t* pImg)
 
     ri.Printf(PRINT_ALL, " --- Device memory allocation --- \n");
 
-    ri.Printf(PRINT_ALL, "alignment: %ld, Type Index: %d. \n",
-            memory_requirements.alignment, alloc_info.memoryTypeIndex);
+    ri.Printf(PRINT_ALL, "alignment: %llu, Type Index: %d. \n",
+            (unsigned long long)memory_requirements.alignment, alloc_info.memoryTypeIndex);
     
     gpuMemUsageInfo_f();
 
@@ -486,7 +486,7 @@ image_t* R_CreateImage( const char *name, unsigned char* pic, const uint32_t wid
 
     image_t* pImage = (image_t*) ri.Hunk_Alloc( sizeof( image_t ), h_low );
 
-    strncpy (pImage->imgName, name, sizeof(pImage->imgName));
+    snprintf (pImage->imgName, sizeof(pImage->imgName), "%s", name);
     pImage->index = tr.numImages;
     pImage->mipmap = isMipMap;
     pImage->mipLevels = 1;

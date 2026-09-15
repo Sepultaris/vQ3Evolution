@@ -39,6 +39,37 @@ qboolean vk_postfx_get_effect(int index,postfxEffect_t *effect) {
     if (index<0 || index>=fx.count || !effect) return qfalse;
     *effect=fx.effects[index].info; return qtrue;
 }
+
+static void pfx_json_value(char *buf,int bufsize,int *n,qboolean *first,const char *key,const char *value) {
+    int r;
+    if (*n>=bufsize-1) return;
+    r=Com_sprintf(buf+*n,bufsize-*n,"%s\"%s\":\"%s\"",*first?"":",",key,value);
+    if (r>0) *n+=r;
+    if (*n>bufsize-1) *n=bufsize-1;
+    *first=qfalse;
+}
+/* Appends JSON "name":"value" fields for the master switch and every
+ * loaded effect's enabled/order/parameter cvars into an already open
+ * { ... } object. Fields are comma separated; *first tracks whether the
+ * first field has been written. */
+void vk_postfx_write_json_cvars(char *buf,int bufsize,int *pos,qboolean *first) {
+    int i,paramIndex;
+    int n=*pos;
+    for (i=0;i<fx.count;++i) {
+        effect_t *e=&fx.effects[i];
+        char name[PFX_ID+24];
+        Com_sprintf(name,sizeof(name),"r_fx_%s_enabled",e->info.id);
+        pfx_json_value(buf,bufsize,&n,first,name,e->enabled ? e->enabled->string:"0");
+        Com_sprintf(name,sizeof(name),"r_fx_%s_order",e->info.id);
+        pfx_json_value(buf,bufsize,&n,first,name,e->order ? e->order->string:"0");
+        for (paramIndex=0;paramIndex<e->info.numParams;++paramIndex) {
+            Com_sprintf(name,sizeof(name),"r_fx_%s_%s",e->info.id,e->info.params[paramIndex].id);
+            pfx_json_value(buf,bufsize,&n,first,name,
+                e->params[paramIndex] ? e->params[paramIndex]->string:"0");
+        }
+    }
+    *pos=n;
+}
 void vk_postfx_info_f(void) {
     ri.Printf(PRINT_ALL,"PostFX: %d packages, master %s, %ux%u; after NV, before HUD\n",fx.count,
         vk_postfx_enabled() ? "on":"off",fx.width,fx.height);

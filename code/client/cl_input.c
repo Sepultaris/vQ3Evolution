@@ -755,6 +755,7 @@ void CL_WritePacket( void ) {
 	int			i, j;
 	usercmd_t	*cmd, *oldcmd;
 	usercmd_t	nullcmd;
+	usercmd_t	photoCmd;
 	int			packetNum;
 	int			oldPacketNum;
 	int			count, key;
@@ -880,10 +881,24 @@ void CL_WritePacket( void ) {
 
 		// write all the commands, including the predicted command
 		for ( i = 0 ; i < count ; i++ ) {
+			usercmd_t	*sendCmd;
+
 			j = (cl.cmdNumber - count + i + 1) & CMD_MASK;
 			cmd = &cl.cmds[j];
-			MSG_WriteDeltaUsercmdKey (&buf, key, oldcmd, cmd);
-			oldcmd = cmd;
+			sendCmd = cmd;
+			// photo mode: the detached camera owns the movement keys, so the
+			// server should receive a clean command with no movement - the
+			// local copy keeps the shared command history untouched.
+			if ( Cvar_VariableIntegerValue( "cg_photoMode" ) ) {
+				photoCmd = *cmd;
+				photoCmd.forwardmove = photoCmd.rightmove = photoCmd.upmove = 0;
+				// the left mouse button is remapped to take photos, so the
+				// frozen body must not fire the weapon on the server.
+				photoCmd.buttons &= ~BUTTON_ATTACK;
+				sendCmd = &photoCmd;
+			}
+			MSG_WriteDeltaUsercmdKey (&buf, key, oldcmd, sendCmd);
+			oldcmd = sendCmd;
 		}
 	}
 

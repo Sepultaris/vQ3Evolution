@@ -2,6 +2,7 @@
 #define VK_SCREENSHOT_H_
 
 void R_ScreenShotJPEG_f(void);
+void R_ScreenShotPNG_f(void);
 void R_ScreenShot_f( void );
 
 

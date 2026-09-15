@@ -105,6 +105,7 @@ void R_Init( void )
 
     ri.Cmd_AddCommand( "modellist", R_Modellist_f );
 	ri.Cmd_AddCommand( "screenshotJPEG", R_ScreenShotJPEG_f );
+	ri.Cmd_AddCommand( "screenshotPNG", R_ScreenShotPNG_f );
 	ri.Cmd_AddCommand( "pt_info", vk_pt_info_f );
 	ri.Cmd_AddCommand( "nvidia_info", vk_sl_info_f );
     ri.Cmd_AddCommand("postfx_info",vk_postfx_info_f);
@@ -162,6 +163,7 @@ void RE_Shutdown( qboolean destroyWindow )
 
 	ri.Cmd_RemoveCommand("modellist");
 	ri.Cmd_RemoveCommand("screenshotJPEG");
+	ri.Cmd_RemoveCommand("screenshotPNG");
 	ri.Cmd_RemoveCommand("pt_info");
 	ri.Cmd_RemoveCommand("nvidia_info");
     ri.Cmd_RemoveCommand("postfx_info");

@@ -621,6 +621,103 @@ static void CG_DamageBlendBlob( void ) {
 
 
 /*
+====================
+Photo mode - detached free-fly camera
+
+Used for taking screenshots.  While active the HUD and weapon are hidden
+and the refdef is driven entirely by this camera instead of the player.
+The usercmd carries the live mouse-look viewangles and the WASD / movedown
+/ moveup keys every frame, so the camera is frame-synced with normal input.
+====================
+*/
+typedef struct {
+	qboolean	initialized;
+	qboolean	shotHeld;	// left mouse button already fired this press
+	vec3_t		origin;
+	float		pitch;		// degrees
+	float		yaw;
+} photoCam_t;
+
+static photoCam_t photoCam;
+
+qboolean CG_Photo_Active( void ) {
+	return cg_photoMode.integer != 0;
+}
+
+void CG_Photo_InitCamera( void ) {
+	playerState_t	*ps;
+
+	ps = &cg.predictedPlayerState;
+	VectorCopy( ps->origin, photoCam.origin );
+	photoCam.origin[2] += ps->viewheight;
+	photoCam.pitch = ps->viewangles[PITCH];
+	photoCam.yaw = ps->viewangles[YAW];
+	photoCam.initialized = qtrue;
+	photoCam.shotHeld = qfalse;
+}
+
+static int CG_Photo_CalcView( void ) {
+	usercmd_t	cmd;
+	vec3_t		angles;
+	vec3_t		forward, right, up;
+	float		speed;
+	float		frameTime;
+
+	// pull the most recent client command; it carries both the live
+	// mouse look (viewangles) and the movement keys for this frame.
+	Com_Memset( &cmd, 0, sizeof( cmd ) );
+	trap_GetUserCmd( trap_GetCurrentCmdNumber(), &cmd );
+
+	// the primary mouse button takes a photo; one physical click fires
+	// exactly one screenshot because the press is edge-detected here.
+	if ( cmd.buttons & BUTTON_ATTACK ) {
+		if ( !photoCam.shotHeld ) {
+			photoCam.shotHeld = qtrue;
+			trap_SendConsoleCommand( "screenshotPNG\n" );
+		}
+	} else {
+		photoCam.shotHeld = qfalse;
+	}
+
+	photoCam.pitch = SHORT2ANGLE( cmd.angles[PITCH] );
+	photoCam.yaw = SHORT2ANGLE( cmd.angles[YAW] );
+	angles[PITCH] = photoCam.pitch;
+	angles[YAW] = photoCam.yaw;
+	angles[ROLL] = 0;
+
+	AngleVectors( angles, forward, right, up );
+
+	frameTime = cg.time - cg.oldTime;
+	if ( frameTime < 1 ) {
+		frameTime = 1;
+	} else if ( frameTime > 100 ) {
+		frameTime = 100;
+	}
+	frameTime /= 1000.0f;
+
+	// running commands move at full speed; the walking state (+speed key)
+	// halves it for fine aiming of the shot.
+	speed = cg_photoSpeed.value;
+	if ( cmd.buttons & BUTTON_WALKING ) {
+		speed *= 0.5f;
+	}
+
+	VectorMA( photoCam.origin, speed * frameTime * ( cmd.forwardmove / 127.0f ),
+		forward, photoCam.origin );
+	VectorMA( photoCam.origin, speed * frameTime * ( cmd.rightmove / 127.0f ),
+		right, photoCam.origin );
+	VectorMA( photoCam.origin, speed * frameTime * ( cmd.upmove / 127.0f ),
+		up, photoCam.origin );
+
+	VectorCopy( photoCam.origin, cg.refdef.vieworg );
+	VectorCopy( angles, cg.refdefViewAngles );
+	AnglesToAxis( cg.refdefViewAngles, cg.refdef.viewaxis );
+
+	return CG_CalcFov();
+}
+
+
+/*
 ===============
 CG_CalcViewValues
 
@@ -660,6 +757,14 @@ static int CG_CalcViewValues( void ) {
 		VectorCopy( ps->viewangles, cg.refdefViewAngles );
 		AnglesToAxis( cg.refdefViewAngles, cg.refdef.viewaxis );
 		return CG_CalcFov();
+	}
+
+	// photo mode: render through the detached free-fly camera
+	if ( CG_Photo_Active() ) {
+		if ( !photoCam.initialized ) {
+			CG_Photo_InitCamera();
+		}
+		return CG_Photo_CalcView();
 	}
 
 	cg.bobcycle = ( ps->bobCycle & 128 ) >> 7;
@@ -820,6 +925,13 @@ void CG_DrawActiveFrame( int serverTime, stereoFrame_t stereoView, qboolean demo
 	// decide on third person view
 	cg.renderingThirdPerson = cg.snap->ps.persistant[PERS_TEAM] != TEAM_SPECTATOR
 							&& (cg_thirdPerson.integer || (cg.snap->ps.stats[STAT_HEALTH] <= 0));
+
+	// photo mode renders the local player model like third person (so the
+	// character can be framed in screenshots) and the first-person view
+	// weapon is automatically skipped.
+	if ( CG_Photo_Active() ) {
+		cg.renderingThirdPerson = qtrue;
+	}
 
 	// build cg.refdef
 	inwater = CG_CalcViewValues();

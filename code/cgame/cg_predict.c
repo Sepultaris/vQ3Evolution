@@ -505,6 +505,12 @@ void CG_PredictPlayerState( void ) {
 		// get the command
 		trap_GetUserCmd( cmdNum, &cg_pmove.cmd );
 
+		// photo mode: the camera consumes the WASD keys itself, so the
+		// predicted player must hold still or the body would walk off
+		if ( CG_Photo_Active() ) {
+			cg_pmove.cmd.forwardmove = cg_pmove.cmd.rightmove = cg_pmove.cmd.upmove = 0;
+		}
+
 		if ( cg_pmove.pmove_fixed ) {
 			PM_UpdateViewAngles( cg_pmove.ps, &cg_pmove.cmd );
 		}

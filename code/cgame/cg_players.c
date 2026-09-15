@@ -2594,7 +2594,9 @@ void CG_Player( centity_t *cent ) {
 	//
 	// add the gun / barrel / flash
 	//
-	CG_AddPlayerWeapon( &torso, NULL, cent, ci->team );
+	if ( !( CG_Photo_Active() && cent->currentState.number == cg.snap->ps.clientNum ) ) {
+		CG_AddPlayerWeapon( &torso, NULL, cent, ci->team );
+	}
 
 	// add powerups floating behind the player
 	CG_PlayerPowerups( cent, &torso );

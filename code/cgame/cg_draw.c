@@ -2543,6 +2543,11 @@ static void CG_Draw2D(stereoFrame_t stereoFrame)
 		return;
 	}
 
+	// photo mode: clean frame for screenshots, no HUD at all
+	if ( CG_Photo_Active() ) {
+		return;
+	}
+
 	if ( cg_draw2D.integer == 0 ) {
 		return;
 	}

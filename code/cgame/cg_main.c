@@ -180,6 +180,8 @@ vmCvar_t	cg_cameraOrbitDelay;
 vmCvar_t	cg_timescaleFadeEnd;
 vmCvar_t	cg_timescaleFadeSpeed;
 vmCvar_t	cg_timescale;
+vmCvar_t	cg_photoMode;
+vmCvar_t	cg_photoSpeed;
 #ifdef MISSIONPACK
 vmCvar_t	cg_smallFont;
 vmCvar_t	cg_bigFont;
@@ -312,6 +314,8 @@ static cvarTable_t cvarTable[] = {
 #endif
 	{ &cg_cameraOrbit, "cg_cameraOrbit", "0", CVAR_CHEAT},
 	{ &cg_cameraOrbitDelay, "cg_cameraOrbitDelay", "50", CVAR_ARCHIVE},
+	{ &cg_photoMode, "cg_photoMode", "0", CVAR_ARCHIVE},
+	{ &cg_photoSpeed, "cg_photoSpeed", "800", CVAR_ARCHIVE},
 	{ &cg_timescaleFadeEnd, "cg_timescaleFadeEnd", "1", 0},
 	{ &cg_timescaleFadeSpeed, "cg_timescaleFadeSpeed", "0", 0},
 	{ &cg_timescale, "timescale", "1", 0},

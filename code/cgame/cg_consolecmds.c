@@ -432,6 +432,31 @@ static void CG_StartOrbit_f( void ) {
 }
 
 /*
+==================
+CG_PhotoMode_f
+
+Toggles the free-fly photo camera.  While active the HUD and weapon are
+hidden and the view is driven by a detached camera (mouse look, WASD move,
++movedown/+moveup vertical).  Screenshots taken in this mode also write a
+companion .json settings file.
+==================
+*/
+static void CG_PhotoMode_f( void ) {
+	if ( cg_photoMode.integer ) {
+		trap_Cvar_Set( "cg_photoMode", "0" );
+		CG_Printf( "Photo mode off\n" );
+	} else {
+		if ( !cg.snap ) {
+			CG_Printf( "Photo mode is only available in game\n" );
+			return;
+		}
+		CG_Photo_InitCamera();
+		trap_Cvar_Set( "cg_photoMode", "1" );
+		CG_Printf( "Photo mode on - mouse look, WASD to move, +moveup/+movedown vertical, +speed boost\n" );
+	}
+}
+
+/*
 static void CG_Camera_f( void ) {
 	char name[1024];
 	trap_Argv( 1, name, sizeof(name));
@@ -499,6 +524,7 @@ static consoleCommand_t	commands[] = {
 	{ "scoresUp", CG_scrollScoresUp_f },
 #endif
 	{ "startOrbit", CG_StartOrbit_f },
+	{ "photoMode", CG_PhotoMode_f },
 	//{ "camera", CG_Camera_f },
 	{ "loaddeferred", CG_LoadDeferredPlayers }	
 };

@@ -26,6 +26,7 @@ void vk_postfx_initialize(uint32_t width,uint32_t height);
 void vk_postfx_shutdown(void);
 qboolean vk_postfx_enabled(void);
 qboolean vk_postfx_get_effect(int index,postfxEffect_t *effect);
+void vk_postfx_write_json_cvars(char *buf,int bufsize,int *pos,qboolean *first);
 postfxImage_t *vk_postfx_record(VkCommandBuffer cmd,postfxImage_t *input,VkAccessFlags access,float time,uint32_t frame,const postfxDepth_t *depth);
 void vk_postfx_info_f(void);
 void vk_postfx_reload_f(void);

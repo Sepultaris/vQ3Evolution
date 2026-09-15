@@ -1174,6 +1174,8 @@ extern	vmCvar_t		cg_timescaleFadeEnd;
 extern	vmCvar_t		cg_timescaleFadeSpeed;
 extern	vmCvar_t		cg_timescale;
 extern	vmCvar_t		cg_cameraMode;
+extern	vmCvar_t		cg_photoMode;
+extern	vmCvar_t		cg_photoSpeed;
 #ifdef MISSIONPACK
 extern  vmCvar_t		cg_smallFont;
 extern  vmCvar_t		cg_bigFont;
@@ -1237,6 +1239,13 @@ void CG_ZoomUp_f( void );
 void CG_AddBufferedSound( sfxHandle_t sfx);
 
 void CG_DrawActiveFrame( int serverTime, stereoFrame_t stereoView, qboolean demoPlayback );
+
+
+//
+// cg_view.c - photo mode
+//
+qboolean CG_Photo_Active( void );
+void CG_Photo_InitCamera( void );
 
 
 //
